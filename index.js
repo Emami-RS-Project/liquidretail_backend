@@ -33,8 +33,21 @@ const app = express();
 const upload = multer({ dest: 'uploads/' });
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
+// Allowlist driven by FRONTEND_URLS env (comma-separated) — same source
+// of truth the OAuth redirect validator uses (services/frontendOrigin-
+// Validator.js). Lets us run multiple frontend deploys against this
+// backend simultaneously (e.g. staging.reach-social.io + the legacy
+// liquidretail.netlify.app during cutover) without code changes — just
+// add the origin to the env var.
+const { validateFrontendOrigin } = require('./services/frontendOriginValidator');
 app.use(cors({
-  origin: 'https://liquidretail.netlify.app',
+  origin: (origin, cb) => {
+    // Same-origin / server-to-server requests have no Origin header.
+    // cors() invokes this callback with origin=undefined in that case.
+    if (!origin) return cb(null, true);
+    if (validateFrontendOrigin(origin)) return cb(null, true);
+    return cb(new Error(`CORS: origin ${origin} not in FRONTEND_URLS allowlist`));
+  },
   credentials: true
 }));
 
