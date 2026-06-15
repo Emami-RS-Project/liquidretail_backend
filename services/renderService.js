@@ -1162,11 +1162,43 @@ async function composeVideoOutput({
     x2: Number(winner.x2), y2: Number(winner.y2)
   } : null;
 
+  // Validate the smart-crop bbox against the actual source dimensions.
+  // If the bbox exceeds source bounds Cloudinary's c_crop silently
+  // clips the requested region to the available area — output is
+  // smaller than requested — and the downstream c_lpad,w_X,h_X,b_black
+  // pads the missing pixels with BLACK. That's exactly the right-side
+  // (or bottom) black-bar pattern that's been showing up on video ads
+  // even after the canvas-aspect smart-crop fix (ae79285). Root cause
+  // is a coordinate-space mismatch: the smart-crop service produced
+  // bbox values in a space that doesn't match Cloudinary's served
+  // video resolution (could be normalized coords misinterpreted as
+  // pixels, or computed on a max-res version when Cloudinary serves
+  // a downscaled stream). Discard out-of-bounds bboxes and let the
+  // geometric centered-crop fallback below handle it instead.
+  if (smartCropBbox && media?.width && media?.height) {
+    const srcW = Number(media.width);
+    const srcH = Number(media.height);
+    const inBounds =
+      smartCropBbox.x1 >= 0 && smartCropBbox.y1 >= 0 &&
+      smartCropBbox.x2 <= srcW && smartCropBbox.y2 <= srcH &&
+      smartCropBbox.x2 > smartCropBbox.x1 &&
+      smartCropBbox.y2 > smartCropBbox.y1;
+    if (!inBounds) {
+      console.log(
+        `   📐 composeVideoOutput: smart-crop bbox ` +
+        `${smartCropBbox.x1},${smartCropBbox.y1}→${smartCropBbox.x2},${smartCropBbox.y2} ` +
+        `exceeds source ${srcW}×${srcH} for media=${media._id} — discarding, will use geometric centered crop`
+      );
+      smartCropBbox = null;
+    }
+  }
+
   // Fallback when the smart-crop pipeline didn't produce a crop for the
   // canvas ratio (cropDoc missing entirely OR smartCrops[slotRatio]
-  // empty). Without this, videoCompositeService skips c_crop and falls
-  // through to c_lpad against the SOURCE video at canvas dims — which
-  // for a portrait 9:16 source on a 1:1 canvas produces black side bars
+  // empty) OR the bbox we got was out-of-bounds and got discarded above.
+  // Without this, videoCompositeService skips c_crop and falls through
+  // to c_lpad against the SOURCE video at canvas dims — which for a
+  // portrait 9:16 source on a 1:1 canvas produces black side bars
   // because the source aspect doesn't match. Compute a centered canvas-
   // aspect bbox from media.width / media.height so the video output is
   // square regardless of source orientation. Same intent the smart-crop
