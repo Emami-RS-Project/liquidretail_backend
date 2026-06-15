@@ -32,7 +32,7 @@ const MODEL_ID            = 'gpt-4.1';
 const TEMPERATURE         = 0.85;
 const N_CANDIDATES_DEFAULT = 2;        // HTML output is ~3-5× longer than JSON spec — start conservative
 const MAX_TOKENS          = 6000;
-const HTML_SCHEMA_VERSION = '1.8.0';   // 1.8: video-overlay full-canvas safety net — when videoMode is on, mediaRect is FORCED to the full canvas (0, 0, canvasW, canvasH) regardless of what the JSON spec returned. Catches LLM disobedience to the SPEC v2.11.0 full-bleed mandate so the transparent slot always stretches edge-to-edge and the video never gets pillarboxed, letterboxed, or partially covered. 1.7: archetype-variety nudge (rule #7). 1.6: clip-path safety rule (#6). 1.5: slot detection broadened. 1.4: video-overlay initial.
+const HTML_SCHEMA_VERSION = '1.9.0';   // 1.9: video-overlay backdrop-filter ban + chrome footprint constraint. Rule #8 caps any chrome zone at 25% of canvas area and forbids edge-spanning opaque panels (the right-edge black panel pattern that exploited the v2.11.0 "no FULL canvas chrome" rule). Rule #9 forbids backdrop-filter:blur entirely — Puppeteer's omitBackground:true leaves nothing to blur, so glass_panel CSS silently degrades to flat semi-opaque rects and the LLM's frosted-glass intent dies in the pipeline. Both scoped to videoMode only — image renders keep their full vocabulary. 1.8: full-canvas mediaRect safety net. 1.7: archetype variety nudge. 1.6: clip-path safety rule. 1.5: slot detection broadened.
 
 function enabled() {
   return String(process.env.AI_HTML_LAYOUT_ENABLED || '').toLowerCase() === 'true';
@@ -429,6 +429,23 @@ function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = fa
     userLines.push(`    - F (MAGAZINE / EDITORIAL): transparent slot inset bottom-right or as a corner band, eyebrow + headline + body text stacked vertically over a solid panel filling the rest`);
     userLines.push(`    - G (STAT-LED): transparent slot inset, large numeric stat (likes, comments, etc.) rendered as the hero typographic element on a solid panel filling the rest`);
     userLines.push(`    Archetype A (bottom panel band) is fine when the Director concept calls for it — but do NOT default to it just because it's the easiest video-safe layout. The variety should come from MATCHING the strategy to the data, not from picking one safe pattern.`);
+    userLines.push(`  8. CHROME FOOTPRINT — no single chrome zone (panel, quote_card, proof_bar, card-styled container, decorative div) may cover MORE than 25% of canvas area (250,000 sq px on a 1000×1000 canvas). Additionally, NO chrome zone may span an ENTIRE canvas edge — e.g. a right-edge panel must NOT extend from y:0 to y:1000; leave at least 100px margin from at least ONE perpendicular edge so the video shows through. Concrete size envelopes that work:`);
+    userLines.push(`     - Bottom panel band: 1000×200-300 (NOT 1000×500+)`);
+    userLines.push(`     - Side strip: 300-400×600-700 (NOT 300-400×1000)`);
+    userLines.push(`     - Floating quote card: 400-600×250-350`);
+    userLines.push(`     - Corner card: 250-350×150-250`);
+    userLines.push(`     - Top edge eyebrow rule: 1000×60-100 (thin band)`);
+    userLines.push(`     Patterns that BREAK this rule (forbidden):`);
+    userLines.push(`     - <div style="right:0;top:0;width:300px;height:1000px;background:#000"> — right-edge full-height opaque panel`);
+    userLines.push(`     - <div style="left:0;top:0;width:1000px;height:500px"> — half-canvas top panel`);
+    userLines.push(`     - quote_card with width:710px and effective height 545px (38% of canvas — over the 25% cap)`);
+    userLines.push(`     - any 650×1000 editorial side panel — that's the magazine archetype's image-source pattern, NOT its video-source pattern`);
+    userLines.push(`     The video must be visible across AT LEAST 75% of canvas area. Chrome punctuates the video, never replaces it. If your archetype's image-source design wants a big panel, scale it down for video.`);
+    userLines.push(`  9. NO backdrop-filter — DO NOT use \`backdrop-filter: blur(...)\` or any other backdrop-filter value on ANY element in your HTML or CSS. The video-overlay pipeline screenshots via Puppeteer with \`omitBackground:true\`, which means there is NO backdrop to blur during the screenshot — backdrop-filter silently degrades to a no-op and your "frosted glass over video" effect becomes a flat semi-opaque rectangle in the final ad. Visual intent dies, operator sees something visibly worse than what you authored. To approximate glass without breaking:`);
+    userLines.push(`     - For translucent panels: \`background: rgba(<your color>, 0.80-0.88)\` — the video shows through 12-20% which reads as "panel over media" without needing blur`);
+    userLines.push(`     - For depth: subtle \`box-shadow: 0 4px 16px rgba(0,0,0,0.15)\` instead of blur`);
+    userLines.push(`     - For multi-tone glass: \`background: linear-gradient(...)\` at 0.80-0.88 opacity`);
+    userLines.push(`     If the Director concept's recommended_components specifies "glass_panel", interpret it as "translucent panel with rgba background at 0.80-0.88 opacity" — NEVER as backdrop-filter:blur. This is non-negotiable; the pipeline cannot render backdrop-filter and there is no workaround at render time.`);
     userLines.push(``);
   }
 
