@@ -106,14 +106,35 @@ function renderPreviewHtml({ ad, canvas, media }) {
       overflow: hidden;
       position: relative;
     }
-    .frame iframe, .frame img, .frame video {
+    .frame img, .frame video {
       width: 100%; height: 100%; object-fit: cover;
       display: block; border: none;
+    }
+    /* iframe scaler — Puppeteer captures the LLM HTML at native 1000x
+       1000 then the pipeline composites it at canvas dims. Replicate
+       here so the preview shows the FULL canvas (including any edge-
+       spanning chrome the LLM drew) scaled to fit the column, not the
+       top-left corner of an oversized page. ResizeObserver updates
+       the scale as the column width changes. */
+    .iframe-wrap {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 1000px;
+      height: 1000px;
+      transform-origin: top left;
+      transform: scale(0.4);   /* JS overrides on load + resize */
+    }
+    .iframe-wrap iframe {
+      width: 1000px;
+      height: 1000px;
+      border: 0;
+      display: block;
+      background: transparent;
     }
     .frame.with-bg {
       ${sampleBg ? `background: url('${sampleBg}') center/cover no-repeat;` : 'background: #333;'}
     }
-    .frame.with-bg iframe { background: transparent; }
     .variant-label {
       position: absolute; top: 6px; left: 6px;
       background: rgba(0,0,0,0.7); color: #fff;
@@ -147,11 +168,15 @@ function renderPreviewHtml({ ad, canvas, media }) {
       <div class="stack">
         <div class="frame">
           <span class="variant-label">over dark backdrop</span>
-          <iframe srcdoc="${htmlEscape(canvas.outputHtml)}" sandbox="allow-same-origin"></iframe>
+          <div class="iframe-wrap">
+            <iframe srcdoc="${htmlEscape(canvas.outputHtml)}" sandbox="allow-same-origin"></iframe>
+          </div>
         </div>
         <div class="frame with-bg">
           <span class="variant-label">over first-frame still</span>
-          <iframe srcdoc="${htmlEscape(canvas.outputHtml)}" sandbox="allow-same-origin"></iframe>
+          <div class="iframe-wrap">
+            <iframe srcdoc="${htmlEscape(canvas.outputHtml)}" sandbox="allow-same-origin"></iframe>
+          </div>
         </div>
       </div>
     </div>
@@ -190,6 +215,34 @@ function renderPreviewHtml({ ad, canvas, media }) {
     <p class="url-line"><a href="${sourceVideoUrl}" target="_blank" rel="noopener">${sourceVideoUrl}</a></p>
   </div>
   ` : ''}
+
+  <script>
+    // Scale every .iframe-wrap to fit its .frame container. The LLM
+    // HTML is authored at native 1000x1000 (canvas pixel space); the
+    // frame columns in this preview render at variable widths. Without
+    // scaling, the iframe shows the top-left corner of the oversized
+    // page and edge-spanning chrome bleeds out of view. We mirror what
+    // Puppeteer does at screenshot time (setViewport 1000x1000 then
+    // capture) by holding the iframe at 1000x1000 and using transform
+    // to scale it down to the frame's actual displayed width.
+    function syncIframeScales() {
+      document.querySelectorAll('.frame').forEach(frame => {
+        const wrap = frame.querySelector('.iframe-wrap');
+        if (!wrap) return;
+        const w = frame.clientWidth;
+        if (w > 0) wrap.style.transform = 'scale(' + (w / 1000) + ')';
+      });
+    }
+    syncIframeScales();
+    window.addEventListener('load', syncIframeScales);
+    window.addEventListener('resize', syncIframeScales);
+    // ResizeObserver catches column-width changes the resize event
+    // misses (grid reflow, sidebar collapse, etc.).
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(syncIframeScales);
+      document.querySelectorAll('.frame').forEach(f => ro.observe(f));
+    }
+  </script>
 
 </body>
 </html>`;
