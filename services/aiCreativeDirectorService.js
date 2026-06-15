@@ -37,7 +37,7 @@ const MAX_TOKENS  = 3500;         // bumped from 2000 — each concept ~300-400 
 // invalidates existing CreativeDirectionArtifact rows so the Director
 // re-runs and emits the new count / shape. Mirrors aiCanvasSpec-
 // Service.SPEC_SCHEMA_VERSION.
-const DIRECTOR_SIGNALS_VERSION = '2.2.0';   // 2.2: ugc_signal.file_type_distribution added — when matched media includes video, Director steers away from archetype I (ugc_x_product_split — requires two media zones, but the video composite flow only fits one). 2.1: N_CONCEPTS bump 2 → 4. 2.0: full data projection.
+const DIRECTOR_SIGNALS_VERSION = '2.3.0';   // 2.3: matchedMediaIds now queries ProductMatchArtifact directly instead of reading the denormalized product.matchedMedia array — fixes the projection gap where brand-mode runs (no product → empty array) silently sent an empty ugc_signal + empty top_comments + "absent" performance to the Director, producing safe brand-voice-led concepts with all priorities "absent". Also unifies product-mode (drops fragile denorm dependency). socialProofSignal now falls back to brand.brandReviews (quotes / rating / reviewCount) when product-level review data is missing — applies in both modes. 2.2: file_type_distribution added. 2.1: N_CONCEPTS 2 → 4. 2.0: full data projection.
 
 // Canonical archetype enum (the 8 we've been using, with descriptive
 // names matching the contract). Director picks from these; Generator
@@ -191,9 +191,28 @@ async function assembleSignals({ brandId, productId, campaignKind }) {
     productId ? CatalogProduct.findById(productId).lean() : null
   ]);
 
-  const matchedMediaIds = product?.matchedMedia
-    ? product.matchedMedia.map(mm => mm.mediaId).filter(Boolean).slice(0, 10)
-    : [];
+  // Pull matched media via ProductMatchArtifact (the canonical match
+  // store — one row per (mediaId, productId/brand) match). The previous
+  // implementation read product.matchedMedia (a denormalized array),
+  // which had two failure modes:
+  //   • brand-mode runs (productId=null): product is null → array is
+  //     empty → matchedMediaIds=[] → entire ugc_signal + top_comments
+  //     come back blank → Director sees "no media, no proof, no
+  //     engagement" and picks safe brand-voice-led concepts.
+  //   • product-mode runs where denorm sync ran late or missed: same
+  //     empty-array result despite PMAs existing for that product.
+  // Querying PMAs directly unifies both modes and removes the
+  // denormalization dependency. Top 10 by identification.certainty
+  // matches the previous .slice(0, 10) cap on richest matches.
+  const pmaFilter = productId
+    ? { catalogProductId: productId }
+    : { brandId, outcome: { $in: ['brand_match', 'product_category', 'product_match'] } };
+  const pmas = await ProductMatchArtifact.find(pmaFilter)
+    .sort({ 'identification.certainty': -1 })
+    .limit(10)
+    .select('mediaId')
+    .lean();
+  const matchedMediaIds = pmas.map(p => p.mediaId).filter(Boolean);
 
   // Pull fuller media — classification (shot type, content nature),
   // primarySubjectLabel, adSuitability score, and creator metadata.
@@ -302,15 +321,52 @@ async function assembleSignals({ brandId, productId, campaignKind }) {
   };
 
   // ── Social proof signal — real values + actual quote/comment text ──
-  const ratingValue = typeof product?.rating === 'number' && product.rating > 0 ? product.rating : null;
-  // ratingCount preference order: productReviews snapshot → reviews[] array length
-  const ratingCount = product?.productReviews?.reviewCount
-                   ?? (Array.isArray(product?.reviews) ? product.reviews.length : null);
-
+  // Product-level review data preferred; brand-level reviews supplement
+  // when the product layer is thin or missing. brand.brandReviews
+  // carries aggregated review data scraped during enrichment
+  // (WeddingWire, Trustpilot, Google Reviews, etc.) — it's the ONLY
+  // proof signal in pure-brand-mode runs, and a critical supplement
+  // for product-mode runs whose catalog SKU has zero on-platform
+  // reviews even when the parent brand has fifty across third-party
+  // sites. The Director's HONESTY RULE checks primary_quote / rating
+  // / top_comments — without this fallback brand-mode runs always
+  // tripped it and emitted social_proof_type="none" on every concept.
+  const productRatingValue = typeof product?.rating === 'number' && product.rating > 0 ? product.rating : null;
+  const productRatingCount = product?.productReviews?.reviewCount
+                          ?? (Array.isArray(product?.reviews) ? product.reviews.length : null);
   const productReviewQuotes = (Array.isArray(product?.reviews) ? product.reviews : [])
     .map(r => ({ text: r.text || r.body || r.content, author: r.author || r.reviewer || r.user_name }))
     .filter(r => typeof r.text === 'string' && r.text.trim().length > 30);
-  const primaryQuoteObj = productReviewQuotes[0] || null;
+
+  // Brand-level — only consulted to fill in what product-level missed.
+  // brandReviews.quotes can be either {text, author} objects or plain
+  // strings depending on the enrichment provider.
+  const brandReviewQuotes = (Array.isArray(brand?.brandReviews?.quotes) ? brand.brandReviews.quotes : [])
+    .map(q => {
+      if (typeof q === 'string') return { text: q, author: null };
+      return {
+        text:   q?.text   || q?.body || q?.content || null,
+        author: q?.author || q?.reviewer || q?.user_name || null
+      };
+    })
+    .filter(q => typeof q.text === 'string' && q.text.trim().length > 30);
+  const brandRatingValue = typeof brand?.brandReviews?.rating === 'number' && brand.brandReviews.rating > 0
+    ? brand.brandReviews.rating : null;
+  const brandRatingCount = brand?.brandReviews?.reviewCount || null;
+  const brandReviewSource = brand?.brandReviews?.source || null;
+
+  // Effective values — prefer product, fall back to brand.
+  const ratingValue    = productRatingValue ?? brandRatingValue;
+  const ratingCount    = productRatingCount ?? brandRatingCount;
+  const primaryQuoteObj = productReviewQuotes[0] || brandReviewQuotes[0] || null;
+  // Source attribution — null when the quote is in-catalog product
+  // review (no external attribution needed); non-null (e.g.
+  // "WeddingWire") when the quote came from the brand-level scrape.
+  // Lets the Layout Generator decide whether to surface attribution.
+  const primaryQuoteSource = (!productReviewQuotes.length && brandReviewQuotes[0])
+    ? brandReviewSource
+    : null;
+
   const topComments = topCommentsAcrossMedia.slice(0, 2).map(c => ({
     text:   snippetText(c.text || c.content, 180),
     author: c.author || c.authorUsername || null,
@@ -325,11 +381,15 @@ async function assembleSignals({ brandId, productId, campaignKind }) {
   const socialProofSignal = {
     rating: ratingValue != null ? { value: Number(ratingValue.toFixed(1)), count: ratingCount } : null,
     primary_quote: primaryQuoteObj
-      ? { text: snippetText(primaryQuoteObj.text, 200), author: primaryQuoteObj.author || null }
+      ? {
+          text:   snippetText(primaryQuoteObj.text, 200),
+          author: primaryQuoteObj.author || null,
+          source: primaryQuoteSource    // null = in-catalog product review; non-null = brand-level external review (e.g. "WeddingWire")
+        }
       : null,
     top_comments:     topComments,
     strongest_signal: strongestSignal,
-    proof_density:    productReviewQuotes.length + topComments.length      // crude richness signal
+    proof_density:    productReviewQuotes.length + brandReviewQuotes.length + topComments.length    // brand fallback contributes to richness
   };
 
   // ── Performance signal — totals + rates + per-media percentiles ──
