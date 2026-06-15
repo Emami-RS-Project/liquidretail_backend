@@ -140,6 +140,20 @@ app.use('/api/ai-layouts', requireAuth, aiLayoutRoutes);
 app.use('/api/ai-layouts/spec', requireAuth, require('./routes/aiCanvasSpec'));
 app.use('/api/catalog', requireAuth, catalogRoutes);
 app.use('/api/campaigns', requireAuth, campaignRoutes);
+// Browser-navigation auth adapter — lifts ?_token=<jwt> from the
+// query string into the Authorization header before requireAuth
+// runs. Scoped to /api/ads/:adId/preview-page so it doesn't apply
+// to API endpoints called with a real Authorization header. Lets
+// operators open the preview page directly via window.open() (which
+// can't set request headers) by embedding the JWT in the URL.
+app.use((req, res, next) => {
+  if (req.method !== 'GET') return next();
+  if (!/^\/api\/ads\/[a-f0-9]{24}\/preview-page(?:[/?]|$)/i.test(req.url)) return next();
+  if (req.headers.authorization) return next();
+  const t = (req.query && req.query._token) || null;
+  if (t && typeof t === 'string') req.headers.authorization = `Bearer ${t}`;
+  next();
+});
 app.use('/api/ads',       requireAuth, adsRoutes);
 app.use('/api/seeds',     requireAuth, seedsRoutes);
 

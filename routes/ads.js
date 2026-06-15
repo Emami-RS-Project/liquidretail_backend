@@ -29,6 +29,7 @@ const { expandWizardJob, selectAdsForRun } = require('../services/campaignAdsGen
 const { renderCreative }  = require('../services/renderService');
 const { deleteFromCloudinary } = require('../services/cloudinaryService');
 const { buildVideoCompositeUrl } = require('../services/videoCompositeService');
+const { buildPreviewHtmlForAd }  = require('../services/adPreviewPageService');
 const registry = require('../services/templateRegistry');
 
 // Lifecycle states the PATCH endpoint can flip an Ad into. queued /
@@ -839,6 +840,37 @@ router.get('/:id', async (req, res) => {
     res.json({ ad: projectAd(ad, /* full */ true) });
   } catch (err) {
     res.status(500).json({ error: err.message || 'ad fetch failed' });
+  }
+});
+
+// GET /api/ads/:adId/preview-page
+// Returns a three-column HTML page comparing LLM HTML (A) vs Puppeteer
+// overlay PNG (B) vs final composite (C). Lets operators see exactly
+// what the rendering pipeline is changing — most notably backdrop-
+// filter glass effects silently degrading because omitBackground:true
+// leaves no backdrop to blur.
+//
+// Browser navigation (window.open) can't send Authorization headers,
+// so the token-adapter middleware in index.js lifts ?_token= from the
+// query string into the Authorization header before requireAuth runs.
+// requireAuth still gates the route — the URL just needs the token
+// embedded.
+router.get('/:adId/preview-page', async (req, res) => {
+  try {
+    const html = await buildPreviewHtmlForAd(req.params.adId);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    // Don't let browsers cache the preview — outputHtml / overlay /
+    // composite can all change as the renderer re-runs.
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(html);
+  } catch (err) {
+    const status = err.status || 500;
+    res.status(status).type('text/html').send(
+      `<!DOCTYPE html><html><body style="font-family:system-ui;padding:24px;color:#900;">
+        <h1>Preview unavailable</h1>
+        <p>${err.message || 'unknown error'}</p>
+      </body></html>`
+    );
   }
 });
 
