@@ -197,6 +197,32 @@ async function loadFirstFrameCropUrl({ media, aspectRatio }) {
   return winner?.url || null;
 }
 
+// Fallback when no CropArtifact exists for the media yet — derive a
+// canvas-aspect first-frame still directly from the source video via
+// Cloudinary's so_0 (start-offset 0) transform. Same image-extraction
+// path Cloudinary uses to generate video posters; works against any
+// /video/upload/ URL without requiring the smart-crop pipeline to have
+// run. Output is a JPEG at the canvas aspect, 1024px wide — Veo 3's
+// image-to-video panel accepts that directly.
+function deriveFirstFrameUrlFromVideo(videoUrl, aspectRatio) {
+  if (!videoUrl || !videoUrl.includes('/video/upload/')) return null;
+  // Cloudinary ar_ uses colon-separated W:H. For 1.91:1 the canonical
+  // form is ar_191:100 (Cloudinary doesn't accept decimals in ar_).
+  const arParam =
+    aspectRatio === '9:16'   ? 'ar_9:16'  :
+    aspectRatio === '4:5'    ? 'ar_4:5'   :
+    aspectRatio === '5:4'    ? 'ar_5:4'   :
+    aspectRatio === '1.91:1' ? 'ar_191:100' :
+                               'ar_1:1';
+  const transform = `so_0,c_fill,${arParam},w_1024,f_jpg,q_auto:good`;
+  const transformed = videoUrl.replace('/video/upload/', `/video/upload/${transform}/`);
+  // Swap the video extension for .jpg so the Content-Type matches when
+  // operators click the URL in a browser to download for AI Studio
+  // upload. Cloudinary respects f_jpg either way, but the extension
+  // drives the response headers more reliably.
+  return transformed.replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2');
+}
+
 async function loadLayoutInput({ mediaId, productId }) {
   if (!mediaId) return null;
   return LayoutInputArtifact.findOne({
@@ -245,7 +271,12 @@ async function main() {
   const { concept, direction } = await loadConcept({
     brandId: media.brandId, productId, campaignKind, conceptId
   });
-  const firstFrameUrl = await loadFirstFrameCropUrl({ media, aspectRatio });
+  let   firstFrameUrl    = await loadFirstFrameCropUrl({ media, aspectRatio });
+  let   firstFrameSource = firstFrameUrl ? 'crop-artifact (smart-crop winner)' : null;
+  if (!firstFrameUrl) {
+    firstFrameUrl    = deriveFirstFrameUrlFromVideo(media.fileUrl, aspectRatio);
+    firstFrameSource = firstFrameUrl ? 'derived via Cloudinary so_0 first-frame transform' : null;
+  }
   const layoutInput   = await loadLayoutInput({ mediaId, productId });
 
   const prompt = buildVeoPrompt({ concept, brand, product, media });
@@ -285,7 +316,9 @@ async function main() {
   console.log(`Source video URL (for video-to-video mode):`);
   console.log(`  ${media.fileUrl}\n`);
   console.log(`First-frame still at canvas aspect ${aspectRatio} (for image-to-video — preferred):`);
-  console.log(`  ${firstFrameUrl || '(no crop artifact — fallback to source video URL above)'}\n`);
+  console.log(`  ${firstFrameUrl || '(unavailable — source is not a Cloudinary /video/upload/ URL)'}`);
+  if (firstFrameSource) console.log(`  source: ${firstFrameSource}\n`);
+  else                  console.log();
 
   console.log('── TEXT PROMPT (paste into Veo) ──');
   console.log(prompt);
