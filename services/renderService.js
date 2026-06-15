@@ -1157,10 +1157,42 @@ async function composeVideoOutput({
   const winnerId = cropDoc?.winners?.[slotRatio] || null;
   const list = cropDoc?.smartCrops?.[slotRatio] || [];
   const winner = list.find(c => c.id === winnerId) || list[0] || null;
-  const smartCropBbox = winner ? {
+  let smartCropBbox = winner ? {
     x1: Number(winner.x1), y1: Number(winner.y1),
     x2: Number(winner.x2), y2: Number(winner.y2)
   } : null;
+
+  // Fallback when the smart-crop pipeline didn't produce a crop for the
+  // canvas ratio (cropDoc missing entirely OR smartCrops[slotRatio]
+  // empty). Without this, videoCompositeService skips c_crop and falls
+  // through to c_lpad against the SOURCE video at canvas dims — which
+  // for a portrait 9:16 source on a 1:1 canvas produces black side bars
+  // because the source aspect doesn't match. Compute a centered canvas-
+  // aspect bbox from media.width / media.height so the video output is
+  // square regardless of source orientation. Same intent the smart-crop
+  // service would produce, just without subject-aware framing.
+  if (!smartCropBbox && media?.width && media?.height) {
+    const srcW = Number(media.width);
+    const srcH = Number(media.height);
+    const targetRatio = canvasDims.w / canvasDims.h;
+    let bbW, bbH;
+    if (srcW / srcH > targetRatio) {
+      // Source is wider than target — crop horizontally
+      bbH = srcH;
+      bbW = Math.round(srcH * targetRatio);
+    } else {
+      // Source is taller than target — crop vertically
+      bbW = srcW;
+      bbH = Math.round(srcW / targetRatio);
+    }
+    const bbX = Math.round((srcW - bbW) / 2);
+    const bbY = Math.round((srcH - bbH) / 2);
+    smartCropBbox = { x1: bbX, y1: bbY, x2: bbX + bbW, y2: bbY + bbH };
+    console.log(
+      `   📐 composeVideoOutput: no smart-crop for ratio ${slotRatio} on media=${media._id} — ` +
+      `falling back to centered canvas-aspect bbox ${bbW}×${bbH} from source ${srcW}×${srcH}`
+    );
+  }
 
   const compositeUrl = buildVideoCompositeUrl({
     sourceVideoUrl:  media.fileUrl,
