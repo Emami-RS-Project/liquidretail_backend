@@ -106,6 +106,23 @@ function renderPreviewHtml({ ad, canvas, media }) {
       overflow: hidden;
       position: relative;
     }
+    /* Column B (overlay PNG) — use high-contrast magenta as the frame
+       background so any opaque-vs-transparent question in the PNG is
+       immediately visible. Transparent regions show magenta; opaque
+       black regions of the PNG show through as black against magenta.
+       Without this you can't tell whether the dark areas of the PNG
+       are LLM-drawn opaque chrome (caught by rule #8 next render) or
+       the pipeline leaving the slot transparent (no LLM action needed). */
+    .frame.transparency-test {
+      background:
+        linear-gradient(45deg, rgba(255,0,255,0.45) 25%, transparent 25%),
+        linear-gradient(-45deg, rgba(255,0,255,0.45) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, rgba(255,0,255,0.45) 75%),
+        linear-gradient(-45deg, transparent 75%, rgba(255,0,255,0.45) 75%);
+      background-size: 20px 20px;
+      background-position: 0 0, 0 10px, 10px -10px, 10px 0;
+      background-color: #ff00ff;
+    }
     .frame img, .frame video {
       width: 100%; height: 100%; object-fit: cover;
       display: block; border: none;
@@ -184,8 +201,8 @@ function renderPreviewHtml({ ad, canvas, media }) {
     <div class="col">
       <h2>B · Puppeteer overlay PNG</h2>
       <p>The PNG Puppeteer screenshot produced after <code>omitBackground:true</code>. Variance vs column A reveals what the screenshot stripped — chiefly <code>backdrop-filter</code> blur (no backdrop to blur over) and any animations / transitions.</p>
-      <div class="frame">
-        <span class="variant-label">overlay PNG</span>
+      <div class="frame transparency-test">
+        <span class="variant-label">overlay PNG (magenta = transparent, black = opaque)</span>
         ${overlayUrl
           ? `<img src="${overlayUrl}" alt="Overlay PNG" />`
           : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#666;font-size:12px;">No overlay PNG (ad not rendered yet)</div>`}
