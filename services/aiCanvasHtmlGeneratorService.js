@@ -32,7 +32,7 @@ const MODEL_ID            = 'gpt-4.1';
 const TEMPERATURE         = 0.85;
 const N_CANDIDATES_DEFAULT = 2;        // HTML output is ~3-5× longer than JSON spec — start conservative
 const MAX_TOKENS          = 6000;
-const HTML_SCHEMA_VERSION = '1.9.0';   // 1.9: video-overlay backdrop-filter ban + chrome footprint constraint. Rule #8 caps any chrome zone at 25% of canvas area and forbids edge-spanning opaque panels (the right-edge black panel pattern that exploited the v2.11.0 "no FULL canvas chrome" rule). Rule #9 forbids backdrop-filter:blur entirely — Puppeteer's omitBackground:true leaves nothing to blur, so glass_panel CSS silently degrades to flat semi-opaque rects and the LLM's frosted-glass intent dies in the pipeline. Both scoped to videoMode only — image renders keep their full vocabulary. 1.8: full-canvas mediaRect safety net. 1.7: archetype variety nudge. 1.6: clip-path safety rule. 1.5: slot detection broadened.
+const HTML_SCHEMA_VERSION = '2.0.0';   // 2.0: video-overlay prompt rolled back to pipeline fundamentals only. Drops rules #3 (other zones render normally — obvious), #4 (chrome don't overlap slot — composite handles aspect now), #7 (rigid archetype recipes — was killing variety), #8 (chrome footprint 25% cap — was the wrong fix for the composite-layer black-bar bug). Also removes the mediaRect safety net that forced media zone to full canvas. ROOT CAUSE for those bands-aids was the smart-crop bbox vs Cloudinary delivery resolution mismatch — fixed properly at the composite layer in e283b6c (v2 chain uses c_fill,g_auto so slot rect dimensions are irrelevant). Restores LLM freedom to vary archetype, chrome size, and media zone placement (full bleed, inset, side strip, diagonal carve — all back on the table). Keeps rules #1 (transparent body), #2 (transparent media slot at whatever rect the spec emits), #5 (no hero_media <img>), #6 (no clip-path on text-children), #9 (no backdrop-filter) — the real pipeline constraints. 1.9: had #8 + #9. 1.8: full-canvas mediaRect safety net. 1.7: archetype variety nudge.
 
 function enabled() {
   return String(process.env.AI_HTML_LAYOUT_ENABLED || '').toLowerCase() === 'true';
@@ -119,21 +119,25 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   // the Puppeteer omitBackground screenshot yields a transparent PNG
   // Cloudinary composites over the source video.
   //
-  // SPEC v2.11.0 mandates media zone rect = full canvas + no clipPolygon
-  // for video sources (the full-bleed + overlay-only topology). The
-  // detector below still tolerates a non-canonical media zone (slot mis-
-  // match or smaller rect) for backwards-compat with caches generated
-  // pre-2.11.0, but the mediaRect handed to the prompt is FORCED to the
-  // full canvas whenever videoMode is on — this is the safety net that
-  // guarantees the transparent slot stretches edge-to-edge and the video
-  // never gets pillarboxed, letterboxed, or covered, regardless of what
-  // the JSON spec actually returned.
+  // Slot picking: prefer slot:'product.hero_media' (the canonical
+  // single-video-slot contract the JSON Gen targets per SPEC v3.0.0),
+  // fall back to largest media-kind rect for backwards-compat with
+  // pre-2.10.0 cached specs.
+  //
+  // The mediaRect handed to the prompt is whatever the spec emitted —
+  // full canvas, inset, side strip, diagonal-carve via clipPolygon, all
+  // valid. The v2 video composite chain (e283b6c) uses c_fill,g_auto at
+  // canvas aspect regardless of slot rect, so the slot rect's role is
+  // purely communicating to the LLM "make this region transparent so
+  // your design's intended video focus area reads through." Video
+  // bleeds through anywhere the overlay isn't opaque, not just at the
+  // slot rect — so chrome placement matters more than slot placement.
   //
   // No media zone at all on a video source → videoMode=false, render
   // as static PNG. composeVideoOutput returns null and the pipeline
-  // ships the static PNG as the ad. (Shouldn't happen post-2.11.0 since
-  // the JSON Gen mandates exactly one media zone — but the fallback
-  // keeps the pipeline robust to any miss.)
+  // ships the static PNG as the ad. (Shouldn't happen since the JSON
+  // Gen mandates one media zone, but the fallback keeps the pipeline
+  // robust to any miss.)
   const dims = canvasDims(canvas.aspectRatio);
   const Media = require('../models/Media');
   const sourceMedia = await Media.findById(canvas.mediaId).select('fileType').lean();
@@ -146,14 +150,7 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
     .sort((a, b) => (b.rect.w * b.rect.h) - (a.rect.w * a.rect.h))[0] || null;
   const mediaZone = heroSlotted || largestMedia;
   const videoMode = isVideoSource && !!mediaZone;
-  // Safety net — force the mediaRect to the full canvas for video sources.
-  // The SPEC v2.11.0 prompt mandates this, but if the LLM emits a smaller
-  // / clipPathed / inset media zone anyway, this guarantees the rendered
-  // overlay PNG has its transparent region at exactly (0, 0, canvasW,
-  // canvasH) so the composite chain stretches the video edge-to-edge.
-  const mediaRect = videoMode
-    ? { x: 0, y: 0, w: dims.width, h: dims.height }
-    : null;
+  const mediaRect = videoMode ? mediaZone.rect : null;
 
   const { system, user, images } = buildPrompt({
     canvas, concept, input, richContext, dims, videoMode, mediaRect
@@ -414,38 +411,13 @@ function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = fa
   //   3. Every OTHER zone (panel, headline, CTA, logo) renders
   //      normally as it would in static mode
   if (videoMode && mediaRect) {
-    userLines.push(`VIDEO-OVERLAY MODE — source media is a video. Your HTML will be screenshot with omitBackground:true and Cloudinary will composite the resulting transparent PNG over the source video. HARD REQUIREMENTS:`);
+    userLines.push(`VIDEO-OVERLAY MODE — source media is a video. Your HTML will be screenshot with omitBackground:true; transparent regions of the PNG become "video shows through" areas in the final composite. The pipeline composites the source video at canvas aspect with content-aware cropping (Cloudinary c_fill,g_auto), so the video fills the canvas — chrome placement determines what's visible, not the slot rect alone.`);
+    userLines.push(`HARD REQUIREMENTS:`);
     userLines.push(`  1. body MUST set background:transparent (NOT a hex color, NOT white). Inline style="background:transparent" on the body tag is required.`);
-    userLines.push(`  2. The media zone MUST be a transparent rectangle at EXACTLY x:${mediaRect.x}, y:${mediaRect.y}, width:${mediaRect.w}, height:${mediaRect.h}. Emit it as <div data-media-slot="true" style="position:absolute;left:${mediaRect.x}px;top:${mediaRect.y}px;width:${mediaRect.w}px;height:${mediaRect.h}px;background:transparent"></div>. NO <img> inside this rect. NO background-color, NO background-image. The Cloudinary composite layers the video underneath, so this rect MUST stay see-through.`);
-    userLines.push(`  3. Every OTHER zone (panel, headline, CTA, logo, badges, eyebrows) renders normally with opaque backgrounds and visible content as you'd author for a static ad. Those zones land ON TOP of the video.`);
-    userLines.push(`  4. Position the OTHER zones so they don't accidentally overlap the transparent slot's rect — the operator wants the video clearly visible in that area.`);
-    userLines.push(`  5. CRITICAL — DO NOT emit any <img> tag whose src is product.hero_media.image, any product.hero_media.crops.<ratio> URL, or otherwise points at the source video's frames. ANYWHERE on the canvas. The video plays UNDERNEATH the transparent slot during playback — embedding the source frame as <img> anywhere freezes that frame and covers the live playback. If your archetype calls for a "hero photo panel" / "full-bleed hero" composition, the TRANSPARENT SLOT itself IS that hero panel (the video fills it during playback, the first frame fills it on the poster). Build chrome (panels, text, CTA, logo) AROUND the slot rect — never reference product.hero_media URLs inside an <img src>. Other product imagery (product.product_image, product.lifestyle_image, brand.logo) IS allowed as <img> in non-slot zones.`);
-    userLines.push(`  6. CRITICAL — clip-path SAFETY: when you put clip-path on a panel/container (e.g. a diagonal-carve gradient panel covering part of the canvas), that container MUST NOT contain text children. The clip-path silently slices text descendants too, so right-aligned headlines inside a clipped parent get their leading characters cut off at the diagonal edge. Pattern that BREAKS: <div style="clip-path:polygon(...)"><div>Headline</div></div> — the headline gets clipped. Pattern that WORKS: emit the clip-pathed shape as a STANDALONE positioned div (no text inside), then put the headline / eyebrow / cta in SEPARATE absolutely-positioned sibling divs sized + placed to fit ENTIRELY inside the panel's visible (post-clip) region. Compute the visible region's bounds at the text's vertical position and keep the text rect strictly inside. If the archetype's diagonal/carve panel covers only the right portion of canvas, text rects belong inside that right portion — never spanning the diagonal edge.`);
-    userLines.push(`  7. VARY THE ARCHETYPE — every archetype works for video, not just "full-bleed media + bottom panel band" (archetype A). Defaulting to A across every video render produces a monoculture where promotional, ugc_led, social_proof_led, editorial, and brand_led all look identical. Pick the archetype that fits the Director concept + signal data and lean into it. Examples that compose cleanly with a transparent video slot when you use sibling positioned divs (rule #6) for any clipped shape:`);
-    userLines.push(`    - B (VERTICAL SPLIT): transparent slot fills LEFT half (rect x:0,y:0,w:500,h:1000), opaque brand panel fills RIGHT half (rect x:500,y:0,w:500,h:1000) with headline + CTA stacked inside`);
-    userLines.push(`    - C (DIAGONAL CARVE): transparent slot fills full canvas, diagonal opaque panel as a STANDALONE clip-pathed shape covering bottom-right or top-left, text in sibling absolutely-positioned divs inside the panel's visible region`);
-    userLines.push(`    - D (TYPOGRAPHIC DOMINANT): transparent slot inset to ~35% of canvas (corner or band), oversized headline occupies the rest as opaque type on a solid color block — works great for video since the slot stays meaningful at ~35%`);
-    userLines.push(`    - E (HERO QUOTE OVERLAY): transparent slot fills canvas, a floating quote_card panel overlays a safe region (avoid covering the slot's most important area) with quote text inside`);
-    userLines.push(`    - F (MAGAZINE / EDITORIAL): transparent slot inset bottom-right or as a corner band, eyebrow + headline + body text stacked vertically over a solid panel filling the rest`);
-    userLines.push(`    - G (STAT-LED): transparent slot inset, large numeric stat (likes, comments, etc.) rendered as the hero typographic element on a solid panel filling the rest`);
-    userLines.push(`    Archetype A (bottom panel band) is fine when the Director concept calls for it — but do NOT default to it just because it's the easiest video-safe layout. The variety should come from MATCHING the strategy to the data, not from picking one safe pattern.`);
-    userLines.push(`  8. CHROME FOOTPRINT — no single chrome zone (panel, quote_card, proof_bar, card-styled container, decorative div) may cover MORE than 25% of canvas area (250,000 sq px on a 1000×1000 canvas). Additionally, NO chrome zone may span an ENTIRE canvas edge — e.g. a right-edge panel must NOT extend from y:0 to y:1000; leave at least 100px margin from at least ONE perpendicular edge so the video shows through. Concrete size envelopes that work:`);
-    userLines.push(`     - Bottom panel band: 1000×200-300 (NOT 1000×500+)`);
-    userLines.push(`     - Side strip: 300-400×600-700 (NOT 300-400×1000)`);
-    userLines.push(`     - Floating quote card: 400-600×250-350`);
-    userLines.push(`     - Corner card: 250-350×150-250`);
-    userLines.push(`     - Top edge eyebrow rule: 1000×60-100 (thin band)`);
-    userLines.push(`     Patterns that BREAK this rule (forbidden):`);
-    userLines.push(`     - <div style="right:0;top:0;width:300px;height:1000px;background:#000"> — right-edge full-height opaque panel`);
-    userLines.push(`     - <div style="left:0;top:0;width:1000px;height:500px"> — half-canvas top panel`);
-    userLines.push(`     - quote_card with width:710px and effective height 545px (38% of canvas — over the 25% cap)`);
-    userLines.push(`     - any 650×1000 editorial side panel — that's the magazine archetype's image-source pattern, NOT its video-source pattern`);
-    userLines.push(`     The video must be visible across AT LEAST 75% of canvas area. Chrome punctuates the video, never replaces it. If your archetype's image-source design wants a big panel, scale it down for video.`);
-    userLines.push(`  9. NO backdrop-filter — DO NOT use \`backdrop-filter: blur(...)\` or any other backdrop-filter value on ANY element in your HTML or CSS. The video-overlay pipeline screenshots via Puppeteer with \`omitBackground:true\`, which means there is NO backdrop to blur during the screenshot — backdrop-filter silently degrades to a no-op and your "frosted glass over video" effect becomes a flat semi-opaque rectangle in the final ad. Visual intent dies, operator sees something visibly worse than what you authored. To approximate glass without breaking:`);
-    userLines.push(`     - For translucent panels: \`background: rgba(<your color>, 0.80-0.88)\` — the video shows through 12-20% which reads as "panel over media" without needing blur`);
-    userLines.push(`     - For depth: subtle \`box-shadow: 0 4px 16px rgba(0,0,0,0.15)\` instead of blur`);
-    userLines.push(`     - For multi-tone glass: \`background: linear-gradient(...)\` at 0.80-0.88 opacity`);
-    userLines.push(`     If the Director concept's recommended_components specifies "glass_panel", interpret it as "translucent panel with rgba background at 0.80-0.88 opacity" — NEVER as backdrop-filter:blur. This is non-negotiable; the pipeline cannot render backdrop-filter and there is no workaround at render time.`);
+    userLines.push(`  2. Emit the media zone as a transparent rectangle at x:${mediaRect.x}, y:${mediaRect.y}, w:${mediaRect.w}, h:${mediaRect.h} (e.g. <div data-media-slot="true" style="position:absolute;left:${mediaRect.x}px;top:${mediaRect.y}px;width:${mediaRect.w}px;height:${mediaRect.h}px;background:transparent"></div>). This communicates your design's "primary video focus area" — but the composite also bleeds video through anywhere your overlay isn't opaque, so chrome placement matters more than the slot rect's exact dimensions. The slot can be full bleed, inset, side strip, diagonal carve via clip-path — match what the canvas spec emits.`);
+    userLines.push(`  3. CRITICAL — DO NOT emit any <img> tag whose src is product.hero_media.image, any product.hero_media.crops.<ratio> URL, or otherwise points at the source video's frames. Anywhere on the canvas. The video plays UNDERNEATH the overlay during playback; embedding the source frame as <img> freezes that frame and obscures the live playback. Other product imagery (product.product_image, product.lifestyle_image, brand.logo) IS allowed as <img>.`);
+    userLines.push(`  4. CRITICAL — clip-path SAFETY: when you put clip-path on a panel/container (diagonal carve, custom shape, etc.), that container MUST NOT contain text children. The clip-path silently slices text descendants — right-aligned headlines inside a clipped parent get their leading characters cut off at the diagonal edge. Pattern that BREAKS: <div style="clip-path:polygon(...)"><div>Headline</div></div>. Pattern that WORKS: emit the clip-pathed shape as a STANDALONE positioned div (no text inside), then put the headline / eyebrow / cta in SEPARATE absolutely-positioned sibling divs sized to fit inside the panel's visible (post-clip) region.`);
+    userLines.push(`  5. NO backdrop-filter — DO NOT use \`backdrop-filter: blur(...)\` or any other backdrop-filter value on ANY element. Puppeteer's omitBackground:true leaves NO backdrop to blur during the screenshot — backdrop-filter silently degrades to a no-op and your "frosted glass over video" effect becomes a flat semi-opaque rectangle. Use \`background: rgba(<color>, 0.80-0.88)\` for translucent panels, subtle \`box-shadow\` for depth, \`background: linear-gradient(...)\` at 0.80-0.88 opacity for multi-tone glass. If recommended_components specifies "glass_panel", interpret as "translucent rgba panel" — never backdrop-filter.`);
     userLines.push(``);
   }
 
