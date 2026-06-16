@@ -44,14 +44,21 @@ router.get('/', async (req, res) => {
         status: activeAdvertiser.status
       } : null,
       // Memberships drive the workspace switcher (Phase 4.3 UI).
+      // Field names match the frontend's Membership type (auth/types.ts):
+      // { id, advertiserId, advertiserName, role, status }. Earlier
+      // version returned {name, isActive} which the BrandPicker filter
+      // `m.status === 'active'` silently dropped every membership for —
+      // the Workspaces dropdown showed the heading but no items.
       memberships: (req.allMemberships || []).map(m => {
         const a = advByid.get(String(m.advertiserId));
         return {
-          advertiserId: String(m.advertiserId),
-          name:         a?.name || '(deleted)',
-          slug:         a?.slug || null,
-          role:         m.role,
-          isActive:     String(m.advertiserId) === req.advertiserId
+          id:             String(m._id),
+          advertiserId:   String(m.advertiserId),
+          advertiserName: a?.name || '(deleted)',
+          slug:           a?.slug || null,
+          role:           m.role,
+          status:         m.status,
+          isActive:       String(m.advertiserId) === req.advertiserId
         };
       }),
       brands: (brands || []).map(b => ({
