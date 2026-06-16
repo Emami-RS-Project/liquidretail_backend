@@ -994,6 +994,7 @@ function projectAd(ad, full = false, extras = {}) {
     variantKind:        ad.variantKind,
     readinessScore:     ad.readinessScore,
     campaignKind:       ad.campaignKind,
+    platformFormat:     ad.platformFormat || 'meta_feed_1_1',
     kind:               ad.kind,
     sourceFileType:     ad.sourceFileType || null,
     renderUrl:          ad.renderUrl,

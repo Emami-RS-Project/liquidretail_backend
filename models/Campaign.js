@@ -202,6 +202,30 @@ const campaignSchema = new mongoose.Schema({
   //   }
   promotionalDetails: mongoose.Schema.Types.Mixed,
 
+  // Platform-format-aware ad generation (Phase 1a). Identifies the
+  // Meta surface this campaign targets so the Director + HTML Gen can
+  // design FOR it (canvas aspect, safe areas, archetype weighting).
+  //
+  // Phase 1a values:
+  //   meta_feed_1_1   — 1080x1080 image/video, no safe areas (default)
+  //   meta_reels_9_16 — 1080x1920 vertical video preferred, safe_top
+  //                     0-220px + safe_bottom 1558-1778px reserved
+  //                     for IG/FB UI chrome (caption, like button, etc.)
+  //
+  // Phase 1b will add meta_feed_4_5 + meta_feed_1_91_1; Phase 1c will
+  // add meta_stories_9_16. Stays enum-restricted so a typo in a sync
+  // payload doesn't quietly corrupt downstream routing.
+  //
+  // Default 'meta_feed_1_1' preserves existing behavior for legacy
+  // campaigns and matches what the LLMs were already producing (1:1
+  // canvases with no safe-area constraints).
+  platformFormat: {
+    type:    String,
+    enum:    ['meta_feed_1_1', 'meta_reels_9_16'],
+    default: 'meta_feed_1_1',
+    index:   true
+  },
+
   // Phase 2 V2 routing — uses the Director-driven Generator + Judge
   // pipeline. Default flipped to TRUE so newly-created campaigns
   // automatically pick up the new flow; existing campaigns keep their

@@ -271,6 +271,12 @@ async function expandWizardJob({
   // matches existing composition behavior (the prompt's product-mode
   // path) for any campaign whose kind wasn't explicitly set.
   const campaignKind = campaign.kind || 'product';
+  // Platform-format-aware ad generation (Phase 1a). Carried from the
+  // Campaign at queue time so every Ad row in this expansion stamps
+  // the same format; downstream services (Director, HTML Gen,
+  // validator, cache key) branch on Ad.platformFormat rather than
+  // re-joining Campaign per render.
+  const platformFormat = campaign.platformFormat || 'meta_feed_1_1';
   const promotionalDetails = campaign.promotionalDetails || null;
   const allowedTemplates = templateIds.filter(t => SUPPORTED_TEMPLATES.has(t));
   if (!allowedTemplates.length) {
@@ -404,6 +410,7 @@ async function expandWizardJob({
             template:       cell.templateId,
             aspectRatio:    cell.aspectRatio,
             campaignKind,
+            platformFormat,
             matchTier:      seed.matchTier,
             variantKind:    seed.variantKind,
             paletteSource,

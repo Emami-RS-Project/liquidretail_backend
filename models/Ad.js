@@ -57,6 +57,20 @@ const adSchema = new mongoose.Schema({
   aspectRatio:  { type: String, required: true },
   campaignKind: { type: String, default: null },                       // 'brand' | 'promotional' | 'product' | 'collection'
 
+  // Platform-format-aware ad generation (Phase 1a). Carried from the
+  // Campaign at queue time so downstream services (Director, HTML Gen,
+  // validator, AiCanvasArtifact cache key) can branch on format
+  // without re-joining Campaign per render. Defaults to
+  // 'meta_feed_1_1' to match legacy behavior on rows queued before
+  // the Phase 1a rollout. See Campaign.platformFormat for the full
+  // enum + future values.
+  platformFormat: {
+    type:    String,
+    enum:    ['meta_feed_1_1', 'meta_reels_9_16'],
+    default: 'meta_feed_1_1',
+    index:   true
+  },
+
   // Which match outcome produced this Ad. brand_only is the no-pick
   // path (no operator picks → top brand_match media wide).
   matchTier: {
