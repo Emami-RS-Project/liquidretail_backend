@@ -1193,6 +1193,99 @@ async function getOrGenerate({
     }
   }
 
+  // ── JSON Gen retirement (AI_LAYOUT_DIRECT_HTML) ───────────────────
+  // When the flag is on AND we're in V2 mode (directionConcept present),
+  // skip the entire JSON Generator pipeline: no LLM call, no Judge, no
+  // candidates. We persist a minimal AiCanvasArtifact (identity + Director
+  // FKs + platformFormat) with canvasSpec=null and let the HTML Generator
+  // produce the layout directly from the Director concept + LayoutInput.
+  // Resolver + Image-Ref shadows still fire — Resolver no-ops on a null
+  // spec; Image Ref reads copyPicks (populated by HTML Gen) instead of
+  // mining zones[]. V1 (no concept) ignores the flag — HTML Gen requires
+  // a concept and would skip anyway, so the JSON spec is the only path.
+  const directHtml = String(process.env.AI_LAYOUT_DIRECT_HTML || '').toLowerCase() === 'true';
+  if (directHtml && isV2) {
+    const artifact = await AiCanvasArtifact.findOneAndReplace(
+      filter,
+      {
+        ...filter,
+        advertiserId,
+        brandId,
+        canvasSpec:        null,
+        validationWarnings: [],
+        modelId:           MODEL_ID,
+        promptHash:        null,
+        promptSystem:      null,
+        promptUser:        null,
+        promptImages:      [],
+        rawResponse:       null,
+        rationale:         null,
+        elementsUsed:      [],
+        elementsSkipped:   [],
+        hierarchySpec:     null,
+        directionArtifactId: directionArtifactId || null,
+        directionConceptId:  directionConcept?.concept_id || null,
+        platformFormat,
+        candidates:        [],
+        candidateCount:    0,
+        winnerSpecIndex:   0,
+        judgeResultId:     null,
+        judgeRationale:    null,
+        judgeConfidence:   null,
+        specSchemaVersion: SPEC_SCHEMA_VERSION,
+        createdAt:         new Date()
+      },
+      { upsert: true, new: true, includeResultMetadata: false }
+    );
+
+    console.log(
+      `🎨 aiCanvasSpec[${template}/${aspectRatio}/${creativeStyle}]: ` +
+      `JSON Gen RETIRED (AI_LAYOUT_DIRECT_HTML=true) — minimal artifact for ` +
+      `media=${mediaId} product=${productId || '-'} concept=${v2ConceptId || '-'}`
+    );
+
+    // Resolver shadow — no-ops on a null spec (it requires zones[] to
+    // resolve slot paths) but the call is cheap and the no-op path logs
+    // a clear "skipped: no canvasSpec" reason for diagnostics.
+    setImmediate(() => {
+      const resolver = require('./layoutResolverService');
+      resolver.resolveLayout({ aiCanvasArtifactId: artifact._id })
+        .catch(() => {});
+    });
+
+    // Image-Ref shadow — kept firing so the photoreal polish runs on
+    // the HTML-rendered seed. The service polls for canvas.outputHtml
+    // until HTML Gen finishes, then proceeds with html_render mode.
+    setImmediate(() => {
+      const imgRef = require('./aiImageReferenceService');
+      if (!imgRef.enabled()) return;
+      imgRef.generateForArtifact({ aiCanvasArtifactId: artifact._id })
+        .then(out => {
+          if (out.skipped) return;
+          console.log(
+            `🖼  image-ref shadow ${out.cached ? 'CACHE-HIT' : 'GENERATED'}: ` +
+            `aiCanvasArtifact=${artifact._id}` +
+            (out.artifact?.imageUrl ? ` url=${out.artifact.imageUrl}` : '')
+          );
+        })
+        .catch(err => {
+          console.warn(`   ⚠️  image-ref shadow failed: ${err.message}`);
+        });
+    });
+
+    // No spec to apply copy picks against — return the unmodified input.
+    // Image Ref will read copyPicks off the artifact once HTML Gen writes
+    // them; renderer reads outputHtml directly. canvasSpec callers (legacy
+    // renderer paths, spec preview) get null and must branch accordingly.
+    return {
+      spec:          null,
+      cached:        false,
+      artifactId:    String(artifact._id),
+      warnings:      [],
+      resolvedInput: inputWithCandidates
+    };
+  }
+
   // Phase 2 — when V2 (directionConcept provided), compress vision
   // attachments to 512×512 max via Cloudinary q_auto:eco transforms.
   // Cuts vision tokens ~70% (Lever 3) without measurable quality loss

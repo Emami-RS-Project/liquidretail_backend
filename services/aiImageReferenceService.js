@@ -198,6 +198,7 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
     aspectRatio:   canvas.aspectRatio,
     creativeStyle: canvas.creativeStyle,
     canvasSpec:    canvas.canvasSpec,
+    copyPicks:     canvas.copyPicks || null,
     seedSource
   });
   const promptHash = sha256(prompt);
@@ -418,16 +419,27 @@ async function fetchImageBuffer(url) {
 // canvas picked, AND the actual proof data so it doesn't fabricate fake
 // testimonials/star ratings.
 
-function buildPrompt({ brand, product, media, concept, proofData, aspectRatio, creativeStyle, canvasSpec, seedSource = 'none' }) {
+function buildPrompt({ brand, product, media, concept, proofData, aspectRatio, creativeStyle, canvasSpec, copyPicks = null, seedSource = 'none' }) {
   const brandName    = brand?.name || 'the brand';
   const brandTone    = Array.isArray(brand?.tone) && brand.tone.length ? brand.tone.slice(0, 4).join(', ') : null;
 
   const productName  = product?.title    || null;
   const category     = product?.category || null;
 
-  // Pull whatever copy the canvas picked so the gen-image headline
-  // matches what the deterministic render would show.
-  const picked = pickCopyFromSpec(canvasSpec) || {};
+  // Pull whatever copy the LLM rendered so the gen-image headline
+  // matches what the layout produces. Prefer canvas.copyPicks (the
+  // HTML Generator's explicit declaration in its response) over
+  // mining zones[] off the JSON spec — copyPicks survives JSON Gen
+  // retirement (AI_LAYOUT_DIRECT_HTML=true) when canvasSpec is null.
+  const fromPicks = copyPicks && (copyPicks.headline || copyPicks.eyebrow || copyPicks.cta || copyPicks.subheadline)
+    ? {
+        headline:    copyPicks.headline    || null,
+        eyebrow:     copyPicks.eyebrow     || null,
+        cta:         copyPicks.cta         || null,
+        subheadline: copyPicks.subheadline || null
+      }
+    : null;
+  const picked = fromPicks || pickCopyFromSpec(canvasSpec) || {};
 
   const lines = [];
   lines.push(`A polished social-media advertisement at ${aspectRatio} aspect ratio.`);

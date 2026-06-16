@@ -42,6 +42,19 @@ const aiCanvasArtifactSchema = new mongoose.Schema({
   campaignContextHash: { type: String, default: null },
   paletteSource:       { type: String, default: 'media' },
 
+  // Copy the layout LLM picked — written by aiCanvasHtmlGeneratorService.
+  // Decouples downstream consumers (Image Ref) from canvasSpec — when
+  // JSON Gen is retired (AI_LAYOUT_DIRECT_HTML=true) and canvasSpec is
+  // null, Image Ref reads here instead of pickCopyFromSpec(canvasSpec).
+  // Defaults to empty {}; HTML Gen overwrites with { headline, eyebrow,
+  // cta, subheadline } strings when the LLM picks them in its response.
+  copyPicks: {
+    headline:    { type: String, default: null },
+    subheadline: { type: String, default: null },
+    eyebrow:     { type: String, default: null },
+    cta:         { type: String, default: null }
+  },
+
   // Platform-format-aware ad generation (Phase 3). Read by aiCanvas-
   // HtmlGeneratorService at generateForArtifact time to inject the
   // FORMAT CONSTRAINTS section with safe-area pixel boxes into the

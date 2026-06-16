@@ -32,7 +32,7 @@ const MODEL_ID            = 'gpt-4.1';
 const TEMPERATURE         = 0.85;
 const N_CANDIDATES_DEFAULT = 2;        // HTML output is ~3-5× longer than JSON spec — start conservative
 const MAX_TOKENS          = 6000;
-const HTML_SCHEMA_VERSION = '2.2.0';   // 2.2: platform-format-aware Phase 4 — passes platformFormat into validateCandidate so the new safe_area_violation HARD rule catches chrome that intrudes Reels reserved bands. Pairs with the JSON Gen's new FORMAT CONSTRAINTS section (SPEC 3.1.0): two LLMs + one validator all reasoning in the same safe-area pixel space. 2.1: HTML Gen format-aware prompt (Phase 3). 2.0: video-overlay prompt rolled back to pipeline fundamentals.
+const HTML_SCHEMA_VERSION = '2.3.0';   // 2.3: JSON Gen retirement (AI_LAYOUT_DIRECT_HTML flag). Response schema gains a `copy_picks` object so HTML Gen owns the final headline/eyebrow/cta/subheadline strings; persisted on AiCanvasArtifact.copyPicks for downstream consumers (Image Ref) that previously read pickCopyFromSpec(canvasSpec). Also handles canvasSpec=null gracefully: videoMode derives from sourceMedia.fileType alone, mediaRect defaults to the full canvas (so video bleeds edge-to-edge when no zones[] is available to declare a slot rect). 2.2: platform-format-aware Phase 4 — passes platformFormat into validateCandidate so the new safe_area_violation HARD rule catches chrome that intrudes Reels reserved bands. Pairs with the JSON Gen's FORMAT CONSTRAINTS section (SPEC 3.1.0): two LLMs + one validator all reasoning in the same safe-area pixel space. 2.1: HTML Gen format-aware prompt (Phase 3). 2.0: video-overlay prompt rolled back to pipeline fundamentals.
 
 function enabled() {
   return String(process.env.AI_HTML_LAYOUT_ENABLED || '').toLowerCase() === 'true';
@@ -142,6 +142,11 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   const Media = require('../models/Media');
   const sourceMedia = await Media.findById(canvas.mediaId).select('fileType').lean();
   const isVideoSource = sourceMedia?.fileType === 'video';
+  // When the JSON Gen is retired (AI_LAYOUT_DIRECT_HTML=true) the canvas
+  // arrives here with canvasSpec=null and there are no zones[] to mine
+  // for a media-slot rect. Fall back to the full canvas as the implied
+  // transparent region — the video composite chain (c_fill,g_auto) fills
+  // the canvas regardless and chrome opacity is what gates visibility.
   const mediaZones = (canvas.canvasSpec?.zones || []).filter(z =>
     z.kind === 'media' && z.rect
   );
@@ -149,8 +154,10 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   const largestMedia = mediaZones.slice()
     .sort((a, b) => (b.rect.w * b.rect.h) - (a.rect.w * a.rect.h))[0] || null;
   const mediaZone = heroSlotted || largestMedia;
-  const videoMode = isVideoSource && !!mediaZone;
-  const mediaRect = videoMode ? mediaZone.rect : null;
+  const videoMode = isVideoSource;
+  const mediaRect = videoMode
+    ? (mediaZone?.rect || { x: 0, y: 0, w: dims.width, h: dims.height })
+    : null;
 
   // Platform-format-aware ad generation (Phase 3). Read from the
   // artifact (stamped by aiCanvasSpecService.getOrGenerate, plumbed
@@ -281,8 +288,22 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
     candidateIndex:     winnerIndex
   }).select('_id').lean();
 
-  // Persist HTML + palette on the same AiCanvasArtifact. outputKind
-  // stays 'spec' for now — Phase 6.3 flips renderer to read 'html'.
+  // Pull copy_picks off the winner. Schema marks them required so the
+  // LLM always returns the object; null fields are normal (the LLM
+  // decided not to render that copy role). Persisting on copyPicks
+  // decouples Image Ref from canvasSpec — when JSON Gen is retired
+  // (AI_LAYOUT_DIRECT_HTML=true) and canvasSpec is null, Image Ref
+  // reads canvas.copyPicks instead of mining zones[].
+  const cp = winner.copy_picks || {};
+  const copyPicks = {
+    headline:    cp.headline    || null,
+    subheadline: cp.subheadline || null,
+    eyebrow:     cp.eyebrow     || null,
+    cta:         cp.cta         || null
+  };
+
+  // Persist HTML + palette + copyPicks on the same AiCanvasArtifact.
+  // outputKind stays 'spec' for now — Phase 6.3 flips renderer to read 'html'.
   await AiCanvasArtifact.updateOne(
     { _id: canvas._id },
     {
@@ -290,6 +311,7 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
         outputHtml:        winner.html || null,
         outputCss:         winner.css_extracted || null,
         colorPalette:      Array.isArray(winner.color_palette) ? winner.color_palette : [],
+        copyPicks,
         htmlSchemaVersion: HTML_SCHEMA_VERSION,
         htmlValidationId:  winnerValidationDoc?._id || null,
         // Stash the raw response for diagnostic visibility (mirrors the
@@ -413,6 +435,7 @@ function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = fa
     `  rationale        — 1-3 sentences explaining how composition serves the Director concept + which signal drove the call`,
     `  creative_style   — echo back ${creativeStyle}`,
     `  color_palette    — array of 2-5 hex strings you picked`,
+    `  copy_picks       — { headline, subheadline, eyebrow, cta } — the EXACT strings you rendered into the HTML for each role (verbatim text content, not slot names). Use null for any role you intentionally omitted. Downstream image-polish reads from here to keep its text matched to your composition; pulling from copy_candidates without echoing the pick here leaves the polish out of sync.`,
     `  elements_used    — array of role names you rendered (e.g. "hero_media","headline","cta","quote_card")`,
     `  elements_skipped — array of "<role> — <reason>" entries for things you intentionally omitted`,
     `  hierarchy_spec   — { strategy:{archetype,layout_family,emotional_hook,social_proof_type,product_priority,ugc_priority,comment_priority,stat_priority,cta_emphasis}, layout:{layout_family,visual_direction:{},zones:[{role,priority,anchor,weight,component_style}]} }`,
@@ -568,7 +591,7 @@ function buildResponseSchema() {
     schema: {
       type: 'object',
       additionalProperties: false,
-      required: ['html', 'css_extracted', 'rationale', 'creative_style', 'color_palette', 'elements_used', 'elements_skipped', 'hierarchy_spec'],
+      required: ['html', 'css_extracted', 'rationale', 'creative_style', 'color_palette', 'copy_picks', 'elements_used', 'elements_skipped', 'hierarchy_spec'],
       properties: {
         html:           { type: 'string' },
         css_extracted:  { type: 'string' },
@@ -577,6 +600,21 @@ function buildResponseSchema() {
         color_palette:  {
           type: 'array',
           items: { type: 'string' }
+        },
+        // Phase 6.5 (JSON Gen retirement) — the LLM declares which
+        // copy strings it actually rendered. Persisted on the canvas
+        // artifact's copyPicks; downstream consumers (Image Ref) read
+        // from there instead of zone-mining the canvasSpec.
+        copy_picks: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['headline', 'subheadline', 'eyebrow', 'cta'],
+          properties: {
+            headline:    { type: ['string', 'null'] },
+            subheadline: { type: ['string', 'null'] },
+            eyebrow:     { type: ['string', 'null'] },
+            cta:         { type: ['string', 'null'] }
+          }
         },
         elements_used:    { type: 'array', items: { type: 'string' } },
         elements_skipped: { type: 'array', items: { type: 'string' } },
