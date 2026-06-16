@@ -68,8 +68,11 @@ async function main() {
   const ad = await Ad.findById(args.adId).lean();
   if (!ad) die(`Ad ${args.adId} not found`);
 
-  const media = ad.mediaId ? await Media.findById(ad.mediaId).lean() : null;
-  if (!media) die(`Ad has no mediaId or Media not found`);
+  if (!ad.mediaId) {
+    die(`Ad ${args.adId} has no mediaId — likely a queued / V1-legacy / brand-only Ad row that never got linked to a source video. Pick a different ad. Tip: when you click "Preview render stages →" on the Ads UI, the new tab's URL is /api/ads/<adId>/preview-page?_token=... — copy that <adId> segment.`);
+  }
+  const media = await Media.findById(ad.mediaId).lean();
+  if (!media) die(`Ad ${args.adId} has mediaId=${ad.mediaId} but no Media doc exists with that id (deleted? cascade gap?). Inspect Ad.mediaId in mongo and reconcile.`);
 
   const cropDoc = media.latestArtifacts?.crops
     ? await CropArtifact.findById(media.latestArtifacts.crops).lean()
