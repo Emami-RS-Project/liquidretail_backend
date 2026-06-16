@@ -237,6 +237,12 @@ async function expandWizardJob({
   templateIds  = [],
   cta          = {},
   urlParams    = '',
+  // Phase 2 wizard platform-format override. null/undefined → use
+  // campaign.platformFormat (defaults to meta_feed_1_1). Operator-
+  // supplied value (from the wizard Step 1 picker) wins so a campaign
+  // tagged for Feed can still run a one-off Reels batch without
+  // mutating Campaign.platformFormat.
+  platformFormat = null,
   requestedBy  = null,
   // [{ productId, mediaId }] — globally drop these (productId, mediaId)
   // tuples from the cartesian. The wizard's Step 2 picker collects
@@ -271,12 +277,18 @@ async function expandWizardJob({
   // matches existing composition behavior (the prompt's product-mode
   // path) for any campaign whose kind wasn't explicitly set.
   const campaignKind = campaign.kind || 'product';
-  // Platform-format-aware ad generation (Phase 1a). Carried from the
-  // Campaign at queue time so every Ad row in this expansion stamps
-  // the same format; downstream services (Director, HTML Gen,
-  // validator, cache key) branch on Ad.platformFormat rather than
-  // re-joining Campaign per render.
-  const platformFormat = campaign.platformFormat || 'meta_feed_1_1';
+  // Platform-format-aware ad generation. Phase 1 plumbed Campaign.
+  // platformFormat through. Phase 2 (wizard picker) overrides per-run
+  // via the platformFormat function parameter — operator selects on
+  // Step 1 of the wizard. Wizard override wins; campaign field is the
+  // fallback for sources that don't pass it (e.g. legacy callers).
+  const ALLOWED_PLATFORM_FORMATS = ['meta_feed_1_1', 'meta_reels_9_16'];
+  const wizardFormat = platformFormat && ALLOWED_PLATFORM_FORMATS.includes(platformFormat)
+    ? platformFormat
+    : null;
+  const effectivePlatformFormat = wizardFormat
+    || campaign.platformFormat
+    || 'meta_feed_1_1';
   const promotionalDetails = campaign.promotionalDetails || null;
   const allowedTemplates = templateIds.filter(t => SUPPORTED_TEMPLATES.has(t));
   if (!allowedTemplates.length) {
@@ -410,7 +422,7 @@ async function expandWizardJob({
             template:       cell.templateId,
             aspectRatio:    cell.aspectRatio,
             campaignKind,
-            platformFormat,
+            platformFormat: effectivePlatformFormat,
             matchTier:      seed.matchTier,
             variantKind:    seed.variantKind,
             paletteSource,

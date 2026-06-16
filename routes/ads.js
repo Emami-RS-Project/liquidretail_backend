@@ -70,6 +70,7 @@ router.post('/preview', async (req, res) => {
       templateIds = [],
       cta         = {},
       urlParams   = '',
+      platformFormat = null,   // Phase 2 wizard override; null → use campaign.platformFormat
       excludePairings = [],
       includeCategoryMatched = false,
       includeBrandMatched    = false
@@ -84,6 +85,7 @@ router.post('/preview', async (req, res) => {
       templateIds,
       cta,
       urlParams,
+      platformFormat,
       excludePairings,
       includeCategoryMatched,
       includeBrandMatched,
@@ -109,6 +111,7 @@ router.post('/generate', async (req, res) => {
       templateIds = [],
       cta         = {},
       urlParams   = '',
+      platformFormat = null,   // Phase 2 wizard override; null → use campaign.platformFormat
       // [{ productId, mediaId }] — operator-deselected pairings from
       // the Step 2 picker. Forwarded into expandWizardJob to drop the
       // matching tuples from the cartesian.
@@ -154,6 +157,7 @@ router.post('/generate', async (req, res) => {
       templateIds,
       cta,
       urlParams,
+      platformFormat,
       excludePairings,
       includeCategoryMatched,
       includeBrandMatched,
