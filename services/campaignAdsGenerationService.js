@@ -558,7 +558,8 @@ async function expandWizardJob({
       brandId,
       productIds:     uniqueProductIds,
       campaignKind,
-      creativeIntent: null   // Phase 9 UX adds an operator hint here
+      creativeIntent: null,  // Phase 9 UX adds an operator hint here
+      platformFormat: effectivePlatformFormat
     }),
     runCopyDerivationEager({
       brandId,
@@ -1109,7 +1110,7 @@ async function runCopyDerivationEager({ brandId, productStylePairs }) {
 // the cartesian. Director is cache-keyed on (brandId, productId,
 // campaignKind, creativeIntent) so repeat calls are cheap. Errors are
 // swallowed — telemetry-only stage; legacy render path is unaffected.
-async function runCreativeDirectorShadow({ brandId, productIds, campaignKind, creativeIntent }) {
+async function runCreativeDirectorShadow({ brandId, productIds, campaignKind, creativeIntent, platformFormat = 'meta_feed_1_1' }) {
   if (!brandId || !Array.isArray(productIds)) return;
   const director = require('./aiCreativeDirectorService');
   const uniq = Array.from(new Set(productIds.map(String)));
@@ -1125,7 +1126,8 @@ async function runCreativeDirectorShadow({ brandId, productIds, campaignKind, cr
         brandId,
         productId:      pid,
         campaignKind,
-        creativeIntent
+        creativeIntent,
+        platformFormat
       });
       console.log(
         `🎭 creative-director shadow ${cached ? 'CACHE-HIT' : 'GENERATED'} ` +

@@ -454,6 +454,11 @@ async function renderOne(run, job, adId, index, renderToken) {
       // and brand colors. assembleInput reads it and overrides the
       // media.palette_* paths the templates bind to.
       paletteSource: ad.paletteSource || 'media',
+      // Platform-format-aware ad generation (Phase 3). Carried from
+      // the Ad row through the render pipeline so the eager-prime call
+      // chain (ensureCanvasAndHtml → getOrGenerate → HTML Gen) all
+      // see the same format and prompt their LLMs accordingly.
+      platformFormat: ad.platformFormat || 'meta_feed_1_1',
       // Per-ad raffle prize media — set when the campaign has multiple
       // prize media (Option B per-prize variants). Null on non-raffle
       // ads + single-prize raffle ads (loadContext falls back to the

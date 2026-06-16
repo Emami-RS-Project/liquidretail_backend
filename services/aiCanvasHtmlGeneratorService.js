@@ -32,7 +32,7 @@ const MODEL_ID            = 'gpt-4.1';
 const TEMPERATURE         = 0.85;
 const N_CANDIDATES_DEFAULT = 2;        // HTML output is ~3-5× longer than JSON spec — start conservative
 const MAX_TOKENS          = 6000;
-const HTML_SCHEMA_VERSION = '2.0.0';   // 2.0: video-overlay prompt rolled back to pipeline fundamentals only. Drops rules #3 (other zones render normally — obvious), #4 (chrome don't overlap slot — composite handles aspect now), #7 (rigid archetype recipes — was killing variety), #8 (chrome footprint 25% cap — was the wrong fix for the composite-layer black-bar bug). Also removes the mediaRect safety net that forced media zone to full canvas. ROOT CAUSE for those bands-aids was the smart-crop bbox vs Cloudinary delivery resolution mismatch — fixed properly at the composite layer in e283b6c (v2 chain uses c_fill,g_auto so slot rect dimensions are irrelevant). Restores LLM freedom to vary archetype, chrome size, and media zone placement (full bleed, inset, side strip, diagonal carve — all back on the table). Keeps rules #1 (transparent body), #2 (transparent media slot at whatever rect the spec emits), #5 (no hero_media <img>), #6 (no clip-path on text-children), #9 (no backdrop-filter) — the real pipeline constraints. 1.9: had #8 + #9. 1.8: full-canvas mediaRect safety net. 1.7: archetype variety nudge.
+const HTML_SCHEMA_VERSION = '2.1.0';   // 2.1: platform-format-aware (Phase 3). HTML Gen reads platformFormat from the AiCanvasArtifact and injects a FORMAT CONSTRAINTS section with safe-area pixel boxes — for meta_reels_9_16 the top 0-204px and bottom 1574-1778px bands are reserved for IG/FB UI chrome (caption + creator overlay + interaction controls), no zones may intrude. meta_feed_1_1 gets the default (no extra constraints, preserves prior behavior). 2.0: video-overlay prompt rolled back to pipeline fundamentals.
 
 function enabled() {
   return String(process.env.AI_HTML_LAYOUT_ENABLED || '').toLowerCase() === 'true';
@@ -152,8 +152,14 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   const videoMode = isVideoSource && !!mediaZone;
   const mediaRect = videoMode ? mediaZone.rect : null;
 
+  // Platform-format-aware ad generation (Phase 3). Read from the
+  // artifact (stamped by aiCanvasSpecService.getOrGenerate, plumbed
+  // from the wizard / Ad row). Drives the FORMAT CONSTRAINTS section
+  // injected into the prompt with safe-area pixel boxes for Reels.
+  const platformFormat = canvas.platformFormat || 'meta_feed_1_1';
+
   const { system, user, images } = buildPrompt({
-    canvas, concept, input, richContext, dims, videoMode, mediaRect
+    canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat
   });
 
   const nCandidates = N_CANDIDATES_DEFAULT;
@@ -316,16 +322,52 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
 
 // ── Prompt construction ──────────────────────────────────────────────
 
-function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null }) {
+// Platform-format-aware HTML constraints (Phase 3). Returns a prompt
+// block describing safe-area pixel boxes for the format. For Reels,
+// the top + bottom bands are reserved for IG/FB UI chrome (caption,
+// creator overlay, like / comment / share controls) and the LLM MUST
+// keep chrome zones inside the middle content rect. Phase 4 will add
+// the validator that catches violations as a HARD rejection.
+//
+// Pixel boxes use the normalized canvas dims (1000×1778 for 9:16
+// instead of the actual 1080×1920) so the LLM thinks in the same
+// coordinate space the rest of the prompt uses.
+function buildFormatConstraintsBlock(platformFormat, dims) {
+  if (platformFormat === 'meta_reels_9_16') {
+    // Safe areas scaled from Meta's published Reels safe zones
+    // (220px top + bottom on 1920-tall) to our 1778-tall normalized
+    // canvas: top 0-204, bottom 1574-1778 reserved.
+    return [
+      `FORMAT CONSTRAINTS — meta_reels_9_16 (Reels, vertical 9:16):`,
+      `  Canvas:             ${dims.width}×${dims.height}px (Meta delivers as 1080×1920; our normalized space is 1000×1778)`,
+      `  Reserved top band:  x:0, y:0, w:${dims.width}, h:204 — IG/FB caption + creator overlay live here`,
+      `  Reserved bottom band: x:0, y:${dims.height - 204}, w:${dims.width}, h:204 — IG/FB like / comment / share / save controls live here`,
+      `  Content safe rect:  x:0, y:204, w:${dims.width}, h:${dims.height - 408} (the middle ${Math.round(((dims.height - 408) / dims.height) * 100)}% of canvas height)`,
+      `  HARD: NO chrome (panel, text, headline, eyebrow, cta, badges, logo, quote_card, proof_bar) may render in the reserved top or bottom bands. Every chrome zone's bounding box MUST fit inside the content safe rect (y >= 204 AND y + height <= ${dims.height - 204}). Reels users see those bands COVERED by IG/FB UI in their feed — content placed there is invisible and the validator will reject your candidate as a HARD violation.`,
+      `  Media slot (transparent region for video) CAN cross the reserved bands — the video plays edge-to-edge underneath the chrome and IG's UI overlays it. Only CHROME has the safe-area constraint.`,
+      `  Composition guidance: use the middle 1338px of height as your design canvas. Bottom panel bands should end at y=${dims.height - 204} (not at canvas bottom). Top eyebrow rules should start at y=204 (not at canvas top). Floating cards / CTAs in the middle band are ideal.`
+    ].join('\n');
+  }
+  return [
+    `FORMAT CONSTRAINTS — meta_feed_1_1 (Feed, square 1:1):`,
+    `  Canvas:             ${dims.width}×${dims.height}px (Meta delivers as 1080×1080; our normalized space is 1000×1000)`,
+    `  Safe zones:         none — feed surface has no reserved bands. Chrome can use the full canvas.`
+  ].join('\n');
+}
+
+function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1' }) {
   const ctx    = richContext?.text || null;
   const images = richContext?.images || [];
   const creativeStyle = canvas.creativeStyle;
   const aspectRatio   = canvas.aspectRatio;
+  const formatConstraints = buildFormatConstraintsBlock(platformFormat, dims);
 
   const system = [
     `You are a senior creative director + frontend developer producing a single complete HTML+CSS social-media ad creative.`,
     ``,
     `Your output: ONE self-contained HTML document the renderer feeds to a headless browser via page.setContent(). It will be screenshotted at exactly ${dims.width}×${dims.height}px — every visible element must fit inside that viewport.`,
+    ``,
+    formatConstraints,
     ``,
     `HARD RULES:`,
     `- Output a complete <html>...</html> document. <head> with <meta charset>, <title>, single inline <style>. <body> with the ad's visible content.`,

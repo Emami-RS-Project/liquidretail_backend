@@ -42,6 +42,20 @@ const aiCanvasArtifactSchema = new mongoose.Schema({
   campaignContextHash: { type: String, default: null },
   paletteSource:       { type: String, default: 'media' },
 
+  // Platform-format-aware ad generation (Phase 3). Read by aiCanvas-
+  // HtmlGeneratorService at generateForArtifact time to inject the
+  // FORMAT CONSTRAINTS section with safe-area pixel boxes into the
+  // prompt. Defaults to 'meta_feed_1_1' so existing artifacts read as
+  // Feed (matches the legacy behavior). NOT yet a cache-key dimension
+  // — Phase 5 wires that. For now the schema-version bump invalidates
+  // cached artifacts so the next call regenerates with format-awareness.
+  platformFormat: {
+    type:    String,
+    enum:    ['meta_feed_1_1', 'meta_reels_9_16'],
+    default: 'meta_feed_1_1',
+    index:   true
+  },
+
   // Validated canvas spec — the actual rendering payload for the
   // outputKind='spec' path. Nullable so HTML-only generations don't
   // need to populate it. Required check moved into the service layer

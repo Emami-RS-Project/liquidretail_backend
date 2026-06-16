@@ -154,6 +154,11 @@ async function renderCreative(req) {
       aiCreativeV2,
       creativeIntent,
       campaignKind,
+      // Platform-format-aware ad generation (Phase 3). Carried from
+      // the Ad row through to ensureCanvasAndHtml → getOrGenerate →
+      // (Phase 4 HTML Gen) so all three stamp the same format on the
+      // resulting artifacts and prompt the LLMs accordingly.
+      platformFormat: req.platformFormat || 'meta_feed_1_1',
       productId:    req.creative.productId || null,
       // Phase 6.5 — campaign run id mixed into pickConceptForCell's
       // hash downstream so concept rotates batch-over-batch.
@@ -450,7 +455,8 @@ async function renderStage(args) {
         brandId:        args.brandId,
         creativeIntent: args.creativeIntent,
         campaignKind:   args.campaignKind,
-        campaignRunId:  args.campaignRunId
+        campaignRunId:  args.campaignRunId,
+        platformFormat: args.platformFormat || 'meta_feed_1_1'
       });
       primedCanvasArtifactId = primed?.aiCanvasArtifactId || null;
     } catch (err) {
@@ -514,7 +520,11 @@ async function renderStage(args) {
 // legacy spec render path so a flaky LLM never blocks a render.
 async function ensureCanvasAndHtml({
   layoutInputArtifactId, template, aspectRatio, mediaId, productId,
-  brandId, creativeIntent, campaignKind, campaignRunId
+  brandId, creativeIntent, campaignKind, campaignRunId,
+  // Platform-format-aware ad generation (Phase 3). Carried from the
+  // Ad row through the eager render flow; defaults to 'meta_feed_1_1'
+  // for callers that don't pass it (preview / preflight paths).
+  platformFormat = 'meta_feed_1_1'
 }) {
   const htmlGen = require('./aiCanvasHtmlGeneratorService');
   if (!htmlGen.enabled()) return;
@@ -572,7 +582,8 @@ async function ensureCanvasAndHtml({
       directionArtifactId,
       directionConcept,
       nCandidates:         3,
-      previewMode:         false
+      previewMode:         false,
+      platformFormat
     });
   } catch (err) {
     console.warn(`   ⚠️  [render eager] canvas prime failed: ${err.message}`);

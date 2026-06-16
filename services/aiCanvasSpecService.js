@@ -1012,7 +1012,14 @@ async function getOrGenerate({
   // Generator runs N concurrent OpenAI calls then dispatches to the
   // Judge to pick the winner.
   nCandidates         = 1,
-  previewMode         = false
+  previewMode         = false,
+  // Platform-format-aware ad generation (Phase 3). Stored on the
+  // AiCanvasArtifact so the downstream HTML Generator can read it
+  // back at generateForArtifact time and inject the FORMAT CONSTRAINTS
+  // section into its prompt. Defaults to 'meta_feed_1_1' so callers
+  // that don't pass it (legacy / preview paths) keep producing Feed-
+  // sized canvases.
+  platformFormat      = 'meta_feed_1_1'
 }) {
   if (!input)         throw new Error('input required');
   if (!template)      throw new Error('template required');
@@ -1324,6 +1331,10 @@ async function getOrGenerate({
       hierarchySpec:     winner.hierarchy_spec || null,
       directionArtifactId: directionArtifactId || null,
       directionConceptId:  directionConcept?.concept_id || null,
+      // Platform-format-aware ad generation (Phase 3). HTML Gen reads
+      // this back at generateForArtifact time to inject FORMAT
+      // CONSTRAINTS into its prompt.
+      platformFormat,
       // Phase 3 — store every candidate + winner pointer + judge link.
       candidates:        candidates.length > 1 ? candidates : [],
       candidateCount:    candidates.length,

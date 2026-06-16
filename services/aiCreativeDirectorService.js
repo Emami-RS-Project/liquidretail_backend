@@ -37,7 +37,7 @@ const MAX_TOKENS  = 3500;         // bumped from 2000 — each concept ~300-400 
 // invalidates existing CreativeDirectionArtifact rows so the Director
 // re-runs and emits the new count / shape. Mirrors aiCanvasSpec-
 // Service.SPEC_SCHEMA_VERSION.
-const DIRECTOR_SIGNALS_VERSION = '2.3.0';   // 2.3: matchedMediaIds now queries ProductMatchArtifact directly instead of reading the denormalized product.matchedMedia array — fixes the projection gap where brand-mode runs (no product → empty array) silently sent an empty ugc_signal + empty top_comments + "absent" performance to the Director, producing safe brand-voice-led concepts with all priorities "absent". Also unifies product-mode (drops fragile denorm dependency). socialProofSignal now falls back to brand.brandReviews (quotes / rating / reviewCount) when product-level review data is missing — applies in both modes. 2.2: file_type_distribution added. 2.1: N_CONCEPTS 2 → 4. 2.0: full data projection.
+const DIRECTOR_SIGNALS_VERSION = '2.4.0';   // 2.4: platform-format-aware (Phase 3). Director now receives platformFormat (meta_feed_1_1 | meta_reels_9_16) and the prompt has a FORMAT CONSTRAINTS section that weights archetypes per surface — Reels deprioritizes typographic_dominant + magazine_editorial + product_card_grid (text/inset patterns don't read on tall vertical with safe-area reservations), favors hero_quote_overlay + full_bleed_hero_bottom_panel (chrome lives in the middle safe band). 2.3: PMA-based matchedMediaIds + brand-review fallback. 2.2: file_type_distribution added. 2.1: N_CONCEPTS 2 → 4. 2.0: full data projection.
 
 // Canonical archetype enum (the 8 we've been using, with descriptive
 // names matching the contract). Director picks from these; Generator
@@ -67,6 +67,17 @@ async function directConcepts({
   productId      = null,
   campaignKind   = null,
   creativeIntent = null,
+  // Platform-format-aware ad generation (Phase 3). When supplied,
+  // gates the FORMAT CONSTRAINTS section in the prompt — Reels gets
+  // archetype weighting that deprioritizes typographic / magazine /
+  // grid patterns and favors hero_quote_overlay + full_bleed since
+  // chrome has to live in the middle safe band. Defaults to
+  // 'meta_feed_1_1' so callers that don't pass it (and any cached
+  // direction artifacts pre-Phase-3) keep producing concepts as before.
+  // NOT yet a cache-key dimension — Phase 5 wires that. For now,
+  // bumping DIRECTOR_SIGNALS_VERSION on this Phase invalidates all
+  // cached artifacts so the next call regenerates with format-awareness.
+  platformFormat = 'meta_feed_1_1',
   refresh        = false
 }) {
   if (!brandId) throw badRequest('brandId required');
@@ -103,9 +114,13 @@ async function directConcepts({
     }
   }
 
-  // Build the input_summary from the actual data
-  const inputSummary = await assembleSignals({ brandId, productId, campaignKind });
-  const { system, user } = buildPrompt({ inputSummary, creativeIntent });
+  // Build the input_summary from the actual data. platformFormat lives
+  // alongside the signal blocks so it shows up in the persisted input-
+  // Summary audit (inspectDirectorInput.js) — operators can see which
+  // format the concept was generated for.
+  const signals = await assembleSignals({ brandId, productId, campaignKind });
+  const inputSummary = { ...signals, platform_format: platformFormat };
+  const { system, user } = buildPrompt({ inputSummary, creativeIntent, platformFormat });
   const promptHash = sha256(system + '\n' + user);
 
   // OpenAI strict JSON schema constrains the output to N concepts with
@@ -460,7 +475,45 @@ function distribution(values) {
 
 // ── Prompt construction ──────────────────────────────────────────────
 
-function buildPrompt({ inputSummary, creativeIntent }) {
+// Platform-format-aware archetype weighting (Phase 3). Returns a prompt
+// block describing the canvas surface + safe areas + archetype prefs
+// per format. Empty string for the legacy meta_feed_1_1 default (no
+// extra constraints, matches what the Director was producing pre-
+// Phase-3). The Generator + Validator (Phases 3/4) enforce safe-area
+// pixel boxes; the Director just picks archetypes that work for the
+// surface.
+function buildFormatConstraints(platformFormat) {
+  if (platformFormat === 'meta_reels_9_16') {
+    return [
+      `FORMAT CONSTRAINTS — meta_reels_9_16 (Reels, vertical 9:16):`,
+      `  Canvas:        1080×1920 (delivered as 1000×1778 in our normalized space)`,
+      `  Safe zones:    top 0-220px (IG/FB caption + creator overlay) AND bottom 1558-1778px (like / comment / share controls) are RESERVED — no chrome / text / CTA in those bands`,
+      `  Content rect:  x:0, y:220, w:1000, h:1338 (the middle 75% of canvas height)`,
+      `  Media format:  video strongly preferred — Reels is a video surface and image-source ads compete poorly with native video creator content`,
+      `  ARCHETYPE WEIGHTING:`,
+      `    PREFER  hero_quote_overlay (chrome lives in middle band as floating quote_card — natural fit)`,
+      `    PREFER  full_bleed_hero_bottom_panel (the "bottom panel" lands inside the safe middle band, not in the reserved bottom strip)`,
+      `    PREFER  diagonal_carve (carved chrome inside the middle 1338px is striking on vertical)`,
+      `    DEPRIORITIZE typographic_dominant (large headline competes with IG's caption text in the top safe zone — feels visually noisy)`,
+      `    DEPRIORITIZE magazine_editorial (inset image + editorial stack reads as static on a video surface)`,
+      `    DEPRIORITIZE product_card_grid (multi-card layouts feel cramped on tall vertical)`,
+      `    AVOID        stat_led_social_proof (numeric stat as hero competes with creator-handle overlays in top safe zone)`,
+      `  Honor the safe zones in your hierarchy — every concept's chrome must fit inside the middle 1338px band. The downstream Generator + Validator will reject zones intruding the reserved bands.`
+    ].join('\n');
+  }
+  // meta_feed_1_1 — no extra constraints (default). Kept as an empty
+  // block so the prompt position stays stable; future formats slot in
+  // their own constraints without restructuring.
+  return [
+    `FORMAT CONSTRAINTS — meta_feed_1_1 (Feed, square 1:1):`,
+    `  Canvas:        1080×1080 (delivered as 1000×1000 in our normalized space)`,
+    `  Safe zones:    none — feed surface has no reserved bands`,
+    `  ARCHETYPE WEIGHTING: all archetypes work; pick by signal as usual.`
+  ].join('\n');
+}
+
+function buildPrompt({ inputSummary, creativeIntent, platformFormat = 'meta_feed_1_1' }) {
+  const formatConstraints = buildFormatConstraints(platformFormat);
   const system = [
     `You are a creative director planning social-media ad creative for a brand.`,
     ``,
@@ -472,6 +525,8 @@ function buildPrompt({ inputSummary, creativeIntent }) {
     `- Lead with the STRONGEST signal in the data. If social_proof_signal.primary_quote is present and performance is low, lean into the testimonial — don't pick a stat_led archetype.`,
     `- If a signal is "absent" / null / empty, do not build a concept around it.`,
     `- HONESTY RULE: if social_proof_signal.primary_quote is null AND top_comments is empty AND rating is null, you MUST set social_proof_type="none" on EVERY concept. Do not promise proof the data can't back. In that case, also avoid the stat_led_social_proof and hero_quote_overlay archetypes — there is nothing to surface. Lean on brand voice (typographic_dominant, magazine_editorial) or the photo itself (full_bleed_hero_bottom_panel, vertical_split, diagonal_carve).`,
+    ``,
+    formatConstraints,
     ``,
     `READING THE INPUT SUMMARY — use the FULL signal, not just strength labels:`,
     `  brand_signal.description / tagline / brand_reviews_summary → voice + emotional_hook calibration`,
