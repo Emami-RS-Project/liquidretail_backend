@@ -632,7 +632,10 @@ router.post('/preview-video-composite', express.json(), async (req, res) => {
       overlayImageUrl,
       canvasDims,
       slotRect: slotZone.rect,
-      smartCropBbox
+      smartCropBbox,
+      sourceDims: media?.width && media?.height
+        ? { w: media.width, h: media.height }
+        : null
     });
 
     res.json({

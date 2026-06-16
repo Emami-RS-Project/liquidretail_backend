@@ -67,8 +67,9 @@ function buildVideoCompositeUrl({
   overlayPublicId,   // preferred — Cloudinary public_id of the overlay PNG
   overlayImageUrl,   // fallback — full HTTPS URL (uses l_fetch)
   canvasDims,        // { w, h } in source-image pixel space (canvas template uses normalized_1000)
-  slotRect,          // { x, y, w, h } in same canvas pixel space
-  smartCropBbox      // { x1, y1, x2, y2 } in SOURCE VIDEO pixel space
+  slotRect,          // { x, y, w, h } in same canvas pixel space — kept for compat; not used in v2 chain since SPEC v2.11.0 mandates media zone covers the full canvas
+  smartCropBbox,     // { x1, y1, x2, y2 } in SOURCE VIDEO pixel space — kept for compat; UNUSED in v2 chain. See COORD-SPACE MISMATCH comment below.
+  sourceDims         // { w, h } from Media.width / Media.height — used to cap the working dimension so it doesn't exceed source resolution
 }) {
   if (!sourceVideoUrl)                 return null;
   if (!sourceVideoUrl.includes('/video/upload/')) return null;
@@ -79,65 +80,75 @@ function buildVideoCompositeUrl({
   const cw = Math.round(canvasDims.w);
   const ch = Math.round(canvasDims.h);
 
-  const slotX = Math.max(0, Math.round(slotRect.x || 0));
-  const slotY = Math.max(0, Math.round(slotRect.y || 0));
-  const slotW = Math.round(slotRect.w);
-  const slotH = Math.round(slotRect.h);
+  // COORD-SPACE MISMATCH (why the v1 c_crop+c_lpad+smartCropBbox chain
+  // was retired):
+  //
+  // The smart-crop pipeline computes bboxes in the SOURCE UPLOAD pixel
+  // space — for a 2268×4032 portrait video upload, a 1:1 smart-crop
+  // bbox might be 2268×2268. That's geometrically correct.
+  //
+  // BUT Cloudinary's video transformation pipeline doesn't operate at
+  // the full upload resolution — it caps at a delivery threshold
+  // (account-dependent, typically ~1080p / 1440p / etc). When the
+  // chain asked for c_crop,w_2268,h_2268 against an upload that
+  // Cloudinary delivers at 1206-wide, Cloudinary silently clipped the
+  // crop to what it could deliver, then c_lpad,w_2268,h_2268,b_black
+  // padded the missing pixels with BLACK to reach the declared output
+  // dimensions. Result: a 2268×2268 declared mp4 with content only in
+  // the top-left 1206×1206 region and black filling the rest. That's
+  // what was producing the persistent black bars on video composites
+  // even after the canvas-aspect smart-crop (ae79285), missing-crop
+  // fallback (3c0bb8c), and bbox in-bounds validation (bbca5be) fixes.
+  // None of those caught it because the bbox WAS in bounds of the
+  // upload dims — the upload dims just weren't the transform pipeline
+  // dims.
+  //
+  // v2 chain: drop the bbox-driven c_crop entirely. Use c_fill,ar,
+  // g_auto instead — Cloudinary handles cropping at the delivery
+  // resolution it can actually serve, content-aware via saliency
+  // gravity. Lose smart-crop subject framing in exchange for never
+  // having a coord-space mismatch.
+  //
+  // Working dim is bounded by:
+  //   1. canvas dims (don't deliver bigger than design intent)
+  //   2. source dims when known (Cloudinary won't upscale video, and
+  //      if delivered smaller than overlay-requested dim, chrome
+  //      clips at edges)
+  //   3. MAX_VIDEO_OUTPUT_DIM = 1080 — conservative cap below typical
+  //      Cloudinary video delivery thresholds
+  const MAX_VIDEO_OUTPUT_DIM = 1080;
+  const srcMin = sourceDims?.w && sourceDims?.h
+    ? Math.min(Number(sourceDims.w), Number(sourceDims.h))
+    : MAX_VIDEO_OUTPUT_DIM;
+  const canvasAspect = cw / ch;
+  let workW, workH;
+  if (canvasAspect >= 1) {
+    // square / landscape — height-bound by the smaller of the three caps
+    workH = Math.min(ch, srcMin, MAX_VIDEO_OUTPUT_DIM);
+    workW = Math.round(workH * canvasAspect);
+  } else {
+    // portrait — width-bound
+    workW = Math.min(cw, srcMin, MAX_VIDEO_OUTPUT_DIM);
+    workH = Math.round(workW / canvasAspect);
+  }
 
   const transforms = [];
 
-  // Cloudinary's video pipeline empirically refuses to upscale video
-  // beyond its source resolution — c_fill, c_scale, c_lpad all silently
-  // cap at the input's native dimensions. Working around this by
-  // anchoring the composite to the smart-cropped video's working size
-  // (effW × effH) instead of the canvas's design dimensions, and
-  // scaling the overlay DOWN to match. The browser handles display
-  // scaling — some pixel sharpness lost vs a true canvas-sized
-  // composite, but the composition itself renders correctly with the
-  // video filling the working area.
-  let effW = cw;
-  let effH = ch;
+  // 1. Crop the source to canvas aspect at the working dimensions,
+  //    using Cloudinary's content-aware gravity (g_auto). For a
+  //    portrait source on a square canvas, this is roughly the same
+  //    framing the smart-crop service would have produced — saliency-
+  //    based subject framing. The crucial difference: Cloudinary picks
+  //    the crop at its actual delivery resolution, so output is
+  //    guaranteed to match the declared dimensions. No clipping, no
+  //    padding, no black bars from the composite chain.
+  transforms.push(`c_fill,w_${workW},h_${workH},g_auto`);
 
-  // 1. Crop source video to smart-crop bbox if provided. Skipped when
-  //    no bbox — the video plays from its native frame.
-  if (smartCropBbox && smartCropBbox.x2 > smartCropBbox.x1 && smartCropBbox.y2 > smartCropBbox.y1) {
-    const sW = Math.max(1, Math.round(smartCropBbox.x2 - smartCropBbox.x1));
-    const sH = Math.max(1, Math.round(smartCropBbox.y2 - smartCropBbox.y1));
-    const sX = Math.max(0, Math.round(smartCropBbox.x1));
-    const sY = Math.max(0, Math.round(smartCropBbox.y1));
-    transforms.push(`c_crop,w_${sW},h_${sH},x_${sX},y_${sY}`);
-    // After c_crop the video is sW × sH; this is the upper bound for
-    // composite resolution since Cloudinary won't upscale from here.
-    effW = sW;
-    effH = sH;
-  }
-
-  // 2. Pad/position the cropped video into the working canvas. ALWAYS
-  //    emit c_lpad — even when the slot covers the entire canvas and
-  //    the pad would be dimensionally a no-op — because Cloudinary's
-  //    video pipeline requires a sizing/padding transform between
-  //    c_crop and fl_layer_apply for the overlay to actually apply.
-  //    Without it, the chain (c_crop → l_<overlay> → fl_layer_apply)
-  //    silently no-ops the overlay during video playback while the
-  //    image pipeline (so_0 → JPEG) still handles it correctly. Net
-  //    user-visible bug: poster shows overlay, video playback doesn't.
-  //    Slot coords are scaled from canvas-dim space into the working
-  //    dim space so the same positioning ratio applies regardless of
-  //    the working resolution.
-  const sx = Math.round(slotX * (effW / cw));
-  const sy = Math.round(slotY * (effH / ch));
-  transforms.push(`c_lpad,w_${effW},h_${effH},g_north_west,x_${sx},y_${sy},b_black`);
-  const workW = effW;
-  const workH = effH;
-
-  // 3. Apply the overlay PNG, scaled to match the working composite
-  //    dimensions. Cloudinary syntax for overlays is two slash-
-  //    separated groups:
-  //      Group A: l_<id>,<overlay's own transforms>   → sizes the overlay
-  //      Group B: fl_layer_apply,<positioning>         → composites it
-  //    Putting fl_layer_apply in the SAME comma-group as the overlay's
-  //    w/h silently breaks the layer apply — the response either 404s
-  //    or returns the base asset un-overlaid.
+  // 2. Apply the overlay PNG, scaled to match the video output dims.
+  //    Image pipeline DOES upscale, so the 1000×1000 Puppeteer overlay
+  //    scales cleanly to workW × workH. Cloudinary syntax requires the
+  //    overlay's own transforms (l_<id>,<dims>) and fl_layer_apply to
+  //    live in SEPARATE comma-groups — same constraint as v1.
   //
   //    Prefer same-cloud public_id (l_<id>) over l_fetch — empirically
   //    l_fetch against a URL pointing back at the same cloud returns

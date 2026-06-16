@@ -1232,7 +1232,10 @@ async function composeVideoOutput({
     overlayImageUrl: overlayUrl,
     canvasDims,
     slotRect: slotZone.rect,
-    smartCropBbox
+    smartCropBbox,
+    sourceDims: media?.width && media?.height
+      ? { w: media.width, h: media.height }
+      : null
   });
   if (!compositeUrl) return null;
   return { compositeUrl, slotRect: slotZone.rect, canvasDims, smartCropBbox };
