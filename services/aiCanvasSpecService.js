@@ -1067,7 +1067,14 @@ async function getOrGenerate({
 
   const filter = {
     mediaId, template, aspectRatio, productId, variantKind,
-    campaignContextHash, paletteSource, creativeStyle
+    campaignContextHash, paletteSource, creativeStyle,
+    // Phase 5: 9th cache-key dimension. The same (media × product ×
+    // template × ratio × variant × context × palette × style) combo
+    // can hold separate cached specs for Feed vs Reels since safe-area
+    // constraints + format-aware archetype picks produce different
+    // zone rects. Without this, a Reels run would silently serve a
+    // Feed-shaped spec from cache.
+    platformFormat
   };
 
   // Build the rich context FIRST (regardless of cache) so we have
@@ -1126,11 +1133,12 @@ async function getOrGenerate({
   };
 
   // Cache key serialized for cost-log grouping. Includes every cartesian
-  // dimension the AiCanvasArtifact unique index covers.
+  // dimension the AiCanvasArtifact unique index covers (9 as of Phase 5).
   const costCacheKey = JSON.stringify({
     mediaId: String(mediaId), template, aspectRatio,
     productId: productId ? String(productId) : null,
-    variantKind, campaignContextHash, paletteSource, creativeStyle
+    variantKind, campaignContextHash, paletteSource, creativeStyle,
+    platformFormat
   });
 
   // V2 cache discipline: when a Director concept is supplied, only

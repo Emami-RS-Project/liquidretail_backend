@@ -25,6 +25,14 @@ const creativeDirectionArtifactSchema = new mongoose.Schema({
   productId:      { type: mongoose.Schema.Types.ObjectId, ref: 'CatalogProduct', default: null, index: true },
   campaignKind:   { type: String, default: null },     // 'product' | 'brand' | 'promotional' | null
   creativeIntent: { type: String, default: null },     // null = "AI decides"; future: "lean editorial" etc.
+  // Platform-format-aware ad generation (Phase 5). 5th cache-key
+  // dimension so the same (brand × product × kind × intent) can hold
+  // separate concept sets for Feed vs Reels — the Director's archetype
+  // weighting differs per format (Phase 3) and Reels concepts that
+  // avoid stat_led / magazine_editorial shouldn't get reused for Feed
+  // runs that benefit from them. Default 'meta_feed_1_1' preserves
+  // legacy artifacts as Feed.
+  platformFormat: { type: String, default: 'meta_feed_1_1', index: true },
 
   // ── Contract metadata ──────────────────────────────────────────
   contractVersion:    { type: String, default: '1.0' },
@@ -62,10 +70,12 @@ const creativeDirectionArtifactSchema = new mongoose.Schema({
 });
 
 // Cache key — one artifact per unique (brand, product, campaignKind,
-// creativeIntent). Null values participate in uniqueness so a "no
-// product" brand-led concept is its own entry.
+// creativeIntent, platformFormat). Null values participate in
+// uniqueness so a "no product" brand-led concept is its own entry.
+// Phase 5 added platformFormat as the 5th dimension so Feed and Reels
+// concepts diverge — Director archetype weighting differs per format.
 creativeDirectionArtifactSchema.index(
-  { brandId: 1, productId: 1, campaignKind: 1, creativeIntent: 1 },
+  { brandId: 1, productId: 1, campaignKind: 1, creativeIntent: 1, platformFormat: 1 },
   { unique: true }
 );
 

@@ -157,8 +157,14 @@ const aiCanvasArtifactSchema = new mongoose.Schema({
   createdAt:    { type: Date, default: Date.now }
 });
 
+// Cache key — 9 dimensions as of Phase 5 (added platformFormat). The
+// same (media × product × template × ratio × variantKind × context ×
+// palette × style) combo can hold separate cached specs for Feed vs
+// Reels since the format constraints + safe areas produce different
+// zone rects + different archetype picks. Without this 9th dimension
+// a Reels run would silently serve a Feed-shaped spec from cache.
 aiCanvasArtifactSchema.index(
-  { mediaId: 1, template: 1, aspectRatio: 1, productId: 1, variantKind: 1, campaignContextHash: 1, paletteSource: 1, creativeStyle: 1 },
+  { mediaId: 1, template: 1, aspectRatio: 1, productId: 1, variantKind: 1, campaignContextHash: 1, paletteSource: 1, creativeStyle: 1, platformFormat: 1 },
   { unique: true }
 );
 

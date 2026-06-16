@@ -89,12 +89,16 @@ async function directConcepts({
     brandId,
     productId:      productId      || null,
     campaignKind:   campaignKind   || null,
-    creativeIntent: creativeIntent || null
+    creativeIntent: creativeIntent || null,
+    // Phase 5: platformFormat is the 5th cache-key dimension so the
+    // Director picks separate concept sets per Meta surface (Reels
+    // archetype weighting != Feed archetype weighting).
+    platformFormat: platformFormat
   };
   const cacheKey = JSON.stringify({
     brandId: String(brandId),
     productId: productId ? String(productId) : null,
-    campaignKind, creativeIntent
+    campaignKind, creativeIntent, platformFormat
   });
 
   if (!refresh) {

@@ -333,6 +333,23 @@ async function expandWizardJob({
     }
   }
 
+  // Platform-format-aware silent drop (Phase 5). Reels is a video-
+  // first surface; image-only seeds composite as still-on-video which
+  // looks visibly bad on the IG/FB Reels feed (no native motion in a
+  // motion-expected surface). When the operator picks Reels, silently
+  // drop image-only seeds rather than refuse the run or warn — matches
+  // the backlog Q3 lean (silent drop, operator doesn't have to triage
+  // per-seed media type). Variant_kind='product_image' seeds are also
+  // image-only by construction so they get dropped too.
+  if (effectivePlatformFormat === 'meta_reels_9_16') {
+    const before = seeds.length;
+    seeds = seeds.filter(s => s.fileType === 'video' && s.variantKind !== 'product_image');
+    const dropped = before - seeds.length;
+    if (dropped > 0) {
+      console.log(`📦 expandWizardJob: Reels image-only filter dropped ${dropped} seed(s) (${seeds.length} video seed(s) remain)`);
+    }
+  }
+
   // Apply operator exclusions BEFORE dedup so the dedup keys aren't
   // reused by an excluded pair (defensive — dedup compares whole tuple
   // including productId, so this is belt+braces).
