@@ -36,8 +36,26 @@ const HARD_VIOLATION_CODES = new Set([
   'no_body',
   'has_script',
   'proof_strategy_unsupported',
-  'image_url_disallowed_host'
+  'image_url_disallowed_host',
+  'safe_area_violation'   // Phase 4: chrome zone intrudes the format's reserved safe-area band (e.g. Reels top/bottom UI strips)
 ]);
+
+// Platform-format-aware safe areas (Phase 4). For each format, returns
+// the reserved top + bottom band heights in our normalized canvas
+// space. Mirrors the pixel boxes in aiCanvasSpecService.buildFormat-
+// ConstraintsBlock and aiCanvasHtmlGeneratorService.buildFormat-
+// ConstraintsBlock — same coords so all three reason in the same space.
+// Returns null when the format has no reserved bands (Feed). canvasH
+// is the actual canvas height the candidate targets, so safe-area
+// proportions scale correctly for non-standard heights.
+function safeBandsForFormat(platformFormat, canvasH) {
+  if (platformFormat === 'meta_reels_9_16') {
+    // Scaled from Meta's 220px top + bottom on 1920-tall to canvas height.
+    const top = Math.round(204 * (canvasH / 1778));
+    return { top, bottom: top };  // symmetric, both bands are equal height
+  }
+  return null;
+}
 
 // Allowlist of hosts the renderer's image fetches actually reach. Any
 // <img src> with a host outside this set is a hallucinated URL — the
@@ -79,7 +97,15 @@ async function validateCandidate(html, {
   aspectRatio,
   hierarchySpec = null,
   candidateIndex = 0,
-  colorPalette = []
+  colorPalette = [],
+  // Platform-format-aware safe-area check (Phase 4). When set to a
+  // format with reserved bands (e.g. meta_reels_9_16), the validator
+  // bounds-checks every absolutely-positioned chrome element against
+  // the band rects and raises a safe_area_violation HARD violation
+  // for any intrusion. Defaults to 'meta_feed_1_1' (no reserved bands)
+  // so callers that don't pass it (preview / preflight paths) behave
+  // as before.
+  platformFormat = 'meta_feed_1_1'
 } = {}) {
   const warnings = [];
   const hardViolations = new Set();
@@ -170,6 +196,31 @@ async function validateCandidate(html, {
       code: 'proof_strategy_unsupported',
       message: `hierarchy_spec.strategy.social_proof_type="${hierarchySpec?.strategy?.social_proof_type}" but no proof-bearing zone in layout.zones[]`
     });
+  }
+
+  // 6a. Platform-format safe-area check (Phase 4). For formats with
+  //     reserved bands (e.g. Reels top + bottom UI strips), find every
+  //     absolutely-positioned chrome element with explicit top + height
+  //     in px and check if its bounds intrude either band. Skips data-
+  //     media-slot elements (transparent video regions can cross the
+  //     bands — IG's UI just overlays the video). Documented limits:
+  //     CSS using %, vw, or `bottom:`-based positioning is NOT caught
+  //     here — prompt FORMAT CONSTRAINTS handles those via instruction.
+  const canvasDims = aspectRatioDims(aspectRatio);
+  const bands = safeBandsForFormat(platformFormat, canvasDims.h);
+  if (bands) {
+    const violations = findSafeAreaViolations(html, bands, canvasDims.h);
+    if (violations.length) {
+      hardViolations.add('safe_area_violation');
+      violations.forEach(v => {
+        warnings.push({
+          severity: 'high',
+          code: 'safe_area_violation',
+          message: `Chrome element at top:${v.top}px h:${v.height}px (bottom edge y:${v.top + v.height}) intrudes ${v.band} reserved band (${platformFormat}). Reserved: top 0-${bands.top} + bottom ${canvasDims.h - bands.bottom}-${canvasDims.h}.`,
+          locator: v.locator
+        });
+      });
+    }
   }
 
   // 6. Color palette sanity — at least 2 colors with one combo above AA.
@@ -467,6 +518,76 @@ function relativeLuminance(hex) {
   const b = parseInt(h.slice(5, 7), 16) / 255;
   const channel = (c) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
   return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+}
+
+// ── Safe-area check (Phase 4) ────────────────────────────────────────
+
+// Canvas dims for each aspect ratio. Mirrors aiCanvasHtmlGenerator-
+// Service.canvasDims + aiCanvasSpecService.parseRatio so the validator
+// uses the same coords the LLM was given.
+function aspectRatioDims(aspectRatio) {
+  switch (String(aspectRatio || '').trim()) {
+    case '1:1':    return { w: 1000, h: 1000 };
+    case '4:5':    return { w: 1000, h: 1250 };
+    case '5:4':    return { w: 1250, h: 1000 };
+    case '9:16':   return { w: 1000, h: 1778 };
+    case '1.91:1': return { w: 1500, h: 785 };
+    default:       return { w: 1000, h: 1000 };
+  }
+}
+
+// Scan absolutely-positioned chrome elements in the HTML and bound-
+// check their top + height against the format's reserved bands.
+// Returns an array of violations: [{ top, height, band, locator }].
+// Limitations (documented — prompt FORMAT CONSTRAINTS handles these):
+//   - Only catches inline styles or single-rule inline <style> blocks
+//     with explicit "top:Npx" and "height:Npx"
+//   - CSS using %, vw, calc(), or bottom:-based positioning is NOT
+//     parsed — those slip through, validator only catches the obvious
+//     cases
+//   - Skips data-media-slot elements — transparent video regions can
+//     legitimately cross the bands since IG's UI just overlays the video
+function findSafeAreaViolations(html, bands, canvasH) {
+  const safeTop    = bands.top;
+  const safeBottom = canvasH - bands.bottom;
+  const violations = [];
+
+  // Match absolutely-positioned elements with top + height in px.
+  // Inline style attribute form: style="...top:50px;...height:200px;...".
+  // Tag has to actually contain position:absolute somewhere — we accept
+  // it either in the same style attribute OR via a class with an inline
+  // <style> block higher up that sets it.
+  const tagRe = /<(\w+)([^>]*)>/g;
+  let m;
+  while ((m = tagRe.exec(html)) !== null) {
+    const fullTag = m[0];
+    const tagName = m[1].toLowerCase();
+    const attrs   = m[2] || '';
+    // Skip non-chrome elements
+    if (['html', 'head', 'meta', 'title', 'style', 'script', 'link', 'body'].includes(tagName)) continue;
+    // Skip the transparent media slot — video legitimately crosses bands
+    if (/data-media-slot\s*=\s*"true"/i.test(attrs)) continue;
+    // Only inspect inline styles for now (most LLM output uses inline)
+    const styleMatch = attrs.match(/style\s*=\s*"([^"]+)"/i);
+    if (!styleMatch) continue;
+    const inline = styleMatch[1].toLowerCase();
+    if (!/position\s*:\s*absolute/.test(inline)) continue;
+    const topMatch    = inline.match(/(?:^|;|\s)top\s*:\s*(\d+)\s*px/);
+    const heightMatch = inline.match(/(?:^|;|\s)height\s*:\s*(\d+)\s*px/);
+    if (!topMatch || !heightMatch) continue;
+    const top    = Number(topMatch[1]);
+    const height = Number(heightMatch[1]);
+    const bottomEdge = top + height;
+
+    let band = null;
+    if (top < safeTop)              band = 'top';
+    else if (bottomEdge > safeBottom) band = 'bottom';
+    if (!band) continue;
+    // Bound the locator string so logs / artifacts don't bloat
+    const locator = fullTag.slice(0, 120) + (fullTag.length > 120 ? '…' : '');
+    violations.push({ top, height, band, locator });
+  }
+  return violations;
 }
 
 // ── Proof-strategy compliance ────────────────────────────────────────

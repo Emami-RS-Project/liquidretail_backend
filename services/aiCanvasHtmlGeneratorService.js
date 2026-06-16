@@ -32,7 +32,7 @@ const MODEL_ID            = 'gpt-4.1';
 const TEMPERATURE         = 0.85;
 const N_CANDIDATES_DEFAULT = 2;        // HTML output is ~3-5× longer than JSON spec — start conservative
 const MAX_TOKENS          = 6000;
-const HTML_SCHEMA_VERSION = '2.1.0';   // 2.1: platform-format-aware (Phase 3). HTML Gen reads platformFormat from the AiCanvasArtifact and injects a FORMAT CONSTRAINTS section with safe-area pixel boxes — for meta_reels_9_16 the top 0-204px and bottom 1574-1778px bands are reserved for IG/FB UI chrome (caption + creator overlay + interaction controls), no zones may intrude. meta_feed_1_1 gets the default (no extra constraints, preserves prior behavior). 2.0: video-overlay prompt rolled back to pipeline fundamentals.
+const HTML_SCHEMA_VERSION = '2.2.0';   // 2.2: platform-format-aware Phase 4 — passes platformFormat into validateCandidate so the new safe_area_violation HARD rule catches chrome that intrudes Reels reserved bands. Pairs with the JSON Gen's new FORMAT CONSTRAINTS section (SPEC 3.1.0): two LLMs + one validator all reasoning in the same safe-area pixel space. 2.1: HTML Gen format-aware prompt (Phase 3). 2.0: video-overlay prompt rolled back to pipeline fundamentals.
 
 function enabled() {
   return String(process.env.AI_HTML_LAYOUT_ENABLED || '').toLowerCase() === 'true';
@@ -224,7 +224,8 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
     aspectRatio:   canvas.aspectRatio,
     hierarchySpec: c.hierarchy_spec || null,
     candidateIndex: i,
-    colorPalette:  Array.isArray(c.color_palette) ? c.color_palette : []
+    colorPalette:  Array.isArray(c.color_palette) ? c.color_palette : [],
+    platformFormat
   })));
 
   // Replace-on-re-run via the unique (aiCanvasArtifactId, candidateIndex)

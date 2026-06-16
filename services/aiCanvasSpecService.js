@@ -40,7 +40,7 @@ const { trackLlmCall, recordCacheHit } = require('./costTracker');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const MODEL_ID = 'gpt-4.1';
-const SPEC_SCHEMA_VERSION = '3.0.0';   // 3.0: video-source topology mandate rolled back. v2.11.0 forced media zone = full canvas with no clipPolygon to work around composite-layer black-bar bugs; those bugs are now fixed at the composite layer (videoCompositeService v2 chain uses Cloudinary c_fill,g_auto so the video fills the canvas regardless of slot rect dimensions). Restores LLM design freedom: media zone can be ANY rect (full bleed, inset, side strip, corner, diagonal carve via clipPolygon — pick what serves the archetype). Still required: kind:'media' + slot:'product.hero_media' specifically, no archetype I for video (composite chain supports one media slot), no full-canvas opaque chrome panel (hides the video). 2.11: topology mandate (rolled back). 2.10: slot tightened to product.hero_media. 2.9: video-source media zone REQUIRED.
+const SPEC_SCHEMA_VERSION = '3.1.0';   // 3.1: platform-format-aware (Phase 4). JSON Gen now receives platformFormat and the prompt has a FORMAT CONSTRAINTS section with safe-area pixel boxes — for meta_reels_9_16, every chrome zone (kind != "media") must fit inside the content safe rect (y >= safeTop AND y + h <= safeBottom). Pairs with htmlValidationService safe_area_violation HARD rule: specs whose chrome zones intrude either reserved band get rejected pre-Judge. Media zones can still cross the safe areas — video plays edge-to-edge under IG's UI. 3.0: video topology mandate rolled back. 2.11: topology mandate (rolled back). 2.10: slot tightened to product.hero_media.
 
 // Creative style menu. Each entry is a short guidance block injected
 // into the prompt. Add styles here as they come online.
@@ -441,11 +441,44 @@ function buildResponseSchema(aspectRatio) {
 }
 
 // ── Prompt construction ─────────────────────────────────────────────
-function buildPrompt({ input, template, aspectRatio, creativeStyle, richContext, directionConcept = null }) {
+// Platform-format-aware spec constraints (Phase 4). Returns a prompt
+// block with safe-area pixel boxes that zone rects must respect. For
+// Reels, the top + bottom bands are reserved for IG/FB UI chrome; the
+// validator (htmlValidationService safe_area_violation HARD rule)
+// rejects any spec whose chrome zones intrude. Mirrors the HTML Gen
+// FORMAT CONSTRAINTS pixel boxes from Phase 3 — same coords so both
+// LLMs reason in the same space.
+function buildFormatConstraintsBlock(platformFormat, width, height) {
+  if (platformFormat === 'meta_reels_9_16') {
+    // Safe areas scaled from Meta's published Reels safe zones
+    // (220px top + bottom on 1920-tall) to our 1778-tall normalized
+    // canvas: top 0-204, bottom 1574-1778 reserved.
+    const safeTop = Math.round(204 * (height / 1778));
+    const safeBottom = height - safeTop;
+    return [
+      `FORMAT CONSTRAINTS — meta_reels_9_16 (Reels, vertical 9:16):`,
+      `  Canvas:             ${width}×${height} (Meta delivers as 1080×1920; our normalized space is 1000×1778)`,
+      `  Reserved top band:  rect {x:0, y:0, w:${width}, h:${safeTop}} — IG/FB caption + creator overlay live here`,
+      `  Reserved bottom band: rect {x:0, y:${safeBottom}, w:${width}, h:${safeTop}} — IG/FB like / comment / share / save controls live here`,
+      `  Content safe rect:  {x:0, y:${safeTop}, w:${width}, h:${safeBottom - safeTop}} (the middle ~${Math.round(((safeBottom - safeTop) / height) * 100)}% of canvas height)`,
+      `  HARD: every chrome zone you emit (kind != "media") MUST fit entirely inside the content safe rect — rect.y >= ${safeTop} AND rect.y + rect.h <= ${safeBottom}. The validator will REJECT specs whose chrome zones intrude either reserved band as a safe_area_violation HARD failure; your candidate gets dropped pre-Judge.`,
+      `  Media zones (kind === "media") CAN cross the reserved bands — the video plays edge-to-edge underneath IG's UI overlays.`,
+      `  Composition guidance: think of the canvas as having ONLY the middle ${safeBottom - safeTop}px of vertical space for chrome. Bottom panel bands should end at y=${safeBottom} (NOT y=${height}). Top eyebrow rules should start at y=${safeTop} (NOT y=0). Floating cards / CTAs in the middle band are ideal.`
+    ].join('\n');
+  }
+  return [
+    `FORMAT CONSTRAINTS — meta_feed_1_1 (Feed, square 1:1):`,
+    `  Canvas:             ${width}×${height} (Meta delivers as 1080×1080; our normalized space is 1000×1000)`,
+    `  Safe zones:         none — feed surface has no reserved bands. Chrome can use the full canvas.`
+  ].join('\n');
+}
+
+function buildPrompt({ input, template, aspectRatio, creativeStyle, richContext, directionConcept = null, platformFormat = 'meta_feed_1_1' }) {
   const styleSpec = CREATIVE_STYLES[creativeStyle];
   if (!styleSpec) throw new Error(`Unknown creativeStyle: ${creativeStyle}`);
 
   const { width, height } = parseRatio(aspectRatio);
+  const formatConstraints = buildFormatConstraintsBlock(platformFormat, width, height);
 
   // Rich context — the structured payload from aiCanvasInputBuilder.
   // Fall back to a minimal text-only block when richContext isn't
@@ -458,6 +491,8 @@ function buildPrompt({ input, template, aspectRatio, creativeStyle, richContext,
     ``,
     `Coordinate system: normalized 0–1000 along BOTH axes. Width=${width}, Height=${height}. All rect.x + rect.w must stay <= width and rect.y + rect.h <= height.`,
     `Every zone gets a rect, a kind, a layer, and (when it carries content) a slot path the renderer resolves against the input data.`,
+    ``,
+    formatConstraints,
     ``,
     `ZONE PALETTE (pick what serves the creative — none are mandatory): logo, cta, headline, support_media, panel, eyebrow_rules, proof_bar, quote_card, product_card, badge_row, text.`,
     `Compose freely — an editorial frame can skip the logo, a pure hero-quote can skip the product_card, a typographic ad can skip support_media.`,
@@ -1164,7 +1199,7 @@ async function getOrGenerate({
     richContext = { ...richContext, images: compressVisionAttachments(richContext.images, 512) };
   }
 
-  const { system, user } = buildPrompt({ input, template, aspectRatio, creativeStyle, richContext, directionConcept });
+  const { system, user } = buildPrompt({ input, template, aspectRatio, creativeStyle, richContext, directionConcept, platformFormat });
   const responseSchema = buildResponseSchema(aspectRatio);
   const promptHash = crypto.createHash('sha256').update(system + '\n' + user).digest('hex');
 
