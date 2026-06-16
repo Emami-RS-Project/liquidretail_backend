@@ -435,14 +435,7 @@ function buildPrompt({ brand, product, media, concept, proofData, aspectRatio, c
   // gets a "refine this design" ask; product/UGC photo seed gets the
   // existing "compose ad around this photo" ask.
   if (seedSource === 'html_render') {
-    lines.push(`The provided reference image is a draft of the ad's composition rendered from HTML. Your job is photoreal POLISH, NOT reinvention. PRESERVE every visual element exactly as positioned in the seed:`);
-    lines.push(``);
-    lines.push(`- PRODUCT IMAGERY: any image embedded in the seed IS the real product photography this brand uses — whether it's a clean bottle/jar/package shot, a texture swatch, an ingredient closeup, a lifestyle scene, a flat-lay, or a packaging detail. ALL of these are legitimate, intentional product imagery and MUST be preserved exactly: same content, same shape, same composition. DO NOT substitute the seed image with what you imagine the "real" product should look like (bottles, jars, packaging) from your training memory. If the seed shows a cream swatch, the final ad shows a cream swatch — your job is to render it photoreal-crisp, NOT to replace it with a bottle.`);
-    lines.push(`- TEXT CONTENT: every character, word, font weight, kerning, and color exactly as in the seed. No edits, no rephrasing, no substitutions.`);
-    lines.push(`- LAYOUT GEOMETRY: zone positions, panel rects, edge margins, alignment all identical to the seed.`);
-    lines.push(`- COLOR PALETTE: the chosen colors in the seed are the final palette. Preserve them.`);
-    lines.push(``);
-    lines.push(`Your refinement scope is LIMITED to: typography rendering quality (smoother anti-aliasing, crisper edges), subtle photoreal lighting and soft shadows under existing elements, background gradients refined to photoreal quality, and overall image fidelity (sharper than the HTML draft). The composition is FINAL — your job is to make the seed look like a finished ad, not to redesign it.`);
+    lines.push(`The provided reference image is a draft of the ad's composition (rendered from HTML). REFINE it into a polished photoreal version while keeping the LAYOUT, hierarchy, text content, and image positions intact. Replace any rendered product photography in the draft with photoreal product imagery; replace placeholder background colors with cohesive photoreal backgrounds; smooth typography rendering; preserve all text exactly as it appears. The composition is given — your job is to make it look like a finished ad.`);
   } else if (seedSource === 'catalog-hero' || seedSource === 'ugc-source') {
     lines.push(`The provided reference image shows the actual product. Preserve the product's identity, shape, color, label, and packaging exactly — do NOT redesign the product. You may reframe it, recolor the background, change the composition, add overlays, etc.`);
   } else {
