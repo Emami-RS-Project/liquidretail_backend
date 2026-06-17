@@ -496,7 +496,23 @@ async function renderStage(args) {
       const htmlCandidate = await lookupHtmlCandidate({
         layoutInputArtifactId, template, aspectRatio, mediaId, productId
       });
-      if (htmlCandidate?.outputHtml && !htmlCandidate.hasHardViolations) {
+      // When AI_LAYOUT_DIRECT_HTML=true the JSON Gen is retired and no
+      // canvasSpec exists to fall back to. Spec-path 404s instead of
+      // gracefully degrading. In that mode, render the HTML even with
+      // hard violations (loud warn) — "imperfect HTML ad" is always
+      // better than "no ad at all." Same for concept-driven Ads
+      // (adConceptArtifactId present) which are HTML-only by design.
+      const directHtmlMode =
+        String(process.env.AI_LAYOUT_DIRECT_HTML || '').toLowerCase() === 'true'
+        || !!args.adConceptArtifactId;
+
+      if (htmlCandidate?.outputHtml && (!htmlCandidate.hasHardViolations || directHtmlMode)) {
+        if (htmlCandidate.hasHardViolations) {
+          console.warn(
+            `   ⚠️  [render] HTML has hard violations BUT direct-HTML mode is on — ` +
+            `rendering anyway (artifact=${htmlCandidate.artifactId})`
+          );
+        }
         console.log(
           `   🌐 [render] HTML path — artifact=${htmlCandidate.artifactId} ` +
           `html_len=${htmlCandidate.outputHtml.length}`
@@ -510,6 +526,9 @@ async function renderStage(args) {
         return output;
       }
       if (htmlCandidate?.outputHtml && htmlCandidate.hasHardViolations) {
+        // Reached only when directHtmlMode=false. Legacy V1 behavior:
+        // fall through to spec path. With direct-HTML the gate above
+        // already rendered.
         console.warn(
           `   ⚠️  [render] HTML available but has hard violations — ` +
           `falling back to spec path (artifact=${htmlCandidate.artifactId})`
