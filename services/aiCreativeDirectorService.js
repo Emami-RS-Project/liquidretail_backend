@@ -740,6 +740,29 @@ const FEED_OUTPUT_SHAPES = Object.freeze([
   'static_grid'      // 2-4 images in a clean grid (2x2, 1x3, etc.)
 ]);
 
+// Reels output shapes (Phase B1). reels_storyboard declares per-beat
+// timing for chrome overlays Puppeteer will render on top of a Veo
+// base video. The Director owns the storyboard (beat timing + roles +
+// positions); Veo owns the base video; Puppeteer + Cloudinary composite
+// the chrome onto Veo's output at the declared windows.
+const REELS_OUTPUT_SHAPES = Object.freeze(['reels_storyboard']);
+
+const STORYBOARD_BEAT_ROLES = Object.freeze([
+  'eyebrow', 'headline', 'subheadline', 'cta', 'badge', 'quote', 'stat', 'logo'
+]);
+const STORYBOARD_POSITIONS = Object.freeze([
+  'top', 'middle', 'bottom',
+  'top_left', 'top_right',
+  'middle_left', 'middle_right',
+  'bottom_left', 'bottom_right'
+]);
+const STORYBOARD_EMPHASIS = Object.freeze(['subtle', 'normal', 'bold']);
+
+// Reels duration bounds (seconds). Veo 3 generates 5-8s clips natively;
+// longer clips would require concatenation which isn't in scope here.
+const REELS_DURATION_MIN_SEC = 5;
+const REELS_DURATION_MAX_SEC = 8;
+
 // Phase A entry point. Returns the persisted artifact + the parsed
 // concepts. Caller (expandWizardJob via A5) consumes concepts to write
 // Ad rows; the artifact's _id becomes conceptArtifactId on each Ad.
@@ -762,10 +785,11 @@ async function directConceptsRound({
   if (!process.env.OPENAI_API_KEY) {
     const e = new Error('OPENAI_API_KEY not set'); e.status = 500; throw e;
   }
-  if (platformFormat !== 'meta_feed_1_1') {
-    // Phase A is Feed-only. Reels (and any future format) gets a clear
-    // error so a flag flip doesn't silently produce broken concepts.
-    throw badRequest(`directConceptsRound: platformFormat="${platformFormat}" not supported in Phase A (Feed-only). Reels track ships in Phase B.`);
+  const SUPPORTED_FORMATS_ROUND = ['meta_feed_1_1', 'meta_reels_9_16'];
+  if (!SUPPORTED_FORMATS_ROUND.includes(platformFormat)) {
+    // Future formats (carousel, pmax) emit explicit errors so a flag
+    // flip can't silently produce broken concepts.
+    throw badRequest(`directConceptsRound: platformFormat="${platformFormat}" not supported. Allowed: ${SUPPORTED_FORMATS_ROUND.join(', ')}.`);
   }
 
   // Compute roundIndex from prior artifact rows for this cache key when
@@ -810,7 +834,7 @@ async function directConceptsRound({
     roundIndex, avoidList
   });
   const promptHash = sha256(system + '\n' + user);
-  const responseSchema = buildResponseSchemaRound(seededUniverse);
+  const responseSchema = buildResponseSchemaRound(seededUniverse, platformFormat);
 
   // OpenAI multimodal user content: text + image_url parts.
   const userContent = visionImages.length
@@ -963,9 +987,11 @@ function buildPromptRound({ inputSummary, creativeIntent, platformFormat, univer
     `- The ${N_CONCEPTS_ROUND} concepts MUST be meaningfully different — different archetype OR different media-pick combination OR different output_shape OR different copy angle.`,
     `- Lead with the STRONGEST signal in the data.`,
     `- HONESTY RULE: if social_proof_signal.primary_quote is null AND top_comments is empty AND rating is null, you MUST set social_proof_type="none" on EVERY concept. Don't promise proof the data can't back. In that case also avoid stat_led_social_proof and hero_quote_overlay — lean on brand voice (typographic_dominant, magazine_editorial) or the photo itself.`,
-    `- MEDIA PICKS: every media_id you reference in media_picks MUST appear in the SEEDED UNIVERSE block below. Pick by media_id verbatim. role is a short label (hero / inset / collage_tile_1 / grid_tile_2 etc.) describing how the media sits in your composition. Pick 1-4 media per concept; collage/grid shapes need 2-4, single needs 1.`,
-    `- OUTPUT SHAPE: format ∈ ${FEED_OUTPUT_SHAPES.join(' | ')}; tile_count matches media_picks.length.`,
-    `- COPY PICKS: write the final strings the renderer will ship. Pull from brand_signal.tagline / description / brand_reviews_summary, product_signal.description, and social_proof_signal.primary_quote when grounding. Use null for any role the concept intentionally omits (e.g. eyebrow=null when the design has no eyebrow rule).`,
+    `- MEDIA PICKS: every media_id you reference in media_picks MUST appear in the SEEDED UNIVERSE block below. Pick by media_id verbatim. role is a short label describing how the media sits in your composition. Pick 1-4 media per concept; Reels picks 1 video (preferred) or 1-4 image references for Veo synthesis.`,
+    platformFormat === 'meta_reels_9_16'
+      ? `- OUTPUT SHAPE (Reels): format MUST be "reels_storyboard". duration_sec ∈ [${REELS_DURATION_MIN_SEC}, ${REELS_DURATION_MAX_SEC}] (Veo native clip range). storyboard_beats is an array of overlay timing events Puppeteer renders as transparent PNGs and Cloudinary composites onto Veo's base video. Each beat: { t_start (seconds), t_end, role ∈ ${STORYBOARD_BEAT_ROLES.join('|')}, position ∈ ${STORYBOARD_POSITIONS.join('|')}, emphasis ∈ ${STORYBOARD_EMPHASIS.join('|')} }. Beats may overlap. Honor the Reels safe zones in your position picks (top reserved 0-220px, bottom reserved 1558-1778px — use middle positions for chrome that needs to be visible past IG/FB UI).`
+      : `- OUTPUT SHAPE (Feed): format ∈ ${FEED_OUTPUT_SHAPES.join(' | ')}; tile_count matches media_picks.length.`,
+    `- COPY PICKS: write the final strings the renderer will ship. Pull from brand_signal.tagline / description / brand_reviews_summary, product_signal.description, and social_proof_signal.primary_quote when grounding. Use null for any role the concept intentionally omits (e.g. eyebrow=null when the design has no eyebrow rule). Storyboard beats reference copy_picks by role — each beat's role MUST map to a non-null copy_picks field (e.g. role=headline beat requires copy_picks.headline non-null).`,
     `- CREATIVE STYLE: pick one of ${CREATIVE_STYLES_ENUM.join(' | ')}.`,
     ``,
     formatConstraints,
@@ -993,7 +1019,9 @@ function buildPromptRound({ inputSummary, creativeIntent, platformFormat, univer
     `  creative_style   — one of the creative styles enum`,
     `  recommended_components — map of role → component_style`,
     `  media_picks      — [{ media_id, role, notes }] referencing SEEDED UNIVERSE`,
-    `  output_shape     — { format, tile_count }`,
+    platformFormat === 'meta_reels_9_16'
+      ? `  output_shape     — { format: 'reels_storyboard', duration_sec, storyboard_beats: [{t_start, t_end, role, position, emphasis}] }`
+      : `  output_shape     — { format, tile_count }`,
     `  copy_picks       — { headline, subheadline, eyebrow, cta } final strings (nullable per role)`,
     `  rationale        — 1-2 sentences explaining how the signal + universe drove the call`
   ].join('\n');
@@ -1012,13 +1040,56 @@ function buildPromptRound({ inputSummary, creativeIntent, platformFormat, univer
   return { system, user, visionImages };
 }
 
-function buildResponseSchemaRound(seededUniverse) {
+function buildResponseSchemaRound(seededUniverse, platformFormat = 'meta_feed_1_1') {
   // We don't enum-constrain media_id to the universe IDs here — strict
   // mode's enum is fine in principle but the universe IDs are a string
   // set that changes per call. validateConceptsRound enforces the
   // "media_id must be in universe" rule post-parse.
+  //
+  // output_shape branches per format (Phase B1). Strict mode forbids
+  // varying object shapes via oneOf, so we emit a single schema
+  // tailored to platformFormat at build time.
+  const isReels = platformFormat === 'meta_reels_9_16';
+
+  const outputShapeSchema = isReels
+    ? {
+        type: 'object',
+        additionalProperties: false,
+        required: ['format', 'duration_sec', 'storyboard_beats'],
+        properties: {
+          format:       { type: 'string', enum: [...REELS_OUTPUT_SHAPES] },
+          duration_sec: { type: 'integer', minimum: REELS_DURATION_MIN_SEC, maximum: REELS_DURATION_MAX_SEC },
+          storyboard_beats: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 8,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['t_start', 't_end', 'role', 'position', 'emphasis'],
+              properties: {
+                t_start:  { type: 'number', minimum: 0 },
+                t_end:    { type: 'number', minimum: 0 },
+                role:     { type: 'string', enum: [...STORYBOARD_BEAT_ROLES] },
+                position: { type: 'string', enum: [...STORYBOARD_POSITIONS] },
+                emphasis: { type: 'string', enum: [...STORYBOARD_EMPHASIS] }
+              }
+            }
+          }
+        }
+      }
+    : {
+        type: 'object',
+        additionalProperties: false,
+        required: ['format', 'tile_count'],
+        properties: {
+          format:     { type: 'string', enum: [...FEED_OUTPUT_SHAPES] },
+          tile_count: { type: 'integer' }
+        }
+      };
+
   return {
-    name: 'creative_director_round_v1',
+    name: isReels ? 'creative_director_round_reels_v1' : 'creative_director_round_feed_v1',
     schema: {
       type: 'object',
       additionalProperties: false,
@@ -1076,15 +1147,7 @@ function buildResponseSchemaRound(seededUniverse) {
                   }
                 }
               },
-              output_shape: {
-                type: 'object',
-                additionalProperties: false,
-                required: ['format', 'tile_count'],
-                properties: {
-                  format:     { type: 'string', enum: [...FEED_OUTPUT_SHAPES] },
-                  tile_count: { type: 'integer' }
-                }
-              },
+              output_shape: outputShapeSchema,
               copy_picks: {
                 type: 'object',
                 additionalProperties: false,
@@ -1152,6 +1215,44 @@ function validateConceptsRound(concepts, seededUniverse) {
     if (['static_collage', 'static_grid'].includes(c.output_shape?.format) && (picks.length < 2 || picks.length > 4)) {
       warnings.push(`concept ${c.concept_id}: output_shape=${c.output_shape.format} requires 2-4 media_picks (got ${picks.length})`);
     }
+
+    // Reels storyboard sanity (Phase B1):
+    //   • duration_sec within [REELS_DURATION_MIN_SEC, REELS_DURATION_MAX_SEC]
+    //   • beats t_end > t_start
+    //   • beats t_end <= duration_sec
+    //   • beat role maps to a non-null copy_picks field (where applicable)
+    //   • at least one beat present
+    if (c.output_shape?.format === 'reels_storyboard') {
+      const dur = c.output_shape.duration_sec;
+      if (typeof dur !== 'number' || dur < REELS_DURATION_MIN_SEC || dur > REELS_DURATION_MAX_SEC) {
+        warnings.push(`concept ${c.concept_id}: reels_storyboard duration_sec=${dur} outside [${REELS_DURATION_MIN_SEC},${REELS_DURATION_MAX_SEC}]`);
+      }
+      const beats = Array.isArray(c.output_shape.storyboard_beats) ? c.output_shape.storyboard_beats : [];
+      if (!beats.length) {
+        warnings.push(`concept ${c.concept_id}: reels_storyboard has zero storyboard_beats`);
+      }
+      const copyRoleToField = {
+        headline:    'headline',
+        eyebrow:     'eyebrow',
+        subheadline: 'subheadline',
+        cta:         'cta'
+        // badge/quote/stat/logo don't bind to copy_picks — they're
+        // either signal-derived (rating, stat) or brand-derived (logo).
+      };
+      for (const beat of beats) {
+        if (typeof beat?.t_start !== 'number' || typeof beat?.t_end !== 'number') continue;
+        if (beat.t_end <= beat.t_start) {
+          warnings.push(`concept ${c.concept_id}: beat role=${beat.role} t_end (${beat.t_end}) <= t_start (${beat.t_start})`);
+        }
+        if (typeof dur === 'number' && beat.t_end > dur) {
+          warnings.push(`concept ${c.concept_id}: beat role=${beat.role} t_end (${beat.t_end}) > duration_sec (${dur})`);
+        }
+        const requiredCopyField = copyRoleToField[beat.role];
+        if (requiredCopyField && cp[requiredCopyField] == null) {
+          warnings.push(`concept ${c.concept_id}: beat role=${beat.role} references copy_picks.${requiredCopyField} which is null`);
+        }
+      }
+    }
   }
 
   // Distinctness — fingerprint by archetype + output_shape + media-pick-set + headline angle.
@@ -1178,6 +1279,12 @@ module.exports = {
   CREATIVE_RULES,
   CREATIVE_STYLES_ENUM,
   FEED_OUTPUT_SHAPES,
+  REELS_OUTPUT_SHAPES,
+  STORYBOARD_BEAT_ROLES,
+  STORYBOARD_POSITIONS,
+  STORYBOARD_EMPHASIS,
+  REELS_DURATION_MIN_SEC,
+  REELS_DURATION_MAX_SEC,
   MODEL_ID,
   ROUND_VERSION,
   N_CONCEPTS_ROUND,
