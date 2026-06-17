@@ -313,6 +313,38 @@ async function expandWizardJob({
     console.log(`📦 expandWizardJob: stamped discount code "${promoDiscountCode}" onto ctaUrlParams`);
   }
 
+  // ── Phase A5a — concept-driven V2 branch (AI_CONCEPT_DRIVEN flag) ─
+  // When the flag is on AND format=Feed AND the operator picked at
+  // least one product, take the V2 branch: per-product, build a seeded
+  // universe → Director round (3 concepts) → Judge → insert 3 Ad rows.
+  // Skip the legacy cartesian (seeds × templates × ratios) entirely.
+  //
+  // Flag off OR any precondition unmet → fall through to legacy path
+  // below; V2 code is dead.
+  //
+  // Reels (meta_reels_9_16) intentionally stays on the legacy path in
+  // Phase A — directConceptsRound throws for non-Feed formats. Phase B
+  // adds the Reels track via Veo.
+  //
+  // Brand-only runs (productIds.length === 0) stay legacy too — the
+  // concept-driven path is product-scoped. Brand-only support is a
+  // follow-up once per-product proves out.
+  const conceptDriven =
+    String(process.env.AI_CONCEPT_DRIVEN || '').toLowerCase() === 'true'
+    && effectivePlatformFormat === 'meta_feed_1_1'
+    && productIds.length > 0;
+
+  if (conceptDriven && !dryRun) {
+    const result = await runConceptDrivenExpansion({
+      campaignId, brandId, campaignKind, productIds,
+      ctaText, ctaUrl, ctaUrlParams,
+      platformFormat: effectivePlatformFormat,
+      includeCategoryMatched, includeBrandMatched,
+      excludePairings, creativeIntent: null
+    });
+    return result;
+  }
+
   // ── 1. Build seeds — flat list of {productId, mediaId, matchTier, variantKind, suitabilityScore, fileType} ──
   const useBrandOnly = productIds.length === 0 && mediaIds.length === 0;
   let seeds = [];
@@ -1157,10 +1189,297 @@ async function runCreativeDirectorShadow({ brandId, productIds, campaignKind, cr
   }));
 }
 
+// ════════════════════════════════════════════════════════════════════
+// Phase A5a — Concept-driven V2 expansion (AI_CONCEPT_DRIVEN flag)
+// ════════════════════════════════════════════════════════════════════
+//
+// Per product: seededUniverse → directConceptsRound → judgeConcepts-
+// Round → Ad.insertMany (3 rows per product). Skips the legacy
+// cartesian (seeds × templates × ratios) entirely. Each Ad row carries
+// conceptId + conceptArtifactId + mediaIds + judgeRank + judgeScore +
+// renderRoute='html_gen' so the renderer (Phase A5b) can materialize
+// the declared concept.
+//
+// Template field stays populated for back-compat with downstream readers
+// that branch on it — mapped from concept.creative_style. The 5 AI
+// templates collapse to one rendering target under the concept-driven
+// model; template here is effectively a vestigial style label.
+
+const CREATIVE_STYLE_TO_TEMPLATE = {
+  brand_led:        'ai_brand_led',
+  ugc_led:          'ai_ugc_led',
+  social_proof_led: 'ai_social_proof_led',
+  editorial:        'ai_editorial',
+  promotional:      'ai_promotional'
+};
+
+// Per-concept identity. campaignId scopes uniqueness; conceptId +
+// productId + platformFormat distinguish within campaign. Independent
+// of media/template since the concept declares its own media + style.
+function computeV2IdentityDigest({ campaignId, productId, conceptId, platformFormat, ctaText, ctaUrl, ctaUrlParams }) {
+  const parts = [
+    String(campaignId),
+    productId ? String(productId) : 'NULL',
+    String(conceptId || ''),
+    String(platformFormat || ''),
+    String(ctaText || ''),
+    String(ctaUrl  || ''),
+    String(ctaUrlParams || '')
+  ];
+  return crypto.createHash('sha256').update(parts.join('|')).digest('hex');
+}
+
+// Derive matchTier from the primary media's universe role. Catalog
+// (hero/alt) → 'product_match' (the product IS the SKU). UGC tiers
+// keep their semantic tier so readinessScore math stays consistent.
+function matchTierForUniverseRole(role) {
+  switch (role) {
+    case 'catalog_hero':
+    case 'catalog_alt':
+      return 'product_match';
+    case 'ugc_product_match':
+      return 'product_match';
+    case 'ugc_product_category':
+      return 'product_category';
+    case 'ugc_brand_match':
+      return 'brand_match';
+    default:
+      return 'product_match';   // safe fallback
+  }
+}
+
+// variantKind from the primary media's universe role. catalog_* roles
+// are catalog product photography ('product_image'); UGC roles surface
+// as 'ugc'. Used by downstream readers that gate on this enum.
+function variantKindForUniverseRole(role) {
+  return (role === 'catalog_hero' || role === 'catalog_alt') ? 'product_image' : 'ugc';
+}
+
+async function runConceptDrivenExpansion({
+  campaignId, brandId, campaignKind, productIds,
+  ctaText, ctaUrl, ctaUrlParams,
+  platformFormat,
+  includeCategoryMatched, includeBrandMatched,
+  excludePairings, creativeIntent
+}) {
+  const seededUniverseSvc = require('./seededUniverseService');
+  const director          = require('./aiCreativeDirectorService');
+  const judge             = require('./aiJudgeService');
+
+  // excludePairings is keyed by (productId, mediaId) and lets the
+  // operator drop specific seed-product pairings the wizard showed.
+  // Apply per-product by filtering the seeded universe before the
+  // Director sees it.
+  const excludeSet = new Set(
+    (excludePairings || []).map(p =>
+      `${p.productId ? String(p.productId) : 'NULL'}|${String(p.mediaId)}`
+    )
+  );
+  function filterUniverseForProduct(productId, universe) {
+    if (!excludeSet.size) return universe;
+    return universe.filter(u =>
+      !excludeSet.has(`${String(productId)}|${String(u.mediaId)}`)
+    );
+  }
+
+  const perProductResults = await Promise.all(productIds.map(async productId => {
+    try {
+      // 1. Seeded universe
+      const { universe, seedUniverseHash, counts } =
+        await seededUniverseSvc.buildSeededUniverse(brandId, productId, {
+          includeCategoryMatched, includeBrandMatched, topN: 10
+        });
+      const filtered = filterUniverseForProduct(productId, universe);
+      if (!filtered.length) {
+        console.log(`📦 conceptDriven[product=${productId}]: empty universe after excludePairings — skipping`);
+        return { productId, payloads: [], skipped: 'empty_universe' };
+      }
+
+      // 2. Director round (3 concepts)
+      const { artifact, concepts, roundIndex, warnings: dirWarnings } =
+        await director.directConceptsRound({
+          brandId, productId, platformFormat, campaignKind,
+          creativeIntent, seededUniverse: filtered, seedUniverseHash
+        });
+      if (!concepts.length) {
+        console.warn(`📦 conceptDriven[product=${productId}]: Director returned no concepts — skipping`);
+        return { productId, payloads: [], skipped: 'no_concepts' };
+      }
+
+      // 3. Judge — score + rank all concepts (no culling)
+      let conceptScores = [];
+      let judgeArtifactId = null;
+      let batchRationale = null;
+      try {
+        const judged = await judge.judgeConceptsRound({
+          concepts,
+          conceptArtifactId: artifact._id,
+          roundIndex,
+          inputSummary:  artifact.inputSummary,
+          brandSignal:   artifact.inputSummary?.brand_signal,
+          seededUniverse: filtered,
+          brandId, productId, campaignId
+        });
+        conceptScores  = judged.conceptScores;
+        judgeArtifactId = judged.judgeResultArtifactId;
+        batchRationale  = judged.batchRationale;
+      } catch (err) {
+        // Judge failure is non-fatal — emit unscored Ads in input order.
+        console.warn(`📦 conceptDriven[product=${productId}]: Judge failed (${err.message}) — queueing unscored`);
+        conceptScores = concepts.map((c, i) => ({
+          conceptId: c.concept_id, judgeScore: null, judgeRank: i + 1,
+          criteriaScores: {}, hardViolations: []
+        }));
+      }
+      const scoreByConcept = new Map(conceptScores.map(s => [s.conceptId, s]));
+
+      // 4. Map concepts → Ad payloads
+      const universeById = new Map(filtered.map(u => [String(u.mediaId), u]));
+      const payloads = [];
+      for (const concept of concepts) {
+        const mp = Array.isArray(concept.media_picks) ? concept.media_picks : [];
+        if (!mp.length) {
+          console.warn(`   ⛔ concept ${concept.concept_id}: no media_picks — skipping`);
+          continue;
+        }
+        const primaryId = String(mp[0].media_id);
+        const primaryUniverseEntry = universeById.get(primaryId);
+        if (!primaryUniverseEntry) {
+          console.warn(`   ⛔ concept ${concept.concept_id}: media_pick[0]="${primaryId}" not in filtered universe — skipping`);
+          continue;
+        }
+        const mediaIdObjs = mp
+          .map(p => p.media_id)
+          .filter(id => universeById.has(String(id)))
+          .map(id => new mongoose.Types.ObjectId(String(id)));
+        if (!mediaIdObjs.length) continue;
+
+        const score = scoreByConcept.get(concept.concept_id) || {};
+        const template = CREATIVE_STYLE_TO_TEMPLATE[concept.creative_style] || 'ai_brand_led';
+        const role = primaryUniverseEntry.role;
+
+        payloads.push({
+          brandId,
+          campaignId,
+          campaignRunIds: [],
+          mediaId:        new mongoose.Types.ObjectId(primaryId),
+          productId:      toObjectId(productId),
+          // Concept-driven fields (A1 schema)
+          conceptId:         concept.concept_id,
+          conceptArtifactId: artifact._id,
+          mediaIds:          mediaIdObjs,
+          judgeRank:         score.judgeRank ?? null,
+          judgeScore:        score.judgeScore ?? null,
+          generationOrder:   null,
+          renderRoute:       'html_gen',
+          // Legacy required fields kept populated for back-compat
+          template,
+          aspectRatio:       '1:1',                  // Feed only in Phase A
+          campaignKind,
+          platformFormat,
+          matchTier:         matchTierForUniverseRole(role),
+          variantKind:       variantKindForUniverseRole(role),
+          paletteSource:     'media',
+          rafflePrizeMediaId: null,
+          // readinessScore mirrors judgeScore so the existing select-
+          // AdsForRun sort (readinessScore desc) approximates judgeRank
+          // order until A5b adds the judgeRank-aware sort.
+          readinessScore:    score.judgeScore ?? null,
+          status:            'queued',
+          identityDigest:    computeV2IdentityDigest({
+            campaignId, productId,
+            conceptId: concept.concept_id,
+            platformFormat,
+            ctaText, ctaUrl, ctaUrlParams
+          }),
+          ctaText, ctaUrl, ctaUrlParams,
+          queuedAt:          new Date(),
+          generatedAt:       new Date()
+        });
+      }
+
+      console.log(
+        `📦 conceptDriven[product=${productId}]: round=${roundIndex} ` +
+        `universe=${filtered.length} (catalog=${counts.catalog_hero + counts.catalog_alt} ` +
+        `ugc=${counts.ugc_product_match + counts.ugc_product_category + counts.ugc_brand_match}) ` +
+        `concepts=${concepts.length} payloads=${payloads.length} ` +
+        `dirWarnings=${dirWarnings.length} judge=${judgeArtifactId ? 'ok' : 'skipped'}`
+      );
+
+      return {
+        productId, payloads,
+        roundIndex,
+        conceptArtifactId: String(artifact._id),
+        judgeArtifactId:   judgeArtifactId ? String(judgeArtifactId) : null,
+        batchRationale
+      };
+    } catch (err) {
+      console.error(`📦 conceptDriven[product=${productId}]: failed (${err.message})`);
+      return { productId, payloads: [], skipped: 'error', error: err.message };
+    }
+  }));
+
+  const payloads = perProductResults.flatMap(r => r.payloads);
+  if (!payloads.length) {
+    return {
+      campaignId: String(campaignId), brandId, campaignKind,
+      queuedCount: await Ad.countDocuments({ campaignId, status: 'queued' }),
+      newlyQueued: 0, alreadyQueued: 0, newAdIds: [], total: 0, byProduct: {},
+      conceptDriven: true,
+      perProduct: perProductResults
+    };
+  }
+
+  // Bulk insert — ordered: false swallows dup-key per (campaignId,
+  // identityDigest) so re-running the wizard with the same product
+  // picks doesn't double-queue the same concepts. Note: each Generate
+  // press creates a NEW round with NEW concept_ids, so dup-key only
+  // hits when the operator re-runs without changing state and the
+  // Director happens to produce an identically-id'd concept (rare).
+  let inserted = [];
+  try {
+    inserted = await Ad.insertMany(payloads, { ordered: false });
+  } catch (err) {
+    if (err.writeErrors && err.result?.insertedIds) {
+      const insertedIds = err.result.insertedIds || {};
+      inserted = Object.values(insertedIds);
+      if (inserted.length) inserted = await Ad.find({ _id: { $in: inserted } }).lean();
+    } else if (err.code === 11000) {
+      inserted = [];
+    } else {
+      throw err;
+    }
+  }
+
+  const newAdIds = inserted.map(d => String(d._id || d));
+  const alreadyQueued = payloads.length - newAdIds.length;
+  const queuedCount = await Ad.countDocuments({ campaignId, status: 'queued' });
+
+  console.log(
+    `📦 conceptDriven: campaign=${campaignId} products=${productIds.length} ` +
+    `concepts=${payloads.length} newlyQueued=${newAdIds.length} ` +
+    `alreadyQueued=${alreadyQueued} totalQueued=${queuedCount}`
+  );
+
+  return {
+    campaignId: String(campaignId), brandId, campaignKind,
+    queuedCount, newlyQueued: newAdIds.length, alreadyQueued,
+    newAdIds, total: payloads.length,
+    byProduct: perProductResults.reduce((acc, r) => {
+      acc[r.productId ? String(r.productId) : 'NULL'] = r.payloads.length;
+      return acc;
+    }, {}),
+    conceptDriven: true,
+    perProduct: perProductResults
+  };
+}
+
 module.exports = {
   expandWizardJob,
   selectAdsForRun,
   computeIdentityDigest,
+  computeV2IdentityDigest,
+  runConceptDrivenExpansion,
   SUPPORTED_TEMPLATES,
   // Exposed so picker endpoints can apply the same content-nature
   // gate the seed expansion uses — otherwise the picker shows posts

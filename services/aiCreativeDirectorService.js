@@ -93,7 +93,14 @@ async function directConcepts({
     // Phase 5: platformFormat is the 5th cache-key dimension so the
     // Director picks separate concept sets per Meta surface (Reels
     // archetype weighting != Feed archetype weighting).
-    platformFormat: platformFormat
+    platformFormat: platformFormat,
+    // Phase A5a: scope V1 path to V1 rows only (roundIndex: null) so
+    // the V2 round artifacts (roundIndex: 0..N written by
+    // directConceptsRound) can't be matched by this findOne / over-
+    // written by the findOneAndReplace below. Without this filter,
+    // V1's upsert would happily replace a V2 row, wiping a round's
+    // concepts the moment any V1-mode caller fires.
+    roundIndex:     null
   };
   const cacheKey = JSON.stringify({
     brandId: String(brandId),

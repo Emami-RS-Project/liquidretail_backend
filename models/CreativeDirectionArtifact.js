@@ -92,12 +92,32 @@ const creativeDirectionArtifactSchema = new mongoose.Schema({
 });
 
 // Cache key — one artifact per unique (brand, product, campaignKind,
-// creativeIntent, platformFormat). Null values participate in
-// uniqueness so a "no product" brand-led concept is its own entry.
-// Phase 5 added platformFormat as the 5th dimension so Feed and Reels
-// concepts diverge — Director archetype weighting differs per format.
+// creativeIntent, platformFormat, roundIndex).
+//
+// Phase A5a added `roundIndex` as the 6th dimension to allow the
+// concept-driven path to write append-only round rows (roundIndex = 0,
+// 1, 2, ...) alongside the legacy V1 row (roundIndex = null). Both
+// coexist under one unique constraint: Mongo treats `null` as a value
+// for uniqueness, so the V1 row claims (..., null) and V2 rows claim
+// (..., 0/1/2/...) without collision.
+//
+// OPERATOR MIGRATION (required before flipping AI_CONCEPT_DRIVEN=true):
+//   The legacy 5-field unique index must be dropped manually — mongoose
+//   does NOT auto-drop indexes when the schema definition changes.
+//
+//   mongo shell:
+//     use <your-db>
+//     db.creativedirectionartifacts.dropIndex(
+//       'brandId_1_productId_1_campaignKind_1_creativeIntent_1_platformFormat_1'
+//     )
+//
+//   After dropping, app boot recreates the new 6-field index via the
+//   declaration below. Verify with db.creativedirectionartifacts.getIndexes().
+//
+// Without this migration: V2 .create() calls fail with E11000 because
+// the old 5-field index sees the same (b,p,k,i,f) tuple as the V1 row.
 creativeDirectionArtifactSchema.index(
-  { brandId: 1, productId: 1, campaignKind: 1, creativeIntent: 1, platformFormat: 1 },
+  { brandId: 1, productId: 1, campaignKind: 1, creativeIntent: 1, platformFormat: 1, roundIndex: 1 },
   { unique: true }
 );
 
