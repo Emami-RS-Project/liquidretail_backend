@@ -101,21 +101,32 @@ const creativeDirectionArtifactSchema = new mongoose.Schema({
 // for uniqueness, so the V1 row claims (..., null) and V2 rows claim
 // (..., 0/1/2/...) without collision.
 //
-// OPERATOR MIGRATION (required before flipping AI_CONCEPT_DRIVEN=true):
-//   The legacy 5-field unique index must be dropped manually — mongoose
-//   does NOT auto-drop indexes when the schema definition changes.
+// OPERATOR MIGRATION (required before flipping AI_CONCEPT_DRIVEN=true,
+// and also worth running on any deploy with V1 multi-platformFormat usage):
 //
-//   mongo shell:
-//     use <your-db>
-//     db.creativedirectionartifacts.dropIndex(
-//       'brandId_1_productId_1_campaignKind_1_creativeIntent_1_platformFormat_1'
-//     )
+// Production has accumulated TWO stale unique indexes that pre-date
+// this 6-field one. Phase 5 added a 5-field unique (with platformFormat)
+// but never dropped the original 4-field one. Both must go — mongoose
+// does not auto-drop indexes when schema definitions change.
 //
-//   After dropping, app boot recreates the new 6-field index via the
-//   declaration below. Verify with db.creativedirectionartifacts.getIndexes().
+// mongo shell:
+//   use <your-db>
+//   db.creativedirectionartifacts.getIndexes()   // inspect
+//   db.creativedirectionartifacts.dropIndex({brandId:1,productId:1,campaignKind:1,creativeIntent:1})
+//   db.creativedirectionartifacts.dropIndex({brandId:1,productId:1,campaignKind:1,creativeIntent:1,platformFormat:1})
+//   db.creativedirectionartifacts.getIndexes()   // verify only the 6-field unique remains
 //
-// Without this migration: V2 .create() calls fail with E11000 because
-// the old 5-field index sees the same (b,p,k,i,f) tuple as the V1 row.
+// Why drop both:
+//   - 4-field index (b,p,k,i) blocks V1 upserts the moment a single
+//     (brand,product,kind,intent) tuple is hit with multiple
+//     platformFormat values — would fire even WITHOUT V2 in play.
+//   - 5-field index (b,p,k,i,f) blocks V2 .create() because the 5-tuple
+//     matches the existing V1 row's 5-tuple. roundIndex is the V2
+//     discriminator.
+//
+// After dropping, app boot recreates the new 6-field index via the
+// declaration below. Per-field non-unique helper indexes (brandId_1,
+// productId_1, platformFormat_1, roundIndex_1) are fine to keep.
 creativeDirectionArtifactSchema.index(
   { brandId: 1, productId: 1, campaignKind: 1, creativeIntent: 1, platformFormat: 1, roundIndex: 1 },
   { unique: true }
