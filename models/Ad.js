@@ -111,6 +111,40 @@ const adSchema = new mongoose.Schema({
   // > brand_only). 0..1, null when neither signal is available.
   readinessScore: { type: Number, default: null, index: true },
 
+  // ── Concept-driven generation (Phase A — AI_CONCEPT_DRIVEN flag) ─
+  // Replaces the (template × seed × ratio) cartesian with one Ad per
+  // Director-emitted concept. Each concept declares which seeded media
+  // it uses (mediaIds[]), what output shape it materializes, and the
+  // copy strings it picked. The renderer reads renderRoute to dispatch
+  // to HTML Gen (Feed) or Veo (Reels). All fields default to null /
+  // empty so legacy Ad rows continue to read as before.
+  //
+  //   conceptId        — Director-emitted concept_id (string, stable per round)
+  //   conceptArtifactId— FK to the CreativeDirectionArtifact this concept lives on
+  //   mediaIds         — full set of seeded mediaIds the concept uses (collage,
+  //                      storyboard, grid, etc.). mediaId above stays populated
+  //                      with the "primary" / hero media so existing read paths
+  //                      that project mediaId keep working.
+  //   judgeRank        — 1..N rank within its Director round (1=best). Null until
+  //                      Judge runs.
+  //   judgeScore       — 0..1 composite score from the Judge. Null until scored.
+  //   generationOrder  — which Generate-press round drained this Ad to render.
+  //                      Null while queued; populated when the renderer claims it.
+  //   renderRoute      — 'html_gen' (Feed) | 'veo' (Reels). Derived at queue time
+  //                      from platformFormat; renderer dispatches on this.
+  conceptId:          { type: String, default: null, index: true },
+  conceptArtifactId:  { type: mongoose.Schema.Types.ObjectId, ref: 'CreativeDirectionArtifact', default: null, index: true },
+  mediaIds:           { type: [mongoose.Schema.Types.ObjectId], ref: 'Media', default: [] },
+  judgeRank:          { type: Number, default: null, index: true },
+  judgeScore:         { type: Number, default: null },
+  generationOrder:    { type: Number, default: null },
+  renderRoute: {
+    type:    String,
+    enum:    ['html_gen', 'veo', null],
+    default: null,
+    index:   true
+  },
+
   // ── Lifecycle ────────────────────────────────────────────────────
   status: {
     type:     String,

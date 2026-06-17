@@ -44,6 +44,28 @@ const creativeDirectionArtifactSchema = new mongoose.Schema({
   // SPEC_SCHEMA_VERSION pattern in aiCanvasArtifact.
   signalsVersion:     { type: String, default: '1.0.0' },
 
+  // ── Concept-driven generation (Phase A — AI_CONCEPT_DRIVEN flag) ─
+  // Phase A1 (this commit) — additive fields only. Defaults to null on
+  // legacy rows so existing code paths read them as absent and ignore.
+  // The legacy unique index on (brand, product, kind, intent, format)
+  // stays in place; the V1 Director still upserts replace-by-key under
+  // it. When AI_CONCEPT_DRIVEN flips on (Phase A5), the deploy will
+  // include an operator-run index migration that adds `roundIndex` as
+  // a 6th dimension so append-only round rows can coexist with the
+  // legacy row (V1 row keeps roundIndex=null; V2 rows have 0..N).
+  //
+  //   roundIndex       — 0..N. Round 0 is the first Generate press for
+  //                      this cache key; round 1 the next; etc. Drives
+  //                      the "ROUND N" prompt marker and bounds the
+  //                      AVOID list to the last 6 rounds.
+  //   seedUniverseHash — sha256 of the top-5 seeded mediaIds at call
+  //                      time. Surfaces "new media available since last
+  //                      round" diagnostics; not part of the cache key
+  //                      (artifacts are read append-only by roundIndex,
+  //                      not looked up by hash).
+  roundIndex:         { type: Number, default: null, index: true },
+  seedUniverseHash:   { type: String, default: null },
+
   // ── Input snapshot (the signals the Director saw) ──────────────
   // Persisted verbatim so we can audit what strategy was made against
   // what signal — useful when concept variety drifts.
