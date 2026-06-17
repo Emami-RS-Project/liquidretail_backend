@@ -165,9 +165,37 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   // injected into the prompt with safe-area pixel boxes for Reels.
   const platformFormat = canvas.platformFormat || 'meta_feed_1_1';
 
-  const { system, user, images } = buildPrompt({
-    canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat
-  });
+  // Phase A5b — detect V2 concept (has media_picks / output_shape) and
+  // dispatch to the V2 prompt builder. V2 concepts declare WHICH media
+  // to use + WHAT shape to materialize + WHICH copy strings to render,
+  // so the prompt collapses the archetype menu and the LLM's job
+  // becomes "execute the declared layout" rather than "pick a strategy
+  // and invent a layout." Legacy concepts (no media_picks / no
+  // output_shape) keep the existing prompt.
+  const isV2Concept = !!(concept && (
+    (Array.isArray(concept.media_picks) && concept.media_picks.length > 0)
+    || concept.output_shape
+  ));
+  let mediaUrlMap = null;
+  if (isV2Concept) {
+    // Resolve concept.media_picks[*].media_id → Media.fileUrl for the
+    // V2 prompt's "use THESE URLs verbatim" block. One bulk query per
+    // generation; misses default to null and the prompt builder
+    // gracefully skips them.
+    const Media = require('../models/Media');
+    const ids = concept.media_picks.map(p => p.media_id).filter(Boolean);
+    const docs = ids.length ? await Media.find({ _id: { $in: ids } }).select('_id fileUrl').lean() : [];
+    mediaUrlMap = new Map(docs.map(d => [String(d._id), d.fileUrl || null]));
+  }
+
+  const { system, user, images } = isV2Concept
+    ? buildPromptV2({
+        canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat,
+        mediaUrlMap
+      })
+    : buildPrompt({
+        canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat
+      });
 
   const nCandidates = N_CANDIDATES_DEFAULT;
   const responseSchema = buildResponseSchema();
@@ -376,6 +404,173 @@ function buildFormatConstraintsBlock(platformFormat, dims) {
     `  Canvas:             ${dims.width}×${dims.height}px (Meta delivers as 1080×1080; our normalized space is 1000×1000)`,
     `  Safe zones:         none — feed surface has no reserved bands. Chrome can use the full canvas.`
   ].join('\n');
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase A5b — V2 prompt builder for concept-driven Ads
+// ══════════════════════════════════════════════════════════════════════
+//
+// Consumed when the loaded concept has media_picks + output_shape (the
+// shape directConceptsRound emits). Collapses the archetype menu —
+// the concept already declared archetype + layout_family + output_shape
+// + media_picks + copy_picks. LLM's job is execution, not strategy.
+//
+// Differences from V1 buildPrompt:
+//   • No COMPOSITION ARCHETYPES menu (concept names the archetype)
+//   • No PICK COPY FROM copy_candidates block (concept's copy_picks
+//     are the ground truth strings to render)
+//   • Explicit URL allowlist scoped to concept.media_picks — the LLM
+//     CANNOT use other URLs (validator will reject anything else)
+//   • Output shape block instructs single/collage/grid composition
+//   • Same hard rules (size, no scripts, no Lorem, allowed hosts, etc.)
+//     and same FORMAT CONSTRAINTS for safe-area enforcement.
+function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', mediaUrlMap = null }) {
+  const ctx    = richContext?.text || null;
+  const images = richContext?.images || [];
+  const aspectRatio   = canvas.aspectRatio;
+  const formatConstraints = buildFormatConstraintsBlock(platformFormat, dims);
+
+  // Resolve concept.media_picks → URLs. Skip picks whose mediaId
+  // didn't resolve (defensive — should not happen since the Director
+  // round only emits universe-resident IDs, but the validator drops
+  // any survivors anyway).
+  const resolvedPicks = (concept.media_picks || []).map(p => ({
+    media_id: p.media_id,
+    role:     p.role,
+    notes:    p.notes || null,
+    url:      mediaUrlMap?.get(String(p.media_id)) || null
+  })).filter(p => p.url);
+
+  const shape = concept.output_shape || {};
+  const cp = concept.copy_picks || {};
+
+  const shapeGuidance = (() => {
+    switch (shape.format) {
+      case 'static_single':
+        return `Single hero image fills the canvas (or canvas-minus-chrome region). The one media_pick is the visual anchor. Chrome (headline, eyebrow, cta, etc.) sits around it per the archetype.`;
+      case 'static_collage':
+        return `Asymmetric collage of ${shape.tile_count || resolvedPicks.length} images. Tiles may overlap, sit at slight angles, or break the grid for editorial feel. NOT a clean grid — use varied tile sizes and intentional negative space.`;
+      case 'static_grid':
+        return `Clean grid of ${shape.tile_count || resolvedPicks.length} images. Pick a layout (2×2, 1×3, 3×1, etc.) that uses every tile equally. Tight alignment, consistent gutters, no rotation. Chrome sits in a dedicated band, not overlapping tiles.`;
+      default:
+        return `Unknown output_shape — fall back to single hero composition.`;
+    }
+  })();
+
+  const conceptStrategy = [
+    `CREATIVE CONCEPT (from the Director — MATERIALIZE THIS, don't reinvent):`,
+    `  concept_id:        ${concept.concept_id}`,
+    `  name:              ${concept.name || '-'}`,
+    `  archetype:         ${concept.archetype}`,
+    `  layout_family:     ${concept.layout_family || '-'}`,
+    `  creative_style:    ${concept.creative_style}`,
+    `  emotional_hook:    ${concept.emotional_hook}`,
+    `  social_proof_type: ${concept.social_proof_type}`,
+    `  cta_emphasis:      ${concept.cta_emphasis}`,
+    `  output_shape:      format=${shape.format} tile_count=${shape.tile_count || resolvedPicks.length}`,
+    `  rationale:         ${concept.rationale || '-'}`
+  ].join('\n');
+
+  const mediaBlock = resolvedPicks.map((p, i) => (
+    `  [${i}] media_id=${p.media_id} role=${p.role} url=${p.url}${p.notes ? ` notes=${p.notes}` : ''}`
+  )).join('\n');
+
+  const copyBlock = [
+    `COPY (from the Director — render VERBATIM, do not substitute, do not omit):`,
+    cp.headline    ? `  headline:    "${cp.headline}"`    : `  headline:    (none — omit headline element)`,
+    cp.eyebrow     ? `  eyebrow:     "${cp.eyebrow}"`     : `  eyebrow:     (none — omit eyebrow element)`,
+    cp.subheadline ? `  subheadline: "${cp.subheadline}"` : `  subheadline: (none — omit subheadline element)`,
+    cp.cta         ? `  cta:         "${cp.cta}"`         : `  cta:         (none — omit cta element)`
+  ].join('\n');
+
+  const allowedUrls = resolvedPicks.map(p => p.url);
+
+  const system = [
+    `You are a senior creative director + frontend developer producing a single complete HTML+CSS social-media ad creative.`,
+    ``,
+    `Your output: ONE self-contained HTML document the renderer feeds to a headless browser via page.setContent(). It will be screenshotted at exactly ${dims.width}×${dims.height}px — every visible element must fit inside that viewport.`,
+    ``,
+    formatConstraints,
+    ``,
+    `HARD RULES:`,
+    `- Output a complete <html>...</html> document. <head> with <meta charset>, <title>, single inline <style>. <body> with the ad's visible content.`,
+    `- <body> MUST be sized exactly ${dims.width}px × ${dims.height}px via inline style="width:${dims.width}px;height:${dims.height}px;margin:0;overflow:hidden". No scrollbars, no overflow.`,
+    `- NO <script>. NO external <link rel="stylesheet"> or @import.`,
+    `- NO external fonts. Use system stack: \`font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif\` OR \`font-family: Georgia, "Times New Roman", serif\` for editorial vibe.`,
+    `- All <img src> values MUST come from the ALLOWED URLS block below — verbatim, no transformations, no invented URLs. Hosts outside res.cloudinary.com / cdn.brandfetch.io / cdn.shopify.com / scontent.cdninstagram.com / *.fbcdn.net auto-fail validation.`,
+    `- Render copy VERBATIM from the COPY block — no rewriting, no substitution, no Lorem Ipsum. Omit elements whose copy is "(none)".`,
+    `- Render copy LEGIBLY: white-space, kerning, no clipping. Color text + background pairs must achieve WCAG AA contrast (≥ 4.5:1 normal, ≥ 3:1 for ≥ 24px or bold ≥ 19px).`,
+    `- All positioning via flexbox / grid / absolute. Use ${dims.width}×${dims.height}px-scoped values (px / %) — NO vw/vh.`,
+    ``,
+    conceptStrategy,
+    ``,
+    `OUTPUT SHAPE GUIDANCE:`,
+    `  ${shapeGuidance}`,
+    ``,
+    `ALLOWED URLS (the ONLY strings you may put in any <img src>; verbatim only):`,
+    mediaBlock || `  (none — concept emitted no resolvable media_picks; render text-only)`,
+    ``,
+    copyBlock,
+    ``,
+    `PALETTE DERIVATION — pick a cohesive 2-5 color palette grounded in the source photo(s)' dominant tones. Match brand.tone (premium / minimal → restrained near-monochrome; energetic / playful → saturated + bold). Emit colors picked as a 2-5 entry color_palette array of #rrggbb strings.`,
+    ``,
+    `OUTPUT JSON shape (response_format strict):`,
+    `  html             — complete <html>…</html> document (200-30000 chars)`,
+    `  css_extracted    — leave ""`,
+    `  rationale        — 1-2 sentences on how composition serves the declared archetype + output_shape`,
+    `  creative_style   — echo ${concept.creative_style}`,
+    `  color_palette    — array of 2-5 hex strings you picked`,
+    `  copy_picks       — ECHO the COPY block back verbatim: { headline, subheadline, eyebrow, cta } — null where the copy was null`,
+    `  elements_used    — array of role names you rendered`,
+    `  elements_skipped — array of "<role> — <reason>" entries`,
+    `  hierarchy_spec   — { strategy:{archetype,layout_family,emotional_hook,social_proof_type,product_priority,ugc_priority,comment_priority,stat_priority,cta_emphasis}, layout:{layout_family,visual_direction:{},zones:[{role,priority,anchor,weight,component_style}]} } — echo the concept's strategy verbatim into the strategy block`
+  ].join('\n');
+
+  // VIDEO-OVERLAY mode — same rules as V1 path. Video source → transparent
+  // body + media slot, no <img> using the source video's frames, no
+  // clip-path-on-text-children, no backdrop-filter.
+  const userLines = [];
+  if (videoMode && mediaRect) {
+    userLines.push(`VIDEO-OVERLAY MODE — source media is a video. Your HTML will be screenshot with omitBackground:true; transparent regions of the PNG become "video shows through" areas in the final composite.`);
+    userLines.push(`HARD REQUIREMENTS:`);
+    userLines.push(`  1. body MUST set background:transparent.`);
+    userLines.push(`  2. Emit a transparent media slot at x:${mediaRect.x}, y:${mediaRect.y}, w:${mediaRect.w}, h:${mediaRect.h} (e.g. <div data-media-slot="true" style="position:absolute;left:${mediaRect.x}px;top:${mediaRect.y}px;width:${mediaRect.w}px;height:${mediaRect.h}px;background:transparent"></div>).`);
+    userLines.push(`  3. DO NOT emit any <img> tag pointing at the source video's frames anywhere on the canvas.`);
+    userLines.push(`  4. clip-path SAFETY — if a panel uses clip-path, that container MUST NOT contain text children (clip-path slices text descendants); put text in sibling positioned divs.`);
+    userLines.push(`  5. NO backdrop-filter — Puppeteer omitBackground:true leaves nothing to blur; use \`background: rgba(<color>, 0.80-0.88)\` for translucent panels.`);
+    userLines.push(``);
+  }
+
+  if (richContext?.text) {
+    userLines.push(`SUPPORTING CONTEXT (brand voice + product depth + proof signals — use for palette derivation, tone, and the hierarchy_spec mirror — DO NOT use copy_candidates here; render the COPY block above verbatim):`);
+    userLines.push('```json');
+    userLines.push(JSON.stringify({
+      brand:           ctx?.brand   || null,
+      product_depth:   ctx?.product || null,
+      social_proof:    ctx?.social_proof_signal || ctx?.social_context || null,
+      campaign:        ctx?.campaign || null
+    }, null, 2));
+    userLines.push('```');
+    userLines.push('');
+  }
+
+  if (images.length) {
+    userLines.push(`VISION INPUTS (attached as image parts in this message, in order):`);
+    images.forEach((img, i) => userLines.push(`  image[${i}] — ${img.role}: ${img.label || ''}`));
+    userLines.push('');
+  }
+
+  // Echo the allowed URL list ONCE more in the user message for the
+  // validator to enforce — same defense as V1's URL allowlist block.
+  if (allowedUrls.length) {
+    userLines.push(`ALLOWED URLS (echo — these are the ONLY strings you may put in any <img src>):`);
+    allowedUrls.forEach(u => userLines.push(`  ${u}`));
+    userLines.push('');
+  }
+
+  userLines.push(`Emit the complete HTML document now. Materialize the declared archetype + output_shape + media + copy.`);
+  const user = userLines.join('\n');
+  return { system, user, images };
 }
 
 function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1' }) {

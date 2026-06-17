@@ -641,12 +641,25 @@ async function expandWizardJob({
 // readinessScore desc (videos with null score sort last, FIFO by
 // queuedAt as tiebreaker)." Returns Ad IDs (strings).
 async function selectAdsForRun({ campaignId, limit }) {
-  const rows = await Ad.find({ campaignId, status: 'queued' })
-    .sort({ readinessScore: -1, queuedAt: 1 })
+  // Phase A5b — concept-driven Ads (judgeRank != null) drain FIRST by
+  // judgeRank ASC (1 = best). Legacy Ads (judgeRank null) fill any
+  // remaining slots by readinessScore. Two queries instead of one
+  // because MongoDB sorts nulls before non-nulls in ASC order, which
+  // would push legacy Ads ahead of judged ones if we used a single
+  // {judgeRank: 1, readinessScore: -1} sort.
+  const v2 = await Ad.find({ campaignId, status: 'queued', judgeRank: { $ne: null } })
+    .sort({ judgeRank: 1, queuedAt: 1 })
     .limit(limit)
     .select('_id')
     .lean();
-  return rows.map(r => String(r._id));
+  if (v2.length >= limit) return v2.map(r => String(r._id));
+  const remaining = limit - v2.length;
+  const v1 = await Ad.find({ campaignId, status: 'queued', judgeRank: null })
+    .sort({ readinessScore: -1, queuedAt: 1 })
+    .limit(remaining)
+    .select('_id')
+    .lean();
+  return [...v2.map(r => String(r._id)), ...v1.map(r => String(r._id))];
 }
 
 // ── Seed builders ────────────────────────────────────────────────────

@@ -162,7 +162,14 @@ async function renderCreative(req) {
       productId:    req.creative.productId || null,
       // Phase 6.5 — campaign run id mixed into pickConceptForCell's
       // hash downstream so concept rotates batch-over-batch.
-      campaignRunId: req.campaignRunId || null
+      campaignRunId: req.campaignRunId || null,
+      // Phase A5b — concept-driven Ad routing. When the Ad row was
+      // queued by the V2 (AI_CONCEPT_DRIVEN) path, these point at the
+      // specific Director round + concept the Judge ranked. ensure-
+      // CanvasAndHtml uses them directly instead of pickConceptForCell.
+      // Null on legacy Ads → existing behavior.
+      adConceptArtifactId: req.adConceptArtifactId || null,
+      adConceptId:         req.adConceptId         || null
     });
     stages.render = Date.now() - t;
     console.log(`   🖼️  ${tag} render ok in ${stages.render}ms (${renderOutput.width}×${renderOutput.height}, ${Math.round(renderOutput.bytes/1024)}KB, mode=${useVideoBranch ? 'video-overlay' : 'static'})`);
@@ -444,7 +451,12 @@ async function renderStage(args) {
   // warm cells this returns in milliseconds.
   // Also captures the canvas artifact id so the caller can stamp it
   // on the Ad doc for a clean photoreal FK join downstream.
-  if (RENDER_USE_HTML && template && String(template).startsWith('ai_') && args.aiCreativeV2) {
+  // Eager prime gate. Original V2 path required Campaign.aiCreativeV2-
+  // Enabled. Concept-driven Ads (A5b) carry an adConceptArtifactId on
+  // the Ad row regardless of per-campaign flags — fire the eager prime
+  // for them too so the concept's HTML output gets primed before the
+  // renderer checks for HTML availability.
+  if (RENDER_USE_HTML && template && String(template).startsWith('ai_') && (args.aiCreativeV2 || args.adConceptArtifactId)) {
     try {
       const primed = await ensureCanvasAndHtml({
         layoutInputArtifactId,
@@ -456,7 +468,14 @@ async function renderStage(args) {
         creativeIntent: args.creativeIntent,
         campaignKind:   args.campaignKind,
         campaignRunId:  args.campaignRunId,
-        platformFormat: args.platformFormat || 'meta_feed_1_1'
+        platformFormat: args.platformFormat || 'meta_feed_1_1',
+        // Phase A5b — concept-driven Ad routing. When the Ad row was
+        // queued by the V2 (AI_CONCEPT_DRIVEN) path, these point at
+        // the specific Director round + concept the Judge ranked.
+        // ensureCanvasAndHtml uses them directly instead of running
+        // pickConceptForCell. Null on legacy Ads — falls through.
+        adConceptArtifactId: args.adConceptArtifactId || null,
+        adConceptId:         args.adConceptId || null
       });
       primedCanvasArtifactId = primed?.aiCanvasArtifactId || null;
     } catch (err) {
@@ -524,7 +543,14 @@ async function ensureCanvasAndHtml({
   // Platform-format-aware ad generation (Phase 3). Carried from the
   // Ad row through the eager render flow; defaults to 'meta_feed_1_1'
   // for callers that don't pass it (preview / preflight paths).
-  platformFormat = 'meta_feed_1_1'
+  platformFormat = 'meta_feed_1_1',
+  // Phase A5b — when the Ad row was queued by the concept-driven path
+  // (AI_CONCEPT_DRIVEN=true), these point at the specific Director
+  // round + concept the Judge ranked. Skips pickConceptForCell and
+  // uses the named concept verbatim so the rendered output matches
+  // what the queue declared. Null on legacy Ads → existing behavior.
+  adConceptArtifactId = null,
+  adConceptId         = null
 }) {
   const htmlGen = require('./aiCanvasHtmlGeneratorService');
   if (!htmlGen.enabled()) return;
@@ -535,26 +561,53 @@ async function ensureCanvasAndHtml({
   const aiNorm = registry.getNormalized(template);
   const creativeStyle = aiNorm?.creativeStyle || 'brand_led';
 
-  // Director concept lookup — same filter shape as routes/layout.js by-id.
+  // Director concept lookup. Two paths:
+  //   1. Concept-driven (A5b) — adConceptArtifactId + adConceptId are
+  //      supplied from the Ad row. Look the round artifact up directly
+  //      and find the named concept. Skip pickConceptForCell entirely.
+  //   2. Legacy — query the Director artifact by 4-field key and let
+  //      pickConceptForCell hash the cell into a concept. Same logic
+  //      as today.
   let directionArtifactId = null;
   let directionConcept    = null;
   try {
     const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact');
-    const { pickConceptForCell }    = require('./aiCreativeV2Helpers');
-    const direction = await CreativeDirectionArtifact.findOne({
-      brandId:        brandId || layoutInput.brandId || null,
-      productId:      layoutInput.productId || productId || null,
-      campaignKind:   campaignKind   || null,
-      creativeIntent: creativeIntent || null
-    }).lean();
-    if (direction?.concepts?.length) {
-      directionArtifactId = String(direction._id);
-      const cellKey = `${layoutInput.mediaId}|${layoutInput.paletteSource || ''}|${layoutInput.variantKind || ''}`;
-      directionConcept = pickConceptForCell({
-        concepts: direction.concepts,
-        cellKey,
-        runId:    campaignRunId || null
-      });
+    if (adConceptArtifactId && adConceptId) {
+      const direction = await CreativeDirectionArtifact.findById(adConceptArtifactId).lean();
+      if (direction?.concepts?.length) {
+        const named = direction.concepts.find(c => c.concept_id === adConceptId);
+        if (named) {
+          directionArtifactId = String(direction._id);
+          directionConcept    = named;
+        } else {
+          console.warn(
+            `   ⚠️  [render eager] concept-driven Ad named concept "${adConceptId}" ` +
+            `not found in artifact ${adConceptArtifactId} — falling through to legacy lookup`
+          );
+        }
+      }
+    }
+    if (!directionConcept) {
+      const { pickConceptForCell } = require('./aiCreativeV2Helpers');
+      // Legacy path scoped to V1 rows (roundIndex: null) — A5a's V2
+      // round artifacts are append-only and would otherwise muddle
+      // pickConceptForCell's deterministic cell hashing.
+      const direction = await CreativeDirectionArtifact.findOne({
+        brandId:        brandId || layoutInput.brandId || null,
+        productId:      layoutInput.productId || productId || null,
+        campaignKind:   campaignKind   || null,
+        creativeIntent: creativeIntent || null,
+        roundIndex:     null
+      }).lean();
+      if (direction?.concepts?.length) {
+        directionArtifactId = String(direction._id);
+        const cellKey = `${layoutInput.mediaId}|${layoutInput.paletteSource || ''}|${layoutInput.variantKind || ''}`;
+        directionConcept = pickConceptForCell({
+          concepts: direction.concepts,
+          cellKey,
+          runId:    campaignRunId || null
+        });
+      }
     }
   } catch (err) {
     console.warn(`   ⚠️  [render eager] director lookup failed: ${err.message}`);

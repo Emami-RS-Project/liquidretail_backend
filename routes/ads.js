@@ -464,6 +464,13 @@ async function renderOne(run, job, adId, index, renderToken) {
       // ads + single-prize raffle ads (loadContext falls back to the
       // campaign's first prize id in those cases).
       rafflePrizeMediaId: ad.rafflePrizeMediaId ? String(ad.rafflePrizeMediaId) : null,
+      // Phase A5b — concept-driven Ads carry the Director round +
+      // concept id. When present, ensureCanvasAndHtml uses them
+      // directly instead of running pickConceptForCell against the
+      // legacy Director artifact. Null on legacy Ads — falls through
+      // to the existing path.
+      adConceptArtifactId: ad.conceptArtifactId ? String(ad.conceptArtifactId) : null,
+      adConceptId:         ad.conceptId || null,
       creative,
       cta:           { text: ad.ctaText, url: ad.ctaUrl, params: ad.ctaUrlParams },
       authToken:     renderToken,
