@@ -39,6 +39,43 @@ const aiJudgeResultArtifactSchema = new mongoose.Schema({
     criteriaScores:      { type: [mongoose.Schema.Types.Mixed], default: [] }   // per-candidate { brand_match, strategy_fit, hierarchy_consistency, visual_coherence }
   }],
 
+  // ── Concept-round judging (Phase A — AI_CONCEPT_DRIVEN flag) ─────
+  // One entry per Director round judged. Unlike judgments[] (which
+  // picks a winner among N rendered candidates for one Ad), concept-
+  // round judging scores ALL concepts in a round and emits a rank
+  // ordering — no culling. Default empty so legacy artifacts read it
+  // as absent.
+  //
+  //   conceptArtifactId — FK to the CreativeDirectionArtifact the
+  //                       round wrote
+  //   roundIndex        — mirror of CreativeDirectionArtifact.roundIndex
+  //                       for join-free diagnostics
+  //   conceptCount      — N concepts judged in this batch (typically 3)
+  //   conceptScores[]   — per-concept score detail (see below)
+  //   batchRationale    — 1-2 sentence batch-level summary explaining
+  //                       why the top concept won and what differentiated it
+  //   topConceptId      — concept_id of the rank-1 concept (judgeRank=1)
+  //
+  // conceptScores[N]:
+  //   conceptId        — Director-emitted concept_id (stable per round)
+  //   judgeScore       — 0..1 composite (average of criteria_scores / 10)
+  //   judgeRank        — 1..N (1=best); ties broken by input order
+  //   criteriaScores   — { strategy_fit, brand_match, media_utilization,
+  //                       proof_coherence, distinctness } each 0..10
+  //   hardViolations   — array of short strings flagging diagnostic
+  //                       hits (claimed proof with no data, copy_picks
+  //                       all null, etc.). Empty array on clean concepts;
+  //                       presence does NOT cull (renderer still ships
+  //                       them in rank order).
+  conceptJudgments: [{
+    conceptArtifactId: { type: mongoose.Schema.Types.ObjectId, ref: 'CreativeDirectionArtifact', default: null },
+    roundIndex:        { type: Number, default: null },
+    conceptCount:      { type: Number, default: 0 },
+    conceptScores:     { type: [mongoose.Schema.Types.Mixed], default: [] },
+    batchRationale:    { type: String, default: null },
+    topConceptId:      { type: String, default: null }
+  }],
+
   // Telemetry rollup. CostLog has the per-call $; this is convenience.
   inputTokens:   { type: Number, default: 0 },
   outputTokens:  { type: Number, default: 0 },

@@ -293,8 +293,332 @@ function sha256(s) {
   return crypto.createHash('sha256').update(s).digest('hex');
 }
 
+// ════════════════════════════════════════════════════════════════════
+// V2 — Concept-round judging (Phase A — AI_CONCEPT_DRIVEN flag)
+// ════════════════════════════════════════════════════════════════════
+//
+// Coexists with judgeCandidates. No callers at land time; A5 wires
+// expandWizardJob into judgeConceptsRound after directConceptsRound
+// emits its 3 concepts.
+//
+// Differences from V1 judgeCandidates:
+//   • Input is N Director CONCEPTS (not rendered canvas specs).
+//   • No culling — every concept gets scored + ranked. The render
+//     pipeline ships them in judgeRank order; nothing gets dropped.
+//   • New scoring axes tuned for strategy quality:
+//       strategy_fit       — concept matches signal strength
+//       brand_match        — copy + creative_style fit brand voice
+//       media_utilization  — uses seeded universe smartly (not just
+//                            "always hero", not random; output_shape
+//                            density matches media_picks count)
+//       proof_coherence    — if social_proof_type != 'none', the
+//                            inputSummary HAS the data to back it
+//       distinctness       — concept differs meaningfully from peers
+//   • hardViolations[] flags diagnostic issues without culling.
+
+const CONCEPT_AXES = ['strategy_fit', 'brand_match', 'media_utilization', 'proof_coherence', 'distinctness'];
+
+// Compress one concept into the Judge's reading payload. Strip prompt-
+// builder fields (long rationales, recommended_components verbosity) so
+// the prompt stays cheap on input tokens.
+function compressConceptForJudge(concept, index) {
+  if (!concept || typeof concept !== 'object') return { index, error: 'no concept' };
+  const mp = Array.isArray(concept.media_picks) ? concept.media_picks : [];
+  const cp = concept.copy_picks || {};
+  return {
+    index,
+    concept_id:        concept.concept_id || null,
+    name:              concept.name || null,
+    archetype:         concept.archetype || null,
+    layout_family:     concept.layout_family || null,
+    emotional_hook:    concept.emotional_hook || null,
+    social_proof_type: concept.social_proof_type || null,
+    creative_style:    concept.creative_style || null,
+    priorities: {
+      product: concept.product_priority || 'unknown',
+      ugc:     concept.ugc_priority     || 'unknown',
+      comment: concept.comment_priority || 'unknown',
+      stat:    concept.stat_priority    || 'unknown'
+    },
+    cta_emphasis: concept.cta_emphasis || 'unknown',
+    media_picks: mp.map(p => ({
+      media_id: p.media_id || null,
+      role:     p.role     || null
+    })),
+    output_shape: concept.output_shape || null,
+    copy_picks: {
+      headline:    cp.headline    || null,
+      subheadline: cp.subheadline || null,
+      eyebrow:     cp.eyebrow     || null,
+      cta:         cp.cta         || null
+    },
+    rationale_snippet: typeof concept.rationale === 'string' ? concept.rationale.slice(0, 200) : null
+  };
+}
+
+// Judge ALL concepts in a Director round. No culling — every concept
+// gets a 0..1 judgeScore + 1..N judgeRank. Caller (Phase A5 expand-
+// WizardJob) writes the rank onto its Ad rows so the renderer can drain
+// in priority order.
+//
+// Returns:
+//   {
+//     conceptScores: [{ conceptId, judgeScore, judgeRank, criteriaScores, hardViolations }],
+//     batchRationale,
+//     topConceptId,
+//     judgeResultArtifactId
+//   }
+async function judgeConceptsRound({
+  concepts,                  // [...Director concepts from directConceptsRound]
+  conceptArtifactId = null,  // FK to persist on the artifact
+  roundIndex        = null,  // diagnostic only
+  inputSummary      = null,  // for brand + proof scoring context
+  brandSignal       = null,  // for brand_match scoring
+  seededUniverse    = [],    // for media_utilization scoring
+  brandId           = null,
+  productId         = null,
+  campaignId        = null
+}) {
+  if (!Array.isArray(concepts) || concepts.length === 0) {
+    throw new Error('judgeConceptsRound: concepts[] required');
+  }
+  if (concepts.length === 1) {
+    // Single concept — no judging needed; rank 1, neutral score.
+    return {
+      conceptScores: [{
+        conceptId:     concepts[0].concept_id || null,
+        judgeScore:    1.0,
+        judgeRank:     1,
+        criteriaScores: Object.fromEntries(CONCEPT_AXES.map(a => [a, null])),
+        hardViolations: []
+      }],
+      batchRationale:        'single concept — auto-ranked',
+      topConceptId:          concepts[0].concept_id || null,
+      judgeResultArtifactId: null
+    };
+  }
+
+  const summaries = concepts.map((c, i) => compressConceptForJudge(c, i));
+  const universeIds = seededUniverse.map(u => String(u.mediaId));
+
+  const { system, user } = buildConceptRoundPrompt({
+    summaries, inputSummary, brandSignal, universeIds
+  });
+  const promptHash = sha256(system + '\n' + user);
+  const responseSchema = buildConceptRoundResponseSchema(concepts.length);
+
+  const t0 = Date.now();
+  const completion = await trackLlmCall(
+    {
+      stage:      'judge_concept_round',
+      provider:   'openai',
+      model:      DEFAULT_JUDGE_MODEL,
+      purposeTag: `round:${roundIndex ?? '-'}:concepts:${concepts.length}`,
+      brandId, campaignId,
+      visionImages: 0,
+      cacheKey:   `judgeConcepts:${conceptArtifactId || '-'}`
+    },
+    () => openai.chat.completions.create({
+      model:           DEFAULT_JUDGE_MODEL,
+      response_format: { type: 'json_schema', json_schema: responseSchema },
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user',   content: user }
+      ],
+      temperature: TEMPERATURE,
+      max_tokens:  MAX_TOKENS
+    })
+  );
+  const durationMs = Date.now() - t0;
+
+  const raw = completion.choices?.[0]?.message?.content;
+  if (!raw) throw new Error('Judge (concept round) returned no content');
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (err) { throw new Error(`Judge (concept round) response not JSON: ${err.message}`); }
+
+  // The schema enforces concept_scores length = concepts.length and
+  // each entry's per-axis 0..10 values. Compute judgeScore (0..1) as
+  // the average of axes / 10. judgeRank by judgeScore desc; stable
+  // ordering on ties uses input order.
+  const parsedScores = Array.isArray(parsed.concept_scores) ? parsed.concept_scores : [];
+  const scored = concepts.map((c, i) => {
+    const row    = parsedScores[i] || {};
+    const axes   = row.criteria_scores || {};
+    const sum    = CONCEPT_AXES.reduce((s, ax) => s + (typeof axes[ax] === 'number' ? axes[ax] : 0), 0);
+    const score  = Math.max(0, Math.min(1, sum / (CONCEPT_AXES.length * 10)));
+    return {
+      index:        i,
+      conceptId:    c.concept_id || null,
+      judgeScore:   score,
+      criteriaScores: Object.fromEntries(CONCEPT_AXES.map(ax => [ax, typeof axes[ax] === 'number' ? axes[ax] : null])),
+      hardViolations: Array.isArray(row.hard_violations) ? row.hard_violations.filter(v => typeof v === 'string') : []
+    };
+  });
+
+  // Stable rank order — sort by score desc, then by original index.
+  const ranked = scored.slice().sort((a, b) => (b.judgeScore - a.judgeScore) || (a.index - b.index));
+  ranked.forEach((entry, rankIdx) => { entry.judgeRank = rankIdx + 1; });
+
+  // Re-key by original concept order for the return shape (callers
+  // typically zip with the concepts[] they passed in).
+  const byIndex = new Map(ranked.map(r => [r.index, r]));
+  const conceptScores = concepts.map((c, i) => {
+    const r = byIndex.get(i);
+    return {
+      conceptId:      r.conceptId,
+      judgeScore:     r.judgeScore,
+      judgeRank:      r.judgeRank,
+      criteriaScores: r.criteriaScores,
+      hardViolations: r.hardViolations
+    };
+  });
+
+  const topConceptId  = ranked[0]?.conceptId || null;
+  const batchRationale = parsed.batch_rationale || null;
+
+  const usage = completion.usage || {};
+  const artifact = await AiJudgeResultArtifact.create({
+    brandId, campaignId,
+    modelId:    DEFAULT_JUDGE_MODEL,
+    promptHash,
+    promptSystem: system,
+    promptUser:   user,
+    conceptJudgments: [{
+      conceptArtifactId,
+      roundIndex,
+      conceptCount:   concepts.length,
+      conceptScores,
+      batchRationale,
+      topConceptId
+    }],
+    inputTokens:  usage.prompt_tokens     || 0,
+    outputTokens: usage.completion_tokens || 0,
+    durationMs
+  });
+
+  console.log(
+    `⚖️  judgeConceptRound: brand=${brandId} product=${productId || '-'} ` +
+    `round=${roundIndex ?? '-'} concepts=${concepts.length} ` +
+    `top=${topConceptId || '-'} took=${durationMs}ms`
+  );
+
+  return {
+    conceptScores,
+    batchRationale,
+    topConceptId,
+    judgeResultArtifactId: artifact._id
+  };
+}
+
+function buildConceptRoundPrompt({ summaries, inputSummary, brandSignal, universeIds }) {
+  const proofData = inputSummary?.social_proof_signal || {};
+  const hasAnyProof = !!(proofData.primary_quote || (proofData.top_comments?.length) || proofData.rating?.value);
+
+  const system = [
+    `You are a senior ad creative director scoring ${summaries.length} candidate creative concepts emitted by a Director LLM.`,
+    ``,
+    `Score every concept on 5 axes (each 0-10). DO NOT cull — every concept gets a score. The pipeline downstream ships them in rank order; your scores set the rank.`,
+    ``,
+    `SCORING AXES:`,
+    `  strategy_fit       — does the concept's archetype + priorities + emotional_hook match the strongest signal in the input? Penalize concepts that ignore obvious strengths or invent strategies the signal can't back.`,
+    `  brand_match        — do copy_picks + creative_style align with brand voice / tone? Reject pure clichés and off-tone copy.`,
+    `  media_utilization  — does media_picks use the seeded universe SMARTLY? Penalize: always-just-hero (single static_single when collage/grid would showcase alts), random picks unrelated to the archetype, output_shape tile_count mismatching media_picks length.`,
+    `  proof_coherence    — when social_proof_type != "none", inputSummary MUST have actual proof data to back it (primary_quote, top_comments, or rating). When proof_coherence fails, ALSO emit a "claimed_proof_no_data" hard_violation.`,
+    `  distinctness       — how meaningfully does this concept differ from its peers in this round (different archetype OR different media-pick combo OR different copy angle)?`,
+    ``,
+    `HARD VIOLATIONS — flag these as short string codes in the concept's hard_violations array. Do NOT cull; the renderer still ships violating concepts in rank order but operators surface the violation in diagnostics.`,
+    `  • claimed_proof_no_data    — social_proof_type != "none" AND inputSummary has no proof signal`,
+    `  • all_copy_picks_null      — every copy_picks field is null`,
+    `  • media_pick_out_of_universe — any media_picks[i].media_id NOT in the seeded universe ID list`,
+    `  • shape_pick_count_mismatch  — output_shape.tile_count != media_picks.length`,
+    `  • duplicate_archetype        — concept's archetype matches another concept in the batch AND their media-pick sets are identical`,
+    ``,
+    `OUTPUT JSON:`,
+    `  concept_scores  — array in CONCEPT INPUT ORDER (one per concept). Each: { concept_id, criteria_scores: { strategy_fit, brand_match, media_utilization, proof_coherence, distinctness } (each 0-10), hard_violations: [string] }`,
+    `  batch_rationale — 1-2 sentences explaining what differentiated the top concept`,
+    ``,
+    `Be decisive on scoring. If all concepts are similar, surface the differences via the distinctness axis.`,
+    ``,
+    `SEEDED UNIVERSE media_ids (use to validate media_picks coverage):`,
+    universeIds.length ? `  ${universeIds.join(', ')}` : `  (universe empty — no media_pick validation possible)`,
+    ``,
+    hasAnyProof ? `PROOF DATA PRESENT: rating=${proofData.rating?.value ?? '-'} comments=${(proofData.top_comments || []).length} quote=${proofData.primary_quote ? '"' + String(proofData.primary_quote.text || '').slice(0, 60) + '"' : 'none'}` : `PROOF DATA: NONE present — any concept claiming social_proof_type != "none" gets the claimed_proof_no_data hard_violation.`
+  ].join('\n');
+
+  const userLines = [];
+  if (brandSignal) {
+    userLines.push(`BRAND SIGNAL (for brand_match scoring):`);
+    userLines.push('```json');
+    userLines.push(JSON.stringify(brandSignal, null, 2));
+    userLines.push('```');
+    userLines.push('');
+  }
+  if (inputSummary?.social_proof_signal || inputSummary?.performance_signal) {
+    userLines.push(`SUPPORTING SIGNALS (for proof_coherence + strategy_fit scoring):`);
+    userLines.push('```json');
+    userLines.push(JSON.stringify({
+      social_proof_signal: inputSummary.social_proof_signal,
+      performance_signal:  inputSummary.performance_signal
+    }, null, 2));
+    userLines.push('```');
+    userLines.push('');
+  }
+  userLines.push(`CONCEPTS (compressed Director output):`);
+  userLines.push('```json');
+  userLines.push(JSON.stringify(summaries, null, 2));
+  userLines.push('```');
+  userLines.push('');
+  userLines.push(`Score all ${summaries.length} concepts now.`);
+
+  return { system, user: userLines.join('\n') };
+}
+
+function buildConceptRoundResponseSchema(conceptCount) {
+  return {
+    name: 'judge_concept_round',
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['concept_scores', 'batch_rationale'],
+      properties: {
+        concept_scores: {
+          type: 'array',
+          minItems: conceptCount,
+          maxItems: conceptCount,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['concept_id', 'criteria_scores', 'hard_violations'],
+            properties: {
+              concept_id: { type: 'string' },
+              criteria_scores: {
+                type: 'object',
+                additionalProperties: false,
+                required: [...CONCEPT_AXES],
+                properties: Object.fromEntries(
+                  CONCEPT_AXES.map(ax => [ax, { type: 'number', minimum: 0, maximum: 10 }])
+                )
+              },
+              hard_violations: {
+                type: 'array',
+                items: { type: 'string' }
+              }
+            }
+          }
+        },
+        batch_rationale: { type: 'string' }
+      }
+    },
+    strict: true
+  };
+}
+
 module.exports = {
   judgeCandidates,
+  judgeConceptsRound,
   DEFAULT_JUDGE_MODEL,
-  compressSpecForJudge
+  compressSpecForJudge,
+  compressConceptForJudge,
+  CONCEPT_AXES
 };
