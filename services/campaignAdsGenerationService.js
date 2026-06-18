@@ -48,7 +48,8 @@ const Media                 = require('../models/Media');
 const CatalogProduct        = require('../models/CatalogProduct');
 const ProductMatchArtifact  = require('../models/ProductMatchArtifact');
 const Ad                    = require('../models/Ad');
-const registry              = require('./templateRegistry');
+const registry                       = require('./templateRegistry');
+const { aspectRatioForPlatformFormat } = require('./veoPromptBuilder');
 
 // Cast a string/ObjectId to ObjectId. Required when querying
 // metadata.catalogProductId (Mixed type) — Mongoose doesn't auto-cast
@@ -322,19 +323,22 @@ async function expandWizardJob({
   // Flag off OR any precondition unmet → fall through to legacy path
   // below; V2 code is dead.
   //
-  // Reels (meta_reels_9_16) intentionally stays on the legacy path in
-  // Phase A — directConceptsRound throws for non-Feed formats. Phase B
-  // adds the Reels track via Veo.
-  //
-  // Brand-only runs (productIds.length === 0) stay legacy too — the
-  // concept-driven path is product-scoped. Brand-only support is a
-  // follow-up once per-product proves out.
+  // Brand-only runs (productIds.length === 0) stay legacy — the
+  // concept-driven path is product-scoped.
   const conceptDriven =
     String(process.env.AI_CONCEPT_DRIVEN || '').toLowerCase() === 'true'
     && effectivePlatformFormat === 'meta_feed_1_1'
     && productIds.length > 0;
 
-  if (conceptDriven && !dryRun) {
+  // Phase B — Reels via Veo. Concept-driven expansion is required (Director
+  // produces the concept + media picks that drive the Veo prompt). Gated by
+  // AI_VEO_REELS so Feed and Reels can be rolled out independently.
+  const reelsVeo =
+    String(process.env.AI_VEO_REELS || '').toLowerCase() === 'true'
+    && effectivePlatformFormat === 'meta_reels_9_16'
+    && productIds.length > 0;
+
+  if ((conceptDriven || reelsVeo) && !dryRun) {
     const result = await runConceptDrivenExpansion({
       campaignId, brandId, campaignKind, productIds,
       ctaText, ctaUrl, ctaUrlParams,
@@ -365,15 +369,12 @@ async function expandWizardJob({
     }
   }
 
-  // Platform-format-aware silent drop (Phase 5). Reels is a video-
-  // first surface; image-only seeds composite as still-on-video which
-  // looks visibly bad on the IG/FB Reels feed (no native motion in a
-  // motion-expected surface). When the operator picks Reels, silently
-  // drop image-only seeds rather than refuse the run or warn — matches
-  // the backlog Q3 lean (silent drop, operator doesn't have to triage
-  // per-seed media type). Variant_kind='product_image' seeds are also
-  // image-only by construction so they get dropped too.
-  if (effectivePlatformFormat === 'meta_reels_9_16') {
+  // Platform-format-aware seed filter for Reels. When AI_VEO_REELS is on,
+  // Veo handles both tracks — video seeds (Track 1, video-to-video) and
+  // image seeds (Track 2, image-to-video) — so all fileTypes are valid.
+  // Without AI_VEO_REELS, image-only seeds produce a still-on-video which
+  // looks bad on a motion-expected surface, so we drop them.
+  if (effectivePlatformFormat === 'meta_reels_9_16' && !reelsVeo) {
     const before = seeds.length;
     seeds = seeds.filter(s => s.fileType === 'video' && s.variantKind !== 'product_image');
     const dropped = before - seeds.length;
@@ -1385,10 +1386,10 @@ async function runConceptDrivenExpansion({
           judgeRank:         score.judgeRank ?? null,
           judgeScore:        score.judgeScore ?? null,
           generationOrder:   null,
-          renderRoute:       'html_gen',
+          renderRoute:       platformFormat === 'meta_reels_9_16' ? 'veo' : 'html_gen',
           // Legacy required fields kept populated for back-compat
           template,
-          aspectRatio:       '1:1',                  // Feed only in Phase A
+          aspectRatio:       aspectRatioForPlatformFormat(platformFormat) || '1:1',
           campaignKind,
           platformFormat,
           matchTier:         matchTierForUniverseRole(role),
