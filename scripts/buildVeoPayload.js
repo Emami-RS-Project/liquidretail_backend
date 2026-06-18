@@ -47,7 +47,7 @@ const Brand                    = require('../models/Brand');
 const CatalogProduct           = require('../models/CatalogProduct');
 const LayoutInputArtifact      = require('../models/LayoutInputArtifact');
 const CropArtifact             = require('../models/CropArtifact');
-const { buildVeoPrompt }       = require('../services/veoPromptBuilder');
+const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('../services/veoPromptBuilder');
 
 function parseArgs(argv) {
   const out = {};
@@ -82,10 +82,10 @@ function buildVertexBody({ prompt, firstFrameUrl, sourceVideoUrl, aspectRatio })
   // (text-to-video) OR an image reference (image-to-video) OR a video
   // reference (video-to-video). image-to-video is the cheaper + more
   // reliable starting point — the first-frame still locks composition.
-  const veoAspect =
-    aspectRatio === '9:16' ? '9:16' :
-    aspectRatio === '1:1'  ? '1:1'  :
-    '16:9';
+  // Veo 3 supports: 16:9, 9:16, 1:1, 4:5. Map our canonical strings directly;
+  // anything unrecognised falls back to 16:9.
+  const VEO_SUPPORTED = new Set(['16:9', '9:16', '1:1', '4:5']);
+  const veoAspect = VEO_SUPPORTED.has(aspectRatio) ? aspectRatio : '16:9';
 
   return {
     instances: [{
@@ -202,7 +202,9 @@ async function main() {
     mediaId      = ad.mediaId;
     productId    = ad.productId;
     campaignKind = ad.campaignKind;
-    aspectRatio  = ad.aspectRatio || aspectRatio;
+    // Destination drives aspect ratio — platformFormat is the source of truth.
+    // ad.aspectRatio is a legacy field that may not match the actual destination.
+    aspectRatio  = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || aspectRatio;
     if (!conceptId && ad.aiCanvasArtifactId) {
       const canvas = await AiCanvasArtifact.findById(ad.aiCanvasArtifactId)
         .select('directionConceptId').lean();

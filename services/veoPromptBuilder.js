@@ -6,6 +6,21 @@
 // describes the scene, motion, and WHERE animated overlays will land so
 // Veo composes the right negative space in the right areas.
 
+// Maps platformFormat (the ad destination) to the canonical aspect ratio
+// string used by Veo and Cloudinary transforms. Add new destinations here
+// as they're introduced — the ratio drives both the Vertex AI request and
+// the first-frame still derivation.
+const PLATFORM_FORMAT_ASPECT = {
+  meta_feed_1_1:   '1:1',
+  meta_reels_9_16: '9:16',
+  meta_feed_4_5:   '4:5',    // future
+  pmax_16_9:       '16:9',   // future
+};
+
+function aspectRatioForPlatformFormat(platformFormat) {
+  return PLATFORM_FORMAT_ASPECT[platformFormat] || null;
+}
+
 function archetypeDescription(arch) {
   const map = {
     full_bleed_hero_bottom_panel: 'cinematic full-frame hero shot, subject filling most of the frame',
@@ -218,5 +233,7 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
 module.exports = {
   buildVeoPrompt,
   archetypeDescription,
-  archetypeNegativeSpaceGuidance
+  archetypeNegativeSpaceGuidance,
+  aspectRatioForPlatformFormat,
+  PLATFORM_FORMAT_ASPECT
 };
