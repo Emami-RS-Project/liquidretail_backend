@@ -47,6 +47,7 @@ const Brand                    = require('../models/Brand');
 const CatalogProduct           = require('../models/CatalogProduct');
 const LayoutInputArtifact      = require('../models/LayoutInputArtifact');
 const CropArtifact             = require('../models/CropArtifact');
+const { buildVeoPrompt }       = require('../services/veoPromptBuilder');
 
 function parseArgs(argv) {
   const out = {};
@@ -75,57 +76,6 @@ function ratioKeyForAspect(aspect) {
   return dims[aspect]?.key || '1_1';
 }
 
-function archetypeDescription(arch) {
-  const map = {
-    full_bleed_hero_bottom_panel: 'cinematic full-frame hero shot of the product, the subject filling the frame',
-    vertical_split:               'tight product-focused composition with clean negative space on one side',
-    diagonal_carve:               'dynamic angular framing with energetic motion lines',
-    typographic_dominant:         'minimal hero product shot with strong negative space (text will be added on top)',
-    hero_quote_overlay:           'editorial hero frame with the product as the calm focal point',
-    magazine_editorial:           'magazine-spread aesthetic with the product as an elegant inset',
-    stat_led_social_proof:        'centered product showcase with clean composition',
-    product_card_grid:            'crisp product reveal'
-  };
-  return map[arch] || 'cinematic product shot';
-}
-
-function buildVeoPrompt({ concept, brand, product, media }) {
-  const lines = [];
-  lines.push(`Animate this product scene as a 5-second social media advertisement video.`);
-
-  if (concept?.emotional_hook) {
-    lines.push(`Energy and feel: ${concept.emotional_hook}.`);
-  }
-
-  if (concept?.archetype) {
-    lines.push(`Visual treatment: ${archetypeDescription(concept.archetype)}.`);
-  }
-
-  if (Array.isArray(brand?.tone) && brand.tone.length) {
-    lines.push(`Brand voice: ${brand.tone.slice(0, 4).join(', ')}.`);
-  }
-
-  if (brand?.tagline) {
-    lines.push(`Brand essence: "${brand.tagline}"`);
-  }
-
-  if (product?.title) {
-    const desc = product?.description ? ` — ${String(product.description).slice(0, 180)}` : '';
-    lines.push(`Product: ${product.title}${desc}.`);
-  }
-
-  const subj = media?.primarySubjectLabel || media?.classification?.primarySubjectLabel;
-  if (subj) {
-    lines.push(`Keep the primary subject (${subj}) clearly in frame for the full duration.`);
-  }
-
-  lines.push(`Motion: subtle natural camera movement, soft cinematic lighting, shallow depth of field. Product moves believably (gravity, surface contact, natural physics).`);
-
-  // CRITICAL — no text / logo generation. Chrome is composited later.
-  lines.push(`CRITICAL: DO NOT render any text, typography, logos, badges, watermarks, captions, or graphic chrome anywhere in the video. The frame must be visually clean — just the product and scene. Any text overlays, brand logos, or CTAs will be added on top by a separate compositing step after generation. Generating text in the video itself will be rejected.`);
-
-  return lines.join(' ');
-}
 
 function buildVertexBody({ prompt, firstFrameUrl, sourceVideoUrl, aspectRatio }) {
   // Vertex AI Veo 3 predictLongRunning expects either a text-only prompt
@@ -279,7 +229,15 @@ async function main() {
   }
   const layoutInput   = await loadLayoutInput({ mediaId, productId });
 
-  const prompt = buildVeoPrompt({ concept, brand, product, media });
+  const prompt = buildVeoPrompt({
+    concept,
+    brand,
+    product,
+    media,
+    layoutInput:  layoutInput?.input || null,
+    sourceMedia:  layoutInput?.input?.source_media || null,
+    aspectRatio
+  });
   const vertexBody = buildVertexBody({
     prompt,
     firstFrameUrl,
