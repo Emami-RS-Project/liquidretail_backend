@@ -529,7 +529,8 @@ async function expandWizardJob({
     return {
       campaignId: String(campaignId), brandId, campaignKind,
       queuedCount: dryRun ? 0 : await Ad.countDocuments({ campaignId, status: 'queued' }),
-      newlyQueued: 0, alreadyQueued: 0, newAdIds: [], total: 0, byProduct: {}
+      newlyQueued: 0, alreadyQueued: 0, newAdIds: [], total: 0, byProduct: {},
+      byVariantKind: { ugc: 0, product_image: 0 }
     };
   }
 
