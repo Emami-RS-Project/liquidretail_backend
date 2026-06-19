@@ -29,6 +29,7 @@ const { expandWizardJob, selectAdsForRun } = require('../services/campaignAdsGen
 const { renderCreative }        = require('../services/renderService');
 const { generateForAd: veoGenerateForAd }    = require('../services/aiVideoReferenceService');
 const { generateForAd: chromeGenerateForAd } = require('../services/aiReelsChromeService');
+const { compositeForAd: reelsPuppeteerComposite } = require('../services/aiReelsPuppeteerService');
 const { deleteFromCloudinary } = require('../services/cloudinaryService');
 const { buildVideoCompositeUrl } = require('../services/videoCompositeService');
 const { buildPreviewHtmlForAd }  = require('../services/adPreviewPageService');
@@ -449,19 +450,14 @@ async function renderOne(run, job, adId, index, renderToken) {
         );
         return;
       }
-      // Stage 2 — GPT chrome overlay. Persists chromeHtml directly; best-effort.
-      try {
-        await chromeGenerateForAd({ ad });
-      } catch (chromeErr) {
-        console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeErr.message}`);
-      }
-
-      const posterUrl = veoResult.videoUrl?.includes('/video/upload/')
+      // Veo-fallback Ad state. Done BEFORE Stage 2/3 so a Stage 3 failure
+      // still leaves a viewable ad (raw Veo video). Stage 3 overwrites
+      // renderUrl/posterUrl/cloudinaryPublicId on success.
+      const fallbackPosterUrl = veoResult.videoUrl?.includes('/video/upload/')
         ? veoResult.videoUrl
             .replace('/video/upload/', '/video/upload/so_0,f_jpg,q_auto:good/')
             .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2')
         : null;
-
       await Ad.updateOne(
         { _id: adId },
         {
@@ -469,8 +465,8 @@ async function renderOne(run, job, adId, index, renderToken) {
             status:             'draft',
             kind:               'video',
             veoVideoUrl:        veoResult.videoUrl,
-            renderUrl:          veoResult.videoUrl,  // placeholder until Puppeteer composites chrome
-            posterUrl:          posterUrl || veoResult.videoUrl,
+            renderUrl:          veoResult.videoUrl,
+            posterUrl:          fallbackPosterUrl || veoResult.videoUrl,
             cloudinaryPublicId: veoResult.cloudinaryPublicId,
             sourceFileType:     'video',
             updatedAt:          new Date()
@@ -478,6 +474,25 @@ async function renderOne(run, job, adId, index, renderToken) {
           $inc: { renderAttempts: 1 }
         }
       );
+
+      // Stage 2 — GPT chrome overlay. Persists chromeHtml directly; best-effort.
+      try {
+        await chromeGenerateForAd({ ad });
+      } catch (chromeErr) {
+        console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeErr.message}`);
+      }
+
+      // Stage 3 — Puppeteer animated chrome capture + ffmpeg composite.
+      // Overwrites renderUrl/posterUrl/cloudinaryPublicId on success.
+      const adWithChrome = await Ad.findById(adId).lean();
+      if (adWithChrome?.chromeHtml) {
+        try {
+          await reelsPuppeteerComposite({ ad: adWithChrome });
+        } catch (puppeteerErr) {
+          console.warn(`⚠️ reelsPuppeteer[ad=${adId}]: failed (non-fatal) — ${puppeteerErr.message}`);
+        }
+      }
+
       await CampaignRun.updateOne({ _id: run._id }, { $inc: { succeeded: 1 } });
     } catch (err) {
       console.error(`❌ veoReference[ad=${adId}]:`, err.message || err);
