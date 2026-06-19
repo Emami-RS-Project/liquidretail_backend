@@ -101,7 +101,6 @@ async function submitVeoJob({ prompt, imageBase64, aspectRatio }) {
     }],
     parameters: {
       aspectRatio:      veoAspect,
-      durationSeconds:  5,
       sampleCount:      1,
       personGeneration: 'allow_adult'
     }
