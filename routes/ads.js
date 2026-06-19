@@ -27,7 +27,8 @@ const Campaign     = require('../models/Campaign');
 const CampaignRun  = require('../models/CampaignRun');
 const { expandWizardJob, selectAdsForRun } = require('../services/campaignAdsGenerationService');
 const { renderCreative }        = require('../services/renderService');
-const { generateForAd: veoGenerateForAd } = require('../services/aiVideoReferenceService');
+const { generateForAd: veoGenerateForAd }    = require('../services/aiVideoReferenceService');
+const { generateForAd: chromeGenerateForAd } = require('../services/aiReelsChromeService');
 const { deleteFromCloudinary } = require('../services/cloudinaryService');
 const { buildVideoCompositeUrl } = require('../services/videoCompositeService');
 const { buildPreviewHtmlForAd }  = require('../services/adPreviewPageService');
@@ -444,17 +445,24 @@ async function renderOne(run, job, adId, index, renderToken) {
         await CampaignRun.updateOne({ _id: run._id }, { $inc: { skipped: 1 } });
         await Ad.updateOne(
           { _id: adId },
-          { $set: { status: 'skipped', updatedAt: new Date() } }
+          { $set: { status: 'queued', updatedAt: new Date() } }  // re-queues for next run when Veo is enabled
         );
         return;
       }
+      // Stage 2 — GPT chrome overlay. Persists chromeHtml directly; best-effort.
+      try {
+        await chromeGenerateForAd({ ad });
+      } catch (chromeErr) {
+        console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeErr.message}`);
+      }
+
       await Ad.updateOne(
         { _id: adId },
         {
           $set: {
-            status:             'done',
+            status:             'draft',
             veoVideoUrl:        veoResult.videoUrl,
-            renderUrl:          veoResult.videoUrl,  // placeholder until Puppeteer chrome is wired
+            renderUrl:          veoResult.videoUrl,  // placeholder until Puppeteer composites chrome
             cloudinaryPublicId: veoResult.cloudinaryPublicId,
             sourceFileType:     'video',
             updatedAt:          new Date()
