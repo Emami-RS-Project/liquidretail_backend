@@ -132,7 +132,8 @@ const MAX_ADS_PER_GENERATION_RUN = Math.max(1, parseInt(process.env.MAX_ADS_PER_
 // 1-product wizard run tight (3 ads) while a 10-product brand campaign
 // still produces 30 ads. Top picks by readinessScore within each
 // productId group; brand-only seeds (productId=null) form one group.
-const ADS_PER_PRODUCT_CAP = Math.max(1, parseInt(process.env.ADS_PER_PRODUCT_CAP, 10) || 3);
+const ADS_PER_PRODUCT_CAP     = Math.max(1, parseInt(process.env.ADS_PER_PRODUCT_CAP,     10) || 3);
+const VEO_ADS_PER_PRODUCT_CAP = Math.max(1, parseInt(process.env.VEO_ADS_PER_PRODUCT_CAP, 10) || 1);
 
 // Composite product popularity. Primary signal: how many UGC posts
 // have matched this product (genuine popularity proxy on the brand's
@@ -503,15 +504,16 @@ async function expandWizardJob({
       if (!byProduct.has(k)) byProduct.set(k, []);
       byProduct.get(k).push(p);
     }
+    const cap     = effectivePlatformFormat === 'meta_reels_9_16' ? VEO_ADS_PER_PRODUCT_CAP : ADS_PER_PRODUCT_CAP;
     const trimmed = [];
     let perProductDropped = 0;
     for (const group of byProduct.values()) {
       group.sort((a, b) => (b.readinessScore ?? -1) - (a.readinessScore ?? -1));
-      if (group.length > ADS_PER_PRODUCT_CAP) perProductDropped += group.length - ADS_PER_PRODUCT_CAP;
-      trimmed.push(...group.slice(0, ADS_PER_PRODUCT_CAP));
+      if (group.length > cap) perProductDropped += group.length - cap;
+      trimmed.push(...group.slice(0, cap));
     }
     if (perProductDropped > 0) {
-      console.log(`📦 expandWizardJob: per-product trim dropped ${perProductDropped} payload(s) (cap=${ADS_PER_PRODUCT_CAP}/product across ${byProduct.size} group(s))`);
+      console.log(`📦 expandWizardJob: per-product trim dropped ${perProductDropped} payload(s) (cap=${cap}/product across ${byProduct.size} group(s))`);
     }
     payloads = trimmed;
   }
