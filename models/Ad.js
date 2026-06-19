@@ -179,6 +179,8 @@ const adSchema = new mongoose.Schema({
   // forever.
   sourceFileType:     { type: String, enum: ['image', 'video', null], default: null },
   veoVideoUrl:        { type: String, default: null },  // raw Veo base video (before chrome + Puppeteer)
+  chromeHtml:         { type: String, default: null },  // GPT-generated transparent overlay HTML
+  chromeVersion:      { type: String, default: null },
   renderUrl:          { type: String, default: null },
   posterUrl:          { type: String, default: null },
   // Sparse index — queued ads carry null, only rendered ads contribute.
