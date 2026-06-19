@@ -95,11 +95,18 @@ async function submitVeoJob({ prompt, imageBase64, aspectRatio }) {
     }
   };
 
-  const res = await axios.post(
-    `${API_BASE}/models/${MODEL_ID}:predictLongRunning?key=${apiKey()}`,
-    body,
-    { headers: { 'Content-Type': 'application/json' }, timeout: 60000 }
-  );
+  let res;
+  try {
+    res = await axios.post(
+      `${API_BASE}/models/${MODEL_ID}:predictLongRunning?key=${apiKey()}`,
+      body,
+      { headers: { 'Content-Type': 'application/json' }, timeout: 60000 }
+    );
+  } catch (err) {
+    const status = err.response?.status;
+    const detail = JSON.stringify(err.response?.data || err.message);
+    throw new Error(`Veo submit failed (HTTP ${status}): ${detail}`);
+  }
   return res.data.name; // operation resource name
 }
 

@@ -41,7 +41,8 @@ const AD_STATUSES = ['draft', 'live', 'archived'];
 // Render concurrency. Puppeteer + Cloudinary is the bottleneck;
 // running too many in parallel on the small Render instance OOMs
 // Chromium. 2 in flight at once is a safe starting point.
-const RENDER_CONCURRENCY = parseInt(process.env.RENDER_CONCURRENCY || '2', 10);
+const RENDER_CONCURRENCY     = parseInt(process.env.RENDER_CONCURRENCY     || '2', 10);
+const VEO_CONCURRENCY        = parseInt(process.env.VEO_CONCURRENCY        || '1', 10);
 
 // Hard cap on creatives per generation. Cartesian expansion
 // (products × templates × supported ratios) blows up fast. Bumped
@@ -371,9 +372,12 @@ router.post('/runs', express.json(), async (req, res) => {
 // poller can show real-time progress.
 async function runRenderLoop(run, job, adIds, renderToken) {
   const t0 = Date.now();
+  // Veo calls are expensive and quota-limited — serialize them by default.
+  const isVeoRun    = job.platformFormat === 'meta_reels_9_16';
+  const concurrency = isVeoRun ? VEO_CONCURRENCY : RENDER_CONCURRENCY;
   console.log(
     `🚀 [campaignRun ${run.runId}] start — ${adIds.length} ad(s) ` +
-    `concurrency=${RENDER_CONCURRENCY} brand=${job.brandId} campaign=${job.campaignId} kind=${job.campaignKind || '-'}`
+    `concurrency=${concurrency}${isVeoRun ? ' (veo)' : ''} brand=${job.brandId} campaign=${job.campaignId} kind=${job.campaignKind || '-'}`
   );
 
   const queue = adIds.map((adId, i) => ({ adId, index: i }));
@@ -382,7 +386,7 @@ async function runRenderLoop(run, job, adIds, renderToken) {
 
   await new Promise((resolve) => {
     const dispatch = () => {
-      while (inflight < RENDER_CONCURRENCY && next < queue.length) {
+      while (inflight < concurrency && next < queue.length) {
         const { adId, index } = queue[next++];
         inflight++;
         renderOne(run, job, adId, index, renderToken)
