@@ -27,7 +27,7 @@
 const OpenAI = require('openai');
 const JSON5 = require('json5');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 90_000 });
 
 const MAX_DETECTIONS_PER_CALL = 24;
 

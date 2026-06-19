@@ -1,7 +1,7 @@
 const OpenAI = require('openai');
 const JSON5 = require('json5');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 90_000 });
 
 // Single GPT-4.1 call: returns subjects, text regions, AND a structured
 // background analysis so downstream stages (smart crops, AI extension /
