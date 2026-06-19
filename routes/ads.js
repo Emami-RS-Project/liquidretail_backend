@@ -456,13 +456,21 @@ async function renderOne(run, job, adId, index, renderToken) {
         console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeErr.message}`);
       }
 
+      const posterUrl = veoResult.videoUrl?.includes('/video/upload/')
+        ? veoResult.videoUrl
+            .replace('/video/upload/', '/video/upload/so_0,f_jpg,q_auto:good/')
+            .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2')
+        : null;
+
       await Ad.updateOne(
         { _id: adId },
         {
           $set: {
             status:             'draft',
+            kind:               'video',
             veoVideoUrl:        veoResult.videoUrl,
             renderUrl:          veoResult.videoUrl,  // placeholder until Puppeteer composites chrome
+            posterUrl:          posterUrl || veoResult.videoUrl,
             cloudinaryPublicId: veoResult.cloudinaryPublicId,
             sourceFileType:     'video',
             updatedAt:          new Date()
