@@ -1436,7 +1436,17 @@ async function runConceptDrivenExpansion({
     }
   }));
 
-  const payloads = perProductResults.flatMap(r => r.payloads);
+  // For Reels/Veo, cap to the top-ranked concept per product (cap=1 by default).
+  // Judge already assigned judgeRank (1=best); sort ascending and slice.
+  const isReels = platformFormat === 'meta_reels_9_16';
+  const conceptCap = isReels ? VEO_ADS_PER_PRODUCT_CAP : Infinity;
+  const payloads = perProductResults.flatMap(r => {
+    if (!isFinite(conceptCap) || r.payloads.length <= conceptCap) return r.payloads;
+    const sorted = r.payloads.slice().sort((a, b) => (a.judgeRank ?? 999) - (b.judgeRank ?? 999));
+    const kept = sorted.slice(0, conceptCap);
+    console.log(`📦 conceptDriven[product=${r.productId}]: capped ${r.payloads.length} → ${kept.length} payload(s) (reels cap=${conceptCap})`);
+    return kept;
+  });
   if (!payloads.length) {
     return {
       campaignId: String(campaignId), brandId, campaignKind,
