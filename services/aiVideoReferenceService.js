@@ -141,13 +141,23 @@ async function pollOperation(operationName) {
   throw new Error(`Veo operation timed out after ${MAX_POLL_MS / 1000}s: ${operationName}`);
 }
 
-// Gemini API returns base64-encoded video bytes in predictions[].
-function extractVideoBuffer(response) {
-  const predictions = response?.predictions || [];
-  const first       = predictions[0];
-  const b64         = first?.bytesBase64Encoded;
-  if (!b64) throw new Error(`Veo response missing video bytes: ${JSON.stringify(response)}`);
-  return Buffer.from(b64, 'base64');
+// veo-2.0: response.predictions[0].bytesBase64Encoded (inline base64)
+// veo-3.x: response.generateVideoResponse.generatedSamples[0].video.uri (download URI)
+async function extractVideoBuffer(response) {
+  // veo-3.x URI path
+  const uri = response?.generateVideoResponse?.generatedSamples?.[0]?.video?.uri;
+  if (uri) {
+    const sep = uri.includes('?') ? '&' : '?';
+    const res = await axios.get(`${uri}${sep}key=${apiKey()}`, {
+      responseType: 'arraybuffer',
+      timeout: 120000
+    });
+    return Buffer.from(res.data);
+  }
+  // veo-2.0 inline base64 path
+  const b64 = response?.predictions?.[0]?.bytesBase64Encoded;
+  if (b64) return Buffer.from(b64, 'base64');
+  throw new Error(`Veo response missing video bytes: ${JSON.stringify(response)}`);
 }
 
 // ── Public API ─────────────────────────────────────────────────────────
@@ -199,7 +209,7 @@ async function generateForAd({ ad }) {
   console.log(`🎬 veoReference[ad=${ad._id}]: operation started — ${operationName}`);
 
   const response    = await pollOperation(operationName);
-  const videoBuffer = extractVideoBuffer(response);
+  const videoBuffer = await extractVideoBuffer(response);
 
   const uploaded = await uploadBufferToCloudinary(videoBuffer, {
     folder:       'liquidretail/veo_renders',
