@@ -26,7 +26,8 @@ const CropArtifact = require('../models/CropArtifact');
 const Campaign     = require('../models/Campaign');
 const CampaignRun  = require('../models/CampaignRun');
 const { expandWizardJob, selectAdsForRun } = require('../services/campaignAdsGenerationService');
-const { renderCreative }  = require('../services/renderService');
+const { renderCreative }        = require('../services/renderService');
+const { generateForAd: veoGenerateForAd } = require('../services/aiVideoReferenceService');
 const { deleteFromCloudinary } = require('../services/cloudinaryService');
 const { buildVideoCompositeUrl } = require('../services/videoCompositeService');
 const { buildPreviewHtmlForAd }  = require('../services/adPreviewPageService');
@@ -431,6 +432,57 @@ async function renderOne(run, job, adId, index, renderToken) {
     variantKind:   ad.variantKind,
     paletteSource: ad.paletteSource || 'media'
   };
+  // ── Veo render path ────────────────────────────────────────────────
+  if (ad.renderRoute === 'veo') {
+    try {
+      const veoResult = await veoGenerateForAd({ ad });
+      if (veoResult.skipped) {
+        await CampaignRun.updateOne({ _id: run._id }, { $inc: { skipped: 1 } });
+        await Ad.updateOne(
+          { _id: adId },
+          { $set: { status: 'skipped', updatedAt: new Date() } }
+        );
+        return;
+      }
+      await Ad.updateOne(
+        { _id: adId },
+        {
+          $set: {
+            status:             'done',
+            veoVideoUrl:        veoResult.videoUrl,
+            renderUrl:          veoResult.videoUrl,  // placeholder until Puppeteer chrome is wired
+            cloudinaryPublicId: veoResult.cloudinaryPublicId,
+            sourceFileType:     'video',
+            updatedAt:          new Date()
+          },
+          $inc: { renderAttempts: 1 }
+        }
+      );
+      await CampaignRun.updateOne({ _id: run._id }, { $inc: { succeeded: 1 } });
+    } catch (err) {
+      await CampaignRun.updateOne(
+        { _id: run._id },
+        {
+          $inc:  { failed: 1 },
+          $push: { errors: buildErrorEntry(creative, index, 'veo', err) }
+        }
+      );
+      await Ad.updateOne(
+        { _id: adId },
+        {
+          $set: {
+            status:      'failed',
+            renderError: { message: err.message || String(err), stage: 'veo', at: new Date() },
+            updatedAt:   new Date()
+          },
+          $inc: { renderAttempts: 1 }
+        }
+      );
+    }
+    return;
+  }
+
+  // ── HTML Gen render path (Feed) ─────────────────────────────────────
   try {
     const result = await renderCreative({
       jobId:         crypto.randomBytes(8).toString('hex'),

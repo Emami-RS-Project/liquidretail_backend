@@ -178,6 +178,7 @@ const adSchema = new mongoose.Schema({
   // photorealUrl never lands and the badge would otherwise stay on
   // forever.
   sourceFileType:     { type: String, enum: ['image', 'video', null], default: null },
+  veoVideoUrl:        { type: String, default: null },  // raw Veo base video (before chrome + Puppeteer)
   renderUrl:          { type: String, default: null },
   posterUrl:          { type: String, default: null },
   // Sparse index — queued ads carry null, only rendered ads contribute.
