@@ -20,17 +20,34 @@ const path      = require('path');
 const crypto    = require('crypto');
 const { spawn } = require('child_process');
 
+const axios      = require('axios');
 const puppeteer  = require('puppeteer');
 const ffmpegPath = require('ffmpeg-static');
 
 const Ad = require('../models/Ad');
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
 
+async function downloadToFile(url, destPath) {
+  const res = await axios.get(url, { responseType: 'stream', timeout: 120000 });
+  await new Promise((resolve, reject) => {
+    const out = fs.createWriteStream(destPath);
+    res.data.pipe(out);
+    out.on('finish', resolve);
+    out.on('error', reject);
+    res.data.on('error', reject);
+  });
+}
+
 const CANVAS_W     = 1000;
 const CANVAS_H     = 1778;
 const TARGET_FPS   = parseInt(process.env.REELS_CHROME_FPS || '24', 10);
 const DURATION_SEC = parseInt(process.env.REELS_CHROME_DURATION_SEC || '5', 10);
 const TOTAL_FRAMES = TARGET_FPS * DURATION_SEC;
+// Encode output dims — kept smaller than canvas to bound libx264 memory on
+// Render's 512MB tier. 720×1280 is the same 9:16 aspect at ~half the pixels
+// of 1000×1778; libx264 memory scales with frame area × refs.
+const OUTPUT_W     = 720;
+const OUTPUT_H     = 1280;
 
 // ── Frame capture ──────────────────────────────────────────────────────
 
@@ -90,9 +107,12 @@ function runFfmpeg(args) {
     const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
     proc.stderr.on('data', d => { stderr += d.toString(); });
-    proc.on('close', code => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg exited ${code}: ${stderr.split('\n').slice(-12).join('\n')}`));
+    proc.on('close', (code, signal) => {
+      if (code === 0) return resolve();
+      // exit code null = killed by signal (often OOM on Render). Include
+      // signal + last 40 lines of stderr so the underlying cause surfaces.
+      const tail = stderr.split('\n').filter(l => l.trim()).slice(-40).join('\n');
+      reject(new Error(`ffmpeg exited code=${code} signal=${signal || 'none'}\n${tail}`));
     });
     proc.on('error', reject);
   });
@@ -107,23 +127,31 @@ function runFfmpeg(args) {
 //     stream ends (defensive — tpad should already cover it).
 //   - -shortest + -map 0:a? matches output duration to base video and carries audio
 //     if Veo ever emits it.
-async function compositeWithFfmpeg(veoVideoUrl, framePattern, outputPath) {
+async function compositeWithFfmpeg(veoVideoPath, framePattern, outputPath) {
+  // Memory-conservative encode for Render's 512MB tier:
+  //   - -threads 1 + -tune fastdecode keeps libx264 RAM low.
+  //   - preset ultrafast trades file size for ~3× less RAM than 'fast'.
+  //   - Output dims 720×1280 (vs 1000×1778) further cuts encoder working set.
+  //   - Chrome frames are scaled down to OUTPUT dims before overlay so the
+  //     overlay filter doesn't hold a 1000×1778 RGBA buffer per frame.
   const args = [
     '-y',
-    '-i', veoVideoUrl,
+    '-i', veoVideoPath,                  // local file (downloaded ahead of time)
     '-framerate', String(TARGET_FPS),
     '-i', framePattern,
     '-filter_complex',
-      `[0:v]scale=${CANVAS_W}:${CANVAS_H}:force_original_aspect_ratio=increase,` +
-        `crop=${CANVAS_W}:${CANVAS_H}[base];` +
-      `[1:v]tpad=stop_mode=clone:stop_duration=10[chrome];` +
+      `[0:v]scale=${OUTPUT_W}:${OUTPUT_H}:force_original_aspect_ratio=increase,` +
+        `crop=${OUTPUT_W}:${OUTPUT_H}[base];` +
+      `[1:v]scale=${OUTPUT_W}:${OUTPUT_H},tpad=stop_mode=clone:stop_duration=10[chrome];` +
       `[base][chrome]overlay=0:0:format=auto:eof_action=pass[out]`,
     '-map', '[out]',
     '-map', '0:a?',
     '-c:v', 'libx264',
     '-pix_fmt', 'yuv420p',
-    '-preset', 'fast',
-    '-crf', '23',
+    '-preset', 'ultrafast',
+    '-tune', 'fastdecode',
+    '-threads', '1',
+    '-crf', '28',
     '-movflags', '+faststart',
     '-shortest',
     outputPath
@@ -148,9 +176,13 @@ async function compositeForAd({ ad }) {
 
     const outputPath   = path.join(tmpDir, 'composite.mp4');
     const framePattern = path.join(tmpDir, 'frame_%04d.png');
+    const veoPath      = path.join(tmpDir, 'veo.mp4');
+
+    console.log(`🎬 reelsPuppeteer[ad=${ad._id}]: downloading Veo video...`);
+    await downloadToFile(ad.veoVideoUrl, veoPath);
 
     console.log(`🎬 reelsPuppeteer[ad=${ad._id}]: ffmpeg compositing (captured in ${captureMs}ms)...`);
-    await compositeWithFfmpeg(ad.veoVideoUrl, framePattern, outputPath);
+    await compositeWithFfmpeg(veoPath, framePattern, outputPath);
 
     const buffer = await fsp.readFile(outputPath);
     const uploaded = await uploadBufferToCloudinary(buffer, {
