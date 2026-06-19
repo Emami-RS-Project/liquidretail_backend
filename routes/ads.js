@@ -263,7 +263,7 @@ router.post('/generate', async (req, res) => {
 
     // 6. Fire-and-forget the render loop.
     setImmediate(() => {
-      runRenderLoop(run, job, adIds, renderToken).catch(err => {
+      runRenderLoop(run, { ...job, platformFormat }, adIds, renderToken).catch(err => {
         console.error(`❌ campaign run ${runId} crashed:`, err);
         CampaignRun.updateOne(
           { _id: run._id },
@@ -464,6 +464,7 @@ async function renderOne(run, job, adId, index, renderToken) {
       );
       await CampaignRun.updateOne({ _id: run._id }, { $inc: { succeeded: 1 } });
     } catch (err) {
+      console.error(`❌ veoReference[ad=${adId}]:`, err.message || err);
       await CampaignRun.updateOne(
         { _id: run._id },
         {
