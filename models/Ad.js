@@ -66,7 +66,7 @@ const adSchema = new mongoose.Schema({
   // enum + future values.
   platformFormat: {
     type:    String,
-    enum:    ['meta_feed_1_1', 'meta_reels_9_16'],
+    enum:    ['meta_feed_1_1', 'meta_feed_4_5', 'meta_reels_9_16', 'meta_stories_9_16', 'pmax_16_9'],
     default: 'meta_feed_1_1',
     index:   true
   },

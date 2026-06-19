@@ -6,20 +6,17 @@
 // describes the scene, motion, and WHERE animated overlays will land so
 // Veo composes the right negative space in the right areas.
 
-// Maps platformFormat (the ad destination) to the canonical aspect ratio
-// string used by Veo and Cloudinary transforms. Add new destinations here
-// as they're introduced — the ratio drives both the Vertex AI request and
-// the first-frame still derivation.
-const PLATFORM_FORMAT_ASPECT = {
-  meta_feed_1_1:   '1:1',
-  meta_reels_9_16: '9:16',
-  meta_feed_4_5:   '4:5',    // future
-  pmax_16_9:       '16:9',   // future
-};
-
-function aspectRatioForPlatformFormat(platformFormat) {
-  return PLATFORM_FORMAT_ASPECT[platformFormat] || null;
-}
+// Aspect-ratio resolution now lives in services/platformFormats.js — the
+// canonical capability table for every platformFormat. Re-exported here
+// so existing callers (scripts/buildVeoPayload.js, aiVideoReferenceService)
+// keep working without an import rewrite.
+const {
+  PLATFORM_FORMATS,
+  aspectRatioForPlatformFormat
+} = require('./platformFormats');
+const PLATFORM_FORMAT_ASPECT = Object.fromEntries(
+  Object.entries(PLATFORM_FORMATS).map(([k, v]) => [k, v.aspectRatio])
+);
 
 function archetypeDescription(arch) {
   const map = {

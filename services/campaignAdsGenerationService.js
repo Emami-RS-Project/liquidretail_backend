@@ -259,6 +259,12 @@ async function expandWizardJob({
   // Brand-only and media-driven seed paths ignore these flags.
   includeCategoryMatched = false,
   includeBrandMatched    = false,
+  // Operator's per-run ad-kind preference. 'both' = generate both image
+  // (HTML Gen) and video (Veo) for the selected format, 'image' or
+  // 'video' restricts to a single pipeline. Constrained by the format's
+  // declared kinds (services/platformFormats.js) — picking 'image' on
+  // Reels falls back to 'video'. null defers to campaign.adKinds.
+  kinds = null,
   // Dry-run mode — runs the entire seed assembly + cartesian + caps
   // but skips the Ad.insertMany. Returns the would-be payload counts
   // grouped by productId so the wizard can show "this will produce N
@@ -284,7 +290,7 @@ async function expandWizardJob({
   // via the platformFormat function parameter — operator selects on
   // Step 1 of the wizard. Wizard override wins; campaign field is the
   // fallback for sources that don't pass it (e.g. legacy callers).
-  const ALLOWED_PLATFORM_FORMATS = ['meta_feed_1_1', 'meta_reels_9_16'];
+  const ALLOWED_PLATFORM_FORMATS = ['meta_feed_1_1', 'meta_feed_4_5', 'meta_reels_9_16', 'meta_stories_9_16', 'pmax_16_9'];
   const wizardFormat = platformFormat && ALLOWED_PLATFORM_FORMATS.includes(platformFormat)
     ? platformFormat
     : null;
@@ -326,24 +332,46 @@ async function expandWizardJob({
   //
   // Brand-only runs (productIds.length === 0) stay legacy — the
   // concept-driven path is product-scoped.
-  const conceptDriven =
-    String(process.env.AI_CONCEPT_DRIVEN || '').toLowerCase() === 'true'
-    && effectivePlatformFormat === 'meta_feed_1_1'
-    && productIds.length > 0;
+  // Resolve operator-requested kinds against the format's allowed kinds.
+  // Wizard input (kinds param) wins over campaign.adKinds; falls back to
+  // 'both' so legacy callers get the previous behavior.
+  const requestedKinds = kinds || campaign.adKinds || 'both';
+  const { resolveKinds } = require('./platformFormats');
+  let resolvedKinds = resolveKinds(effectivePlatformFormat, requestedKinds);
 
-  // Phase B — Reels via Veo. Concept-driven expansion is required (Director
-  // produces the concept + media picks that drive the Veo prompt). Gated by
-  // AI_VEO_REELS so Feed and Reels can be rolled out independently.
-  const reelsVeo =
-    String(process.env.AI_VEO_REELS || '').toLowerCase() === 'true'
-    && effectivePlatformFormat === 'meta_reels_9_16'
-    && productIds.length > 0;
+  // Drop 'video' if Veo isn't enabled for this format. AI_VEO_REELS gates
+  // Reels (9:16); AI_VEO_FEED gates everything else. If the operator asked
+  // for video-only on a format with Veo disabled, this leaves resolvedKinds
+  // empty and the early-return below short-circuits with zero queued.
+  const veoFlag = effectivePlatformFormat === 'meta_reels_9_16'
+    ? process.env.AI_VEO_REELS
+    : process.env.AI_VEO_FEED;
+  const veoEnabled = String(veoFlag || '').toLowerCase() === 'true';
+  if (!veoEnabled && resolvedKinds.includes('video')) {
+    resolvedKinds = resolvedKinds.filter(k => k !== 'video');
+  }
 
-  if ((conceptDriven || reelsVeo) && !dryRun) {
+  // Concept-driven V2 routing. Used for:
+  //   - any video output (Veo + chrome + Puppeteer composite pipeline)
+  //   - Feed image output when AI_CONCEPT_DRIVEN flag is on
+  // Brand-only runs (productIds.length===0) stay on legacy cartesian.
+  const wantsVideo = resolvedKinds.includes('video');
+  const wantsImage = resolvedKinds.includes('image');
+  const useConceptDriven =
+    productIds.length > 0
+    && (
+      wantsVideo
+      || (wantsImage
+          && effectivePlatformFormat === 'meta_feed_1_1'
+          && String(process.env.AI_CONCEPT_DRIVEN || '').toLowerCase() === 'true')
+    );
+
+  if (useConceptDriven && !dryRun) {
     const result = await runConceptDrivenExpansion({
       campaignId, brandId, campaignKind, productIds,
       ctaText, ctaUrl, ctaUrlParams,
       platformFormat: effectivePlatformFormat,
+      kinds: resolvedKinds,
       includeCategoryMatched, includeBrandMatched,
       excludePairings, creativeIntent: null
     });
@@ -375,7 +403,7 @@ async function expandWizardJob({
   // image seeds (Track 2, image-to-video) — so all fileTypes are valid.
   // Without AI_VEO_REELS, image-only seeds produce a still-on-video which
   // looks bad on a motion-expected surface, so we drop them.
-  if (effectivePlatformFormat === 'meta_reels_9_16' && !reelsVeo) {
+  if (effectivePlatformFormat === 'meta_reels_9_16' && !veoEnabled) {
     const before = seeds.length;
     seeds = seeds.filter(s => s.fileType === 'video' && s.variantKind !== 'product_image');
     const dropped = before - seeds.length;
@@ -1233,12 +1261,13 @@ const CREATIVE_STYLE_TO_TEMPLATE = {
 // Per-concept identity. campaignId scopes uniqueness; conceptId +
 // productId + platformFormat distinguish within campaign. Independent
 // of media/template since the concept declares its own media + style.
-function computeV2IdentityDigest({ campaignId, productId, conceptId, platformFormat, ctaText, ctaUrl, ctaUrlParams }) {
+function computeV2IdentityDigest({ campaignId, productId, conceptId, platformFormat, kind, ctaText, ctaUrl, ctaUrlParams }) {
   const parts = [
     String(campaignId),
     productId ? String(productId) : 'NULL',
     String(conceptId || ''),
     String(platformFormat || ''),
+    String(kind || 'image'),                       // kind distinguishes image vs video variants of the same concept
     String(ctaText || ''),
     String(ctaUrl  || ''),
     String(ctaUrlParams || '')
@@ -1276,9 +1305,14 @@ async function runConceptDrivenExpansion({
   campaignId, brandId, campaignKind, productIds,
   ctaText, ctaUrl, ctaUrlParams,
   platformFormat,
+  kinds,                                            // [] of 'image'|'video' — what pipelines to emit per concept
   includeCategoryMatched, includeBrandMatched,
   excludePairings, creativeIntent
 }) {
+  const { resolveKinds, renderRouteForKind } = require('./platformFormats');
+  const resolvedKinds = (Array.isArray(kinds) && kinds.length)
+    ? kinds
+    : resolveKinds(platformFormat, 'both');
   const seededUniverseSvc = require('./seededUniverseService');
   const director          = require('./aiCreativeDirectorService');
   const judge             = require('./aiJudgeService');
@@ -1375,44 +1409,49 @@ async function runConceptDrivenExpansion({
         const template = CREATIVE_STYLE_TO_TEMPLATE[concept.creative_style] || 'ai_brand_led';
         const role = primaryUniverseEntry.role;
 
-        payloads.push({
-          brandId,
-          campaignId,
-          campaignRunIds: [],
-          mediaId:        new mongoose.Types.ObjectId(primaryId),
-          productId:      toObjectId(productId),
-          // Concept-driven fields (A1 schema)
-          conceptId:         concept.concept_id,
-          conceptArtifactId: artifact._id,
-          mediaIds:          mediaIdObjs,
-          judgeRank:         score.judgeRank ?? null,
-          judgeScore:        score.judgeScore ?? null,
-          generationOrder:   null,
-          renderRoute:       platformFormat === 'meta_reels_9_16' ? 'veo' : 'html_gen',
-          // Legacy required fields kept populated for back-compat
-          template,
-          aspectRatio:       aspectRatioForPlatformFormat(platformFormat) || '1:1',
-          campaignKind,
-          platformFormat,
-          matchTier:         matchTierForUniverseRole(role),
-          variantKind:       variantKindForUniverseRole(role),
-          paletteSource:     'media',
-          rafflePrizeMediaId: null,
-          // readinessScore mirrors judgeScore so the existing select-
-          // AdsForRun sort (readinessScore desc) approximates judgeRank
-          // order until A5b adds the judgeRank-aware sort.
-          readinessScore:    score.judgeScore ?? null,
-          status:            'queued',
-          identityDigest:    computeV2IdentityDigest({
-            campaignId, productId,
-            conceptId: concept.concept_id,
+        // One payload per requested kind. Image → html_gen, video → veo.
+        // identityDigest includes kind so image+video variants of the same
+        // concept don't collide on the (campaignId, identityDigest) unique
+        // index.
+        for (const kind of resolvedKinds) {
+          payloads.push({
+            brandId,
+            campaignId,
+            campaignRunIds: [],
+            mediaId:        new mongoose.Types.ObjectId(primaryId),
+            productId:      toObjectId(productId),
+            // Concept-driven fields (A1 schema)
+            conceptId:         concept.concept_id,
+            conceptArtifactId: artifact._id,
+            mediaIds:          mediaIdObjs,
+            judgeRank:         score.judgeRank ?? null,
+            judgeScore:        score.judgeScore ?? null,
+            generationOrder:   null,
+            renderRoute:       renderRouteForKind(kind),
+            kind,
+            // Legacy required fields kept populated for back-compat
+            template,
+            aspectRatio:       aspectRatioForPlatformFormat(platformFormat) || '1:1',
+            campaignKind,
             platformFormat,
-            ctaText, ctaUrl, ctaUrlParams
-          }),
-          ctaText, ctaUrl, ctaUrlParams,
-          queuedAt:          new Date(),
-          generatedAt:       new Date()
-        });
+            matchTier:         matchTierForUniverseRole(role),
+            variantKind:       variantKindForUniverseRole(role),
+            paletteSource:     'media',
+            rafflePrizeMediaId: null,
+            readinessScore:    score.judgeScore ?? null,
+            status:            'queued',
+            identityDigest:    computeV2IdentityDigest({
+              campaignId, productId,
+              conceptId: concept.concept_id,
+              platformFormat,
+              kind,
+              ctaText, ctaUrl, ctaUrlParams
+            }),
+            ctaText, ctaUrl, ctaUrlParams,
+            queuedAt:          new Date(),
+            generatedAt:       new Date()
+          });
+        }
       }
 
       console.log(
@@ -1436,15 +1475,29 @@ async function runConceptDrivenExpansion({
     }
   }));
 
-  // For Reels/Veo, cap to the top-ranked concept per product (cap=1 by default).
-  // Judge already assigned judgeRank (1=best); sort ascending and slice.
-  const isReels = platformFormat === 'meta_reels_9_16';
-  const conceptCap = isReels ? VEO_ADS_PER_PRODUCT_CAP : Infinity;
+  // Per-(product, kind) caps. Video is expensive (~$1.75/Veo call) so it
+  // caps at VEO_ADS_PER_PRODUCT_CAP (1); image uses ADS_PER_PRODUCT_CAP (3).
+  // Judge already ranked concepts (judgeRank=1=best); sort ascending and
+  // take the top N within each kind bucket.
+  const CAP_BY_KIND = { video: VEO_ADS_PER_PRODUCT_CAP, image: ADS_PER_PRODUCT_CAP };
   const payloads = perProductResults.flatMap(r => {
-    if (!isFinite(conceptCap) || r.payloads.length <= conceptCap) return r.payloads;
-    const sorted = r.payloads.slice().sort((a, b) => (a.judgeRank ?? 999) - (b.judgeRank ?? 999));
-    const kept = sorted.slice(0, conceptCap);
-    console.log(`📦 conceptDriven[product=${r.productId}]: capped ${r.payloads.length} → ${kept.length} payload(s) (reels cap=${conceptCap})`);
+    if (!r.payloads.length) return [];
+    const byKind = new Map();
+    for (const p of r.payloads) {
+      const k = p.kind || 'image';
+      if (!byKind.has(k)) byKind.set(k, []);
+      byKind.get(k).push(p);
+    }
+    const kept = [];
+    for (const [kind, list] of byKind.entries()) {
+      const cap = CAP_BY_KIND[kind] ?? Infinity;
+      const sorted = list.slice().sort((a, b) => (a.judgeRank ?? 999) - (b.judgeRank ?? 999));
+      const slice  = isFinite(cap) ? sorted.slice(0, cap) : sorted;
+      if (slice.length < list.length) {
+        console.log(`📦 conceptDriven[product=${r.productId}]: capped ${list.length} → ${slice.length} ${kind} payload(s) (cap=${cap})`);
+      }
+      kept.push(...slice);
+    }
     return kept;
   });
   if (!payloads.length) {

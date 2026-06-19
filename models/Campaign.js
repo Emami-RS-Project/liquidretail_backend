@@ -221,9 +221,20 @@ const campaignSchema = new mongoose.Schema({
   // canvases with no safe-area constraints).
   platformFormat: {
     type:    String,
-    enum:    ['meta_feed_1_1', 'meta_reels_9_16'],
+    enum:    ['meta_feed_1_1', 'meta_feed_4_5', 'meta_reels_9_16', 'meta_stories_9_16', 'pmax_16_9'],
     default: 'meta_feed_1_1',
     index:   true
+  },
+
+  // Operator-selectable ad kind per campaign. 'both' splits the render
+  // budget across both pipelines (image via HTML Gen, video via Veo).
+  // Constrained against the format's allowed kinds in expandWizardJob
+  // (e.g. selecting 'image' on Reels falls back to 'video'). See
+  // services/platformFormats.js for the per-format capability table.
+  adKinds: {
+    type:    String,
+    enum:    ['image', 'video', 'both'],
+    default: 'both'
   },
 
   // Phase 2 V2 routing — uses the Director-driven Generator + Judge
