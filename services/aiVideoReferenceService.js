@@ -22,7 +22,7 @@ const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact')
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
 const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('./veoPromptBuilder');
 
-const MODEL_ID      = process.env.VEO_MODEL_ID       || 'veo-2.0-generate-001';
+const MODEL_ID      = process.env.VEO_MODEL_ID       || 'veo-3.1-generate-preview';
 const POLL_INTERVAL = parseInt(process.env.VEO_POLL_INTERVAL_MS, 10) || 15000;
 const MAX_POLL_MS   = parseInt(process.env.VEO_TIMEOUT_MS, 10)       || 600000; // 10 min
 
