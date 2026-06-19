@@ -36,13 +36,26 @@ function apiKey() {
   return process.env.GEMINI_API_KEY || '';
 }
 
-(function logConfig() {
+(async function logConfig() {
   console.log(
     `🎬 aiVideoReferenceService config — ` +
     `enabled=${enabled()} ` +
     `model=${MODEL_ID} ` +
     `keyPresent=${!!apiKey()}`
   );
+  if (!apiKey()) return;
+  try {
+    const res = await axios.get(
+      `${API_BASE}/models?key=${apiKey()}`,
+      { timeout: 10000 }
+    );
+    const veoModels = (res.data?.models || [])
+      .filter(m => m.name?.toLowerCase().includes('veo'))
+      .map(m => `${m.name} [${(m.supportedGenerationMethods || []).join(',')}]`);
+    console.log(`🎬 veo models available: ${veoModels.length ? veoModels.join(' | ') : 'none'}`);
+  } catch (err) {
+    console.warn(`🎬 veo model list unavailable: ${err.message}`);
+  }
 })();
 
 // ── Reference image derivation ─────────────────────────────────────────
