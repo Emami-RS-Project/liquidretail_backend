@@ -470,9 +470,13 @@ async function renderOne(run, job, adId, index, renderToken) {
         }
       );
 
-      // Stage 2 — GPT chrome overlay. Persists chromeHtml directly; best-effort.
+      // Stage 2 — GPT chrome overlay. Re-fetch the Ad so chromeGenerateForAd
+      // sees the freshly-stamped veoVideoUrl (it samples 8 frames from the
+      // Cloudinary video URL and passes them to GPT-4.1 for contrast-aware
+      // text placement). Persists chromeHtml directly; best-effort.
+      const adAfterVeo = await Ad.findById(adId).lean();
       try {
-        await chromeGenerateForAd({ ad });
+        await chromeGenerateForAd({ ad: adAfterVeo });
       } catch (chromeErr) {
         console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeErr.message}`);
       }

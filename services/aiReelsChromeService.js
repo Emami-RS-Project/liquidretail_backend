@@ -34,7 +34,25 @@ const {
 const MODEL_ID         = process.env.REELS_CHROME_MODEL_ID || 'gpt-4.1';
 const TEMPERATURE      = 0.85;
 const MAX_TOKENS       = 12000;
-const CHROME_VERSION   = '1.1.0';                          // bumped: format-aware canvas + safe area
+const CHROME_VERSION   = '1.2.0';                          // bumped: video-frame-aware contrast + hard contrast requirements
+const FRAME_SAMPLE_COUNT = parseInt(process.env.REELS_CHROME_FRAME_SAMPLES || '8', 10);
+
+// Derive evenly-spaced still-frame URLs from a Cloudinary video URL via the
+// so_<seconds> transform. Used to show GPT-4.1 what the Veo base video looks
+// like at each second, so it can pick text placement + scrim colors that work
+// against the actual underlying pixels (not best-effort guessing). Returns
+// [] for non-Cloudinary URLs (or null input).
+function deriveFrameUrls(videoUrl, count = FRAME_SAMPLE_COUNT) {
+  if (!videoUrl?.includes('/video/upload/')) return [];
+  const urls = [];
+  for (let i = 0; i < count; i++) {
+    const u = videoUrl
+      .replace('/video/upload/', `/video/upload/so_${i},f_jpg,w_400,q_auto:good/`)
+      .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2');
+    urls.push(u);
+  }
+  return urls;
+}
 
 // Resolve per-format canvas + safe area. Reels keeps 1000×1778 with 204px
 // top/bottom UI bands; other formats use their declared canvas (e.g.
@@ -187,6 +205,27 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
     lines.push(``);
   }
 
+  lines.push(`VIDEO REFERENCE FRAMES`);
+  lines.push(`  You are being shown ${FRAME_SAMPLE_COUNT} still frames sampled from the Veo base video at t=0,1,2,...,${FRAME_SAMPLE_COUNT - 1}s.`);
+  lines.push(`  Use them to:`);
+  lines.push(`    1. Identify which region of the frame is consistently DARKEST and LEAST BUSY across all frames — place text/CTA there.`);
+  lines.push(`    2. Avoid placing chrome over the product, faces, or moving focal points (track them across frames).`);
+  lines.push(`    3. Pick scrim/panel colors that complement the video's palette (dark scrims on bright video, light scrims on dark video).`);
+  lines.push(`    4. Account for any motion: if the product moves right at t=4s, keep chrome on the left.`);
+  lines.push(`  The LAST 3 frames (t=${FRAME_SAMPLE_COUNT - 3}s..${FRAME_SAMPLE_COUNT - 1}s) are the most load-bearing — that's when chrome is at full opacity (animations complete) and viewers read it.`);
+  lines.push(``);
+  lines.push(`CONTRAST REQUIREMENTS (HARD CONSTRAINT)`);
+  lines.push(`  EVERY readable text element (headline, eyebrow, subheadline, CTA label, quote text, author/star line) MUST include at least one contrast guarantor.`);
+  lines.push(`  Naked text directly over the video (no scrim, no shadow, no backdrop, no stroke) is FORBIDDEN — the video may be bright/busy/colorful at any moment and naked text will become unreadable.`);
+  lines.push(`  Acceptable guarantors (use ONE OR MORE per element, never zero):`);
+  lines.push(`    a) Solid or semi-transparent panel BEHIND the text — background: rgba(0,0,0,0.55–0.85) or rgba(255,255,255,0.7–0.9), with padding 16–32px and rounded corners.`);
+  lines.push(`    b) Linear-gradient backdrop fading from solid at one edge to transparent toward the other — useful for full-width bands at canvas top/bottom.`);
+  lines.push(`    c) backdrop-filter: blur(12–24px) on a translucent container (rgba 0.15–0.30) — frosted-glass card effect.`);
+  lines.push(`    d) Heavy text-shadow: text-shadow: 0 2px 12px rgba(0,0,0,0.75), 0 0 2px rgba(0,0,0,0.95) — works for headlines directly over the video when (a)/(b)/(c) would feel too heavy.`);
+  lines.push(`    e) Text stroke via -webkit-text-stroke: 1px rgba(0,0,0,0.9) combined with (d) — TikTok-style bold-outline aesthetic.`);
+  lines.push(`  Pick the guarantor that fits the chosen platform_style: ig_reels/editorial favor (a)/(b)/(c); tiktok/yt_shorts favor (d)/(e).`);
+  lines.push(`  Self-check before emitting: walk each text element and confirm it has at least one of (a)–(e). If any element doesn't, add one.`);
+  lines.push(``);
   lines.push(`ANIMATION REQUIREMENTS`);
   lines.push(`  All animations MUST complete within 5 seconds (match Veo video duration).`);
   lines.push(`  Use CSS @keyframes — no JavaScript.`);
@@ -221,8 +260,20 @@ async function generateForAd({ ad }) {
 
   const prompt = buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText: ad.ctaText, platformFormat });
 
+  // Frame sampling — show GPT what the Veo base video actually looks like so
+  // it can place text/scrims against real pixels (not best-effort guessing).
+  // detail:'low' keeps each image at a flat 85 tokens regardless of size.
+  const frameUrls = deriveFrameUrls(ad.veoVideoUrl);
+  const userContent = [
+    { type: 'text', text: prompt },
+    ...frameUrls.map(url => ({
+      type:      'image_url',
+      image_url: { url, detail: 'low' }
+    }))
+  ];
+
   const t0 = Date.now();
-  console.log(`🎨 reelsChrome[ad=${ad._id}]: generating chrome (model=${MODEL_ID})...`);
+  console.log(`🎨 reelsChrome[ad=${ad._id}]: generating chrome (model=${MODEL_ID}, frames=${frameUrls.length})...`);
 
   let chromeHtml;
   try {
@@ -242,7 +293,7 @@ async function generateForAd({ ad }) {
         max_tokens:  MAX_TOKENS,
         messages: [
           { role: 'system', content: 'You are an expert HTML/CSS creative coder for social video ads. Emit only the HTML document — no markdown, no explanation.' },
-          { role: 'user',   content: prompt }
+          { role: 'user',   content: userContent }
         ]
       })
     );
