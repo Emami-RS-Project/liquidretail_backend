@@ -27,7 +27,11 @@ const campaignRunSchema = new mongoose.Schema({
   skipped:      { type: Number, default: 0 },
   failed:       { type: Number, default: 0 },
 
-  status:       { type: String, enum: ['running', 'done', 'failed'], default: 'running', index: true },
+  // 'preparing' = expandWizardJob is running in the background (Director +
+  // Judge LLM calls). Was previously sync on the request path, but Render's
+  // edge can cut a ~28s request even when the backend is healthy — moved
+  // off-request so /api/ads/generate responds 202 immediately.
+  status:       { type: String, enum: ['preparing', 'running', 'done', 'failed'], default: 'preparing', index: true },
 
   errors: [{
     _id:        false,

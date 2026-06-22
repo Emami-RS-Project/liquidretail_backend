@@ -154,50 +154,17 @@ router.post('/generate', async (req, res) => {
       });
     }
 
-    // 1. Expand the wizard payload — bulk-queues every viable combination as
-    //    Ad docs with status='queued'. Re-running with the same picks is
-    //    idempotent (unique index on campaignId+identityDigest swallows dups).
-    const job = await expandWizardJob({
-      campaignId,
-      productIds,
-      mediaIds,
-      templateIds,
-      cta,
-      urlParams,
-      platformFormat,
-      kinds,
-      excludePairings,
-      includeCategoryMatched,
-      includeBrandMatched,
-      requestedBy: req.user?.userId || null
-    });
-
-    if (job.queuedCount === 0) {
-      return res.status(422).json({
-        error: 'No renderable creatives — no media available for the selected products / templates',
-        job
-      });
-    }
-
-    // 2. Pick the top N queued ads for this run, ranked by readinessScore.
-    //    Subsequent "render more" passes will draw the next N from what
-    //    remains queued.
-    const adIds = await selectAdsForRun({ campaignId, limit: MAX_CREATIVES_PER_RUN });
-    if (!adIds.length) {
-      return res.status(422).json({
-        error: 'No queued ads selected for this run (selection returned empty)',
-        job
-      });
-    }
-
+    // expandWizardJob runs Director + Judge LLMs (~15-25s) and was previously
+    // sync on the request path — that pushed past Render's edge timeout and
+    // produced 504s even though the backend was healthy. The fix:
+    //   1. Mint runId + renderToken + CampaignRun (status='preparing') NOW
+    //      so the frontend has something to poll immediately.
+    //   2. Respond 202 with status='preparing' and total=0.
+    //   3. setImmediate: run expandWizardJob + selectAdsForRun, then flip
+    //      the run to status='running' with total set and start the render
+    //      loop. Errors land the run as status='failed' with a single
+    //      error entry so the UI can surface them.
     const runId = `run_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-
-    // 2. Mint a short-lived JWT for the render service to authenticate
-    //    inside Puppeteer. Same shape as the OAuth-callback token so
-    //    requireAuth resolves req.user the same way; 1h TTL is plenty
-    //    for the longest batch and short enough to bound blast radius
-    //    if the token leaked. Replaces the long-lived RENDER_AUTH_TOKEN
-    //    env var that operators had to hand-refresh every 24h.
     const renderToken = jwt.sign(
       {
         id:     req.user?.id,
@@ -210,72 +177,96 @@ router.post('/generate', async (req, res) => {
       { expiresIn: '1h' }
     );
 
-    // 2b. Persist the operator's picks back to the campaign so the
-    //     campaign's pinned strip reflects what was used. $addToSet
-    //     keeps re-runs idempotent (duplicates collapse). Picks made
-    //     via the wizard's deep-link entry points (Media Library +
-    //     Catalog Browser → Generate Ads) wouldn't otherwise land on
-    //     the campaign — only the explicit "Add to Campaign" affordance
-    //     wrote to those arrays before this.
+    // Persist operator picks to the campaign (idempotent; fast). Mirrors the
+    // prior behavior so the campaign's pinned strip reflects the run inputs.
     if (productIds.length || mediaIds.length) {
       const setOps = {};
       if (productIds.length) setOps.matchedProductIds = { $each: productIds };
       if (mediaIds.length)   setOps.mediaIds          = { $each: mediaIds };
-      await Campaign.updateOne(
-        { _id: campaignId },
-        { $addToSet: setOps }
-      ).catch(err => {
-        // Non-fatal — the ads still generate; we just lose the pin.
-        console.warn(`   ⚠️  campaign pin failed for ${campaignId}: ${err.message}`);
-      });
+      Campaign.updateOne({ _id: campaignId }, { $addToSet: setOps })
+        .catch(err => console.warn(`   ⚠️  campaign pin failed for ${campaignId}: ${err.message}`));
     }
 
-    // 3. Mark the selected ads as picked for this run + append the
-    //    runId to campaignRunIds[]. Done up-front so a server restart
-    //    leaves the doc in a recognizable rendering state rather than
-    //    orphaned-but-queued. $addToSet so re-render of the same Ad
-    //    in a new run cleanly accumulates without dup checks here.
-    await Ad.updateMany(
-      { _id: { $in: adIds } },
-      {
-        $addToSet: { campaignRunIds: runId },
-        $set:      { status: 'rendering', updatedAt: new Date() }
-      }
-    );
-
-    // 4. Create the run doc.
+    const campaignDoc = await Campaign.findById(campaignId).select('brandId kind').lean();
     const run = await CampaignRun.create({
       runId,
-      brandId:      job.brandId,
-      campaignId:   job.campaignId,
-      campaignKind: job.campaignKind,
-      total:        adIds.length,
-      status:       'running',
+      brandId:      String(campaignDoc.brandId),
+      campaignId:   String(campaignId),
+      campaignKind: campaignDoc.kind || 'product',
+      total:        0,
+      status:       'preparing',
       requestedBy:  req.user?.userId || null,
       startedAt:    new Date()
     });
 
-    // 5. Respond 202 — frontend redirects to /ads?campaignRunId=X and
-    //    polls /api/ads/runs/:runId for progress.
     res.status(202).json({
       campaignRunId: runId,
-      campaignId:    job.campaignId,
-      brandId:       job.brandId,
-      campaignKind:  job.campaignKind,
-      total:         adIds.length,
-      queuedRemaining: Math.max(0, job.queuedCount - adIds.length),
-      status:        'running'
+      campaignId:    String(campaignId),
+      brandId:       String(campaignDoc.brandId),
+      campaignKind:  campaignDoc.kind || 'product',
+      total:         0,
+      queuedRemaining: 0,
+      status:        'preparing'
     });
 
-    // 6. Fire-and-forget the render loop.
-    setImmediate(() => {
-      runRenderLoop(run, { ...job, platformFormat }, adIds, renderToken).catch(err => {
-        console.error(`❌ campaign run ${runId} crashed:`, err);
-        CampaignRun.updateOne(
+    setImmediate(async () => {
+      try {
+        const job = await expandWizardJob({
+          campaignId,
+          productIds,
+          mediaIds,
+          templateIds,
+          cta,
+          urlParams,
+          platformFormat,
+          kinds,
+          excludePairings,
+          includeCategoryMatched,
+          includeBrandMatched,
+          requestedBy: req.user?.userId || null
+        });
+
+        if (job.queuedCount === 0) {
+          await CampaignRun.updateOne(
+            { _id: run._id },
+            { status: 'done', completedAt: new Date(),
+              $push: { errors: { index: 0, stage: 'expand', message: 'No renderable creatives' } } }
+          );
+          return;
+        }
+
+        const adIds = await selectAdsForRun({ campaignId, limit: MAX_CREATIVES_PER_RUN });
+        if (!adIds.length) {
+          await CampaignRun.updateOne(
+            { _id: run._id },
+            { status: 'done', completedAt: new Date(),
+              $push: { errors: { index: 0, stage: 'select', message: 'Selection returned empty' } } }
+          );
+          return;
+        }
+
+        await Ad.updateMany(
+          { _id: { $in: adIds } },
+          {
+            $addToSet: { campaignRunIds: runId },
+            $set:      { status: 'rendering', updatedAt: new Date() }
+          }
+        );
+
+        await CampaignRun.updateOne(
           { _id: run._id },
-          { status: 'failed', completedAt: new Date() }
+          { $set: { total: adIds.length, status: 'running' } }
+        );
+
+        await runRenderLoop(run, { ...job, platformFormat }, adIds, renderToken);
+      } catch (err) {
+        console.error(`❌ campaign run ${runId} prep/render crashed:`, err);
+        await CampaignRun.updateOne(
+          { _id: run._id },
+          { status: 'failed', completedAt: new Date(),
+            $push: { errors: { index: 0, stage: 'expand', message: err.message || String(err) } } }
         ).catch(() => {});
-      });
+      }
     });
 
   } catch (err) {
