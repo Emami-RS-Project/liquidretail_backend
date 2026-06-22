@@ -45,8 +45,9 @@ function sizeForRatio(aspectRatio) {
     case '9:16':
     case '4:5':   return { size: '1024x1536', width: 1024, height: 1536 };
     case '1.91:1':
-    case '5:4':   return { size: '1536x1024', width: 1536, height: 1024 };
-    case '1:1':
+    case '5:4':
+    case '16:9':  return { size: '1536x1024', width: 1536, height: 1024 };
+    case '1:1':   return { size: '1024x1024', width: 1024, height: 1024 };
     default:      return { size: '1024x1024', width: 1024, height: 1024 };
   }
 }

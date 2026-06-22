@@ -353,7 +353,10 @@ async function expandWizardJob({
 
   // Concept-driven V2 routing. Used for:
   //   - any video output (Veo + chrome + Puppeteer composite pipeline)
-  //   - Feed image output when AI_CONCEPT_DRIVEN flag is on
+  //   - any image output when AI_CONCEPT_DRIVEN is on (any format) — the
+  //     legacy cartesian was 1:1-only and stamped Ad.aspectRatio='1:1'
+  //     regardless of platformFormat, so it can't serve 4:5 / 9:16 / 16:9
+  //     image ads. Concept-driven respects aspectRatioForPlatformFormat.
   // Brand-only runs (productIds.length===0) stay on legacy cartesian.
   const wantsVideo = resolvedKinds.includes('video');
   const wantsImage = resolvedKinds.includes('image');
@@ -361,9 +364,7 @@ async function expandWizardJob({
     productIds.length > 0
     && (
       wantsVideo
-      || (wantsImage
-          && effectivePlatformFormat === 'meta_feed_1_1'
-          && String(process.env.AI_CONCEPT_DRIVEN || '').toLowerCase() === 'true')
+      || (wantsImage && String(process.env.AI_CONCEPT_DRIVEN || '').toLowerCase() === 'true')
     );
 
   if (useConceptDriven && !dryRun) {
