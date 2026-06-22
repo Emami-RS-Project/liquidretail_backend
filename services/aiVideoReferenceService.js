@@ -90,15 +90,28 @@ async function fetchAsBase64(url) {
 
 // ── Gemini API calls ───────────────────────────────────────────────────
 
-async function submitVeoJob({ prompt, imageBase64, aspectRatio }) {
+// Veo 3.1's referenceImages parameter holds asset appearance steady through
+// motion. Each entry is { base64, mimeType, referenceType: 'asset'|'style' }.
+// Empty array → omit the field entirely (older Veo models / pre-3.1 reject
+// unknown params with misleading 400s — same pattern as enhancePrompt /
+// durationSeconds).
+async function submitVeoJob({ prompt, imageBase64, aspectRatio, referenceImages = [] }) {
   const VEO_SUPPORTED = new Set(['16:9', '9:16', '1:1', '4:5']);
   const veoAspect     = VEO_SUPPORTED.has(aspectRatio) ? aspectRatio : '16:9';
 
+  const instance = {
+    prompt,
+    image: { bytesBase64Encoded: imageBase64, mimeType: 'image/jpeg' }
+  };
+  if (referenceImages.length) {
+    instance.referenceImages = referenceImages.map(r => ({
+      image:         { bytesBase64Encoded: r.base64, mimeType: r.mimeType || 'image/jpeg' },
+      referenceType: r.referenceType || 'asset'
+    }));
+  }
+
   const body = {
-    instances: [{
-      prompt,
-      image: { bytesBase64Encoded: imageBase64, mimeType: 'image/jpeg' }
-    }],
+    instances: [instance],
     parameters: {
       aspectRatio:      veoAspect,
       sampleCount:      1,
@@ -197,12 +210,18 @@ async function generateForAd({ ad }) {
   // can't remove them after the fact. Tell Veo to ignore overlay text.
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
 
+  // We won't know if referenceImages succeeded until after fetch below,
+  // but we can predict it from data availability — the prompt is built
+  // before the fetch and informs Veo whether to expect a separate
+  // product reference image alongside the seed.
+  const hasProductReference = !!product?.imageUrl;
   const prompt = buildVeoPrompt({
     concept, brand, product, media,
     layoutInput:  layoutInput?.input || null,
     sourceMedia:  layoutInput?.input?.source_media || null,
     aspectRatio,
-    seedHasText
+    seedHasText,
+    hasProductReference
   });
 
   const t0 = Date.now();
@@ -211,9 +230,25 @@ async function generateForAd({ ad }) {
     `media=${media._id} (${media.fileType})${seedHasText ? ` seedHasText=true (${media.text.length} regions)` : ''} submitting...`
   );
 
-  const imageBase64   = await fetchAsBase64(refUrl);
-  const operationName = await submitVeoJob({ prompt, imageBase64, aspectRatio });
-  console.log(`🎬 veoReference[ad=${ad._id}]: operation started — ${operationName}`);
+  const imageBase64 = await fetchAsBase64(refUrl);
+
+  // Veo 3.1 referenceImages — asset-type references hold the product's
+  // appearance steady through motion. Without this, Veo can drift the
+  // product's label/color/shape over the 5–8s clip even when the seed
+  // shows it clearly. Best-effort: failure to fetch leaves the array
+  // empty and Veo falls back to seed-only (current behavior).
+  const referenceImages = [];
+  if (product?.imageUrl) {
+    try {
+      const productBase64 = await fetchAsBase64(product.imageUrl);
+      referenceImages.push({ base64: productBase64, mimeType: 'image/jpeg', referenceType: 'asset' });
+    } catch (err) {
+      console.warn(`   ⚠️  veoReference[ad=${ad._id}]: product reference fetch failed (${err.message}) — proceeding without it`);
+    }
+  }
+
+  const operationName = await submitVeoJob({ prompt, imageBase64, aspectRatio, referenceImages });
+  console.log(`🎬 veoReference[ad=${ad._id}]: operation started — ${operationName}${referenceImages.length ? ` (refs=${referenceImages.length})` : ''}`);
 
   const response    = await pollOperation(operationName);
   const videoBuffer = await extractVideoBuffer(response);

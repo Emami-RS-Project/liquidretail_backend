@@ -158,7 +158,7 @@ function buildOverlayIntent({ concept, hasHeadline, hasCta }) {
 // Main export. layoutInput is LayoutInputArtifact.input (preferred source for
 // scene data). sourceMedia is layoutInput.input.source_media from the detect
 // pipeline (richer bbox data when available). Both are optional.
-function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false }) {
+function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false, hasProductReference = false }) {
   const lines   = [];
   const subject = resolveSubject({ layoutInput, sourceMedia, media });
 
@@ -249,13 +249,26 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
 
   // Product fidelity — image-to-video should preserve the seed product
   // exactly, but Veo occasionally "reinterprets" labels or packaging on
-  // the way to motion. Make it explicit.
-  lines.push(
-    `PRODUCT FIDELITY: The product in the reference image is the actual catalog product. ` +
-    `Preserve its exact shape, color, label text, packaging, and proportions throughout the entire 5 seconds. ` +
-    `Do NOT reinterpret the label, do NOT shift colors, do NOT generate a similar-but-different product variant. ` +
-    `The product is the source of truth.`
-  );
+  // the way to motion. When a separate product reference image is
+  // attached (referenceImages array), point Veo to it explicitly as
+  // the ground-truth for the product's appearance.
+  if (hasProductReference) {
+    lines.push(
+      `PRODUCT FIDELITY: A separate REFERENCE IMAGE of the actual catalog product is attached. ` +
+      `Treat that reference as the ABSOLUTE source of truth for the product's shape, color, label text, ` +
+      `packaging, and proportions — every frame of the video must show a product matching that reference exactly. ` +
+      `If the primary scene image and the reference image disagree on any product detail (label position, ` +
+      `color shade, bottle shape, etc.), the REFERENCE image wins. Do NOT reinterpret, do NOT shift colors, ` +
+      `do NOT generate a similar-but-different product variant — render exactly what the reference shows.`
+    );
+  } else {
+    lines.push(
+      `PRODUCT FIDELITY: The product in the reference image is the actual catalog product. ` +
+      `Preserve its exact shape, color, label text, packaging, and proportions throughout the entire 5 seconds. ` +
+      `Do NOT reinterpret the label, do NOT shift colors, do NOT generate a similar-but-different product variant. ` +
+      `The product is the source of truth.`
+    );
+  }
 
   return lines.join(' ');
 }
