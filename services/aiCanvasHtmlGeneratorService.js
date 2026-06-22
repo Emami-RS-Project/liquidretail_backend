@@ -31,8 +31,8 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MODEL_ID            = 'gpt-4.1';
 const TEMPERATURE         = 0.85;
 const N_CANDIDATES_DEFAULT = 2;        // HTML output is ~3-5× longer than JSON spec — start conservative
-const MAX_TOKENS          = 6000;
-const HTML_SCHEMA_VERSION = '2.3.0';   // 2.3: JSON Gen retirement (AI_LAYOUT_DIRECT_HTML flag). Response schema gains a `copy_picks` object so HTML Gen owns the final headline/eyebrow/cta/subheadline strings; persisted on AiCanvasArtifact.copyPicks for downstream consumers (Image Ref) that previously read pickCopyFromSpec(canvasSpec). Also handles canvasSpec=null gracefully: videoMode derives from sourceMedia.fileType alone, mediaRect defaults to the full canvas (so video bleeds edge-to-edge when no zones[] is available to declare a slot rect). 2.2: platform-format-aware Phase 4 — passes platformFormat into validateCandidate so the new safe_area_violation HARD rule catches chrome that intrudes Reels reserved bands. Pairs with the JSON Gen's FORMAT CONSTRAINTS section (SPEC 3.1.0): two LLMs + one validator all reasoning in the same safe-area pixel space. 2.1: HTML Gen format-aware prompt (Phase 3). 2.0: video-overlay prompt rolled back to pipeline fundamentals.
+const MAX_TOKENS          = 12000;     // animated video-overlay HTML with cycling reviews can exceed 8K chars
+const HTML_SCHEMA_VERSION = '2.4.0';  // 2.4: video-overlay animation unlock — CSS @keyframes allowed, cycling reviews, 5s timing context. MAX_TOKENS raised to 12000. 2.3: JSON Gen retirement (AI_LAYOUT_DIRECT_HTML flag). Response schema gains a `copy_picks` object so HTML Gen owns the final headline/eyebrow/cta/subheadline strings; persisted on AiCanvasArtifact.copyPicks for downstream consumers (Image Ref) that previously read pickCopyFromSpec(canvasSpec). Also handles canvasSpec=null gracefully: videoMode derives from sourceMedia.fileType alone, mediaRect defaults to the full canvas (so video bleeds edge-to-edge when no zones[] is available to declare a slot rect). 2.2: platform-format-aware Phase 4 — passes platformFormat into validateCandidate so the new safe_area_violation HARD rule catches chrome that intrudes Reels reserved bands. Pairs with the JSON Gen's FORMAT CONSTRAINTS section (SPEC 3.1.0): two LLMs + one validator all reasoning in the same safe-area pixel space. 2.1: HTML Gen format-aware prompt (Phase 3). 2.0: video-overlay prompt rolled back to pipeline fundamentals.
 
 function enabled() {
   return String(process.env.AI_HTML_LAYOUT_ENABLED || '').toLowerCase() === 'true';
@@ -138,7 +138,11 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   // ships the static PNG as the ad. (Shouldn't happen since the JSON
   // Gen mandates one media zone, but the fallback keeps the pipeline
   // robust to any miss.)
-  const dims = canvasDims(canvas.aspectRatio);
+  // Prefer platformFormat-keyed canvas (covers all 5 surfaces with correct
+  // safe-area metadata). Fall back to aspect-ratio map for legacy V1 callers
+  // that never wrote canvas.platformFormat.
+  const { canvasForPlatformFormat } = require('./platformFormats');
+  const dims = canvasForPlatformFormat(canvas.platformFormat) || canvasDims(canvas.aspectRatio);
   const Media = require('../models/Media');
   const sourceMedia = await Media.findById(canvas.mediaId).select('fileType').lean();
   const isVideoSource = sourceMedia?.fileType === 'video';
@@ -384,26 +388,36 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
 // instead of the actual 1080×1920) so the LLM thinks in the same
 // coordinate space the rest of the prompt uses.
 function buildFormatConstraintsBlock(platformFormat, dims) {
-  if (platformFormat === 'meta_reels_9_16') {
-    // Safe areas scaled from Meta's published Reels safe zones
-    // (220px top + bottom on 1920-tall) to our 1778-tall normalized
-    // canvas: top 0-204, bottom 1574-1778 reserved.
-    return [
-      `FORMAT CONSTRAINTS — meta_reels_9_16 (Reels, vertical 9:16):`,
-      `  Canvas:             ${dims.width}×${dims.height}px (Meta delivers as 1080×1920; our normalized space is 1000×1778)`,
-      `  Reserved top band:  x:0, y:0, w:${dims.width}, h:204 — IG/FB caption + creator overlay live here`,
-      `  Reserved bottom band: x:0, y:${dims.height - 204}, w:${dims.width}, h:204 — IG/FB like / comment / share / save controls live here`,
-      `  Content safe rect:  x:0, y:204, w:${dims.width}, h:${dims.height - 408} (the middle ${Math.round(((dims.height - 408) / dims.height) * 100)}% of canvas height)`,
-      `  HARD: NO chrome (panel, text, headline, eyebrow, cta, badges, logo, quote_card, proof_bar) may render in the reserved top or bottom bands. Every chrome zone's bounding box MUST fit inside the content safe rect (y >= 204 AND y + height <= ${dims.height - 204}). Reels users see those bands COVERED by IG/FB UI in their feed — content placed there is invisible and the validator will reject your candidate as a HARD violation.`,
-      `  Media slot (transparent region for video) CAN cross the reserved bands — the video plays edge-to-edge underneath the chrome and IG's UI overlays it. Only CHROME has the safe-area constraint.`,
-      `  Composition guidance: use the middle 1338px of height as your design canvas. Bottom panel bands should end at y=${dims.height - 204} (not at canvas bottom). Top eyebrow rules should start at y=204 (not at canvas top). Floating cards / CTAs in the middle band are ideal.`
-    ].join('\n');
+  const { getFormatCaps } = require('./platformFormats');
+  const caps = getFormatCaps(platformFormat) || getFormatCaps('meta_feed_1_1');
+  const { canvas, deliveryDims, safeArea, label, aspectRatio } = caps;
+
+  const lines = [];
+  lines.push(`FORMAT CONSTRAINTS — ${platformFormat} (${label}, ${aspectRatio}):`);
+  const deliveryStr = deliveryDims
+    ? ` (host delivers as ${deliveryDims.width}×${deliveryDims.height}; our normalized space is ${canvas.width}×${canvas.height})`
+    : '';
+  lines.push(`  Canvas:             ${dims.width}×${dims.height}px${deliveryStr}`);
+
+  const hasSafeArea = safeArea.top > 0 || safeArea.bottom > 0;
+  if (hasSafeArea) {
+    if (safeArea.top > 0) {
+      lines.push(`  Reserved top band:  x:0, y:0, w:${dims.width}, h:${safeArea.top} — platform UI (caption / creator chip) overlays here`);
+    }
+    if (safeArea.bottom > 0) {
+      lines.push(`  Reserved bottom band: x:0, y:${dims.height - safeArea.bottom}, w:${dims.width}, h:${safeArea.bottom} — platform UI (like / share / reply controls) overlays here`);
+    }
+    const safeY = safeArea.top;
+    const safeH = dims.height - safeArea.top - safeArea.bottom;
+    const pct   = Math.round((safeH / dims.height) * 100);
+    lines.push(`  Content safe rect:  x:0, y:${safeY}, w:${dims.width}, h:${safeH} (the middle ${pct}% of canvas height)`);
+    lines.push(`  HARD: NO chrome (panel, text, headline, eyebrow, cta, badges, logo, quote_card, proof_bar) may render in the reserved bands. Every chrome zone's bounding box MUST fit inside the content safe rect (y >= ${safeY} AND y + height <= ${dims.height - safeArea.bottom}). Viewers see those bands COVERED by the platform's native UI — content placed there is invisible and the validator will reject your candidate as a HARD violation.`);
+    lines.push(`  Media slot (transparent region for video/image) CAN cross the reserved bands — the underlying media bleeds edge-to-edge and the platform's UI overlays it. Only CHROME has the safe-area constraint.`);
+    lines.push(`  Composition guidance: use the middle ${safeH}px of height as your design canvas. Bottom panel bands should end at y=${dims.height - safeArea.bottom} (not at canvas bottom). Top eyebrow rules should start at y=${safeY} (not at canvas top). Floating cards / CTAs in the middle band are ideal.`);
+  } else {
+    lines.push(`  Safe zones:         none — surface has no reserved bands. Chrome can use the full canvas.`);
   }
-  return [
-    `FORMAT CONSTRAINTS — meta_feed_1_1 (Feed, square 1:1):`,
-    `  Canvas:             ${dims.width}×${dims.height}px (Meta delivers as 1080×1080; our normalized space is 1000×1000)`,
-    `  Safe zones:         none — feed surface has no reserved bands. Chrome can use the full canvas.`
-  ].join('\n');
+  return lines.join('\n');
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -538,6 +552,18 @@ function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = 
     userLines.push(`  3. DO NOT emit any <img> tag pointing at the source video's frames anywhere on the canvas.`);
     userLines.push(`  4. clip-path SAFETY — if a panel uses clip-path, that container MUST NOT contain text children (clip-path slices text descendants); put text in sibling positioned divs.`);
     userLines.push(`  5. NO backdrop-filter — Puppeteer omitBackground:true leaves nothing to blur; use \`background: rgba(<color>, 0.80-0.88)\` for translucent panels.`);
+    userLines.push(`  6. CSS ANIMATIONS ARE ALLOWED and strongly encouraged for video overlays. Use @keyframes for text entrances, exits, and cycling proof elements. All animation timing MUST complete within 5 seconds (the video base duration). Guidelines:`);
+    userLines.push(`     - Stagger element entrances: headline first (~0.3s in), proof elements follow (~1.0s in), CTA last (~2.5s in).`);
+    userLines.push(`     - animation-fill-mode: forwards for one-shot elements (appear and stay).`);
+    userLines.push(`     - For cycling reviews / testimonials: multi-step @keyframes per item (opacity 0→0→1→1→0→0) with animation-delay offset per item — each review fades in, holds ~1.5s, fades out as the next fades in.`);
+    userLines.push(`     - animation-iteration-count: 1 for one-shots; infinite only for subtle ambient loops with very low amplitude.`);
+    userLines.push(`     - Animate only individual chrome elements — not body or structural wrappers.`);
+    userLines.push(`     - Timing budget: 0.3-0.5s fade-in, 1.5-2.0s hold, 0.3-0.5s fade-out per element. Total window: 5s.`);
+
+    const v2Quotes = (richContext?.text?.copy_candidates?.quotes || []).filter(q => q?.text);
+    if (v2Quotes.length > 1) {
+      userLines.push(`  7. CYCLING REVIEWS — ${v2Quotes.length} review quotes are available in the supporting context. For social proof concepts, animate them cycling with staggered @keyframes rather than a single static quote. Suggested timing: each review visible ~${Math.floor(4500 / v2Quotes.length)}ms with 300ms cross-fade transitions.`);
+    }
     userLines.push(``);
   }
 
@@ -679,6 +705,19 @@ function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = fa
     userLines.push(`  3. CRITICAL — DO NOT emit any <img> tag whose src is product.hero_media.image, any product.hero_media.crops.<ratio> URL, or otherwise points at the source video's frames. Anywhere on the canvas. The video plays UNDERNEATH the overlay during playback; embedding the source frame as <img> freezes that frame and obscures the live playback. Other product imagery (product.product_image, product.lifestyle_image, brand.logo) IS allowed as <img>.`);
     userLines.push(`  4. CRITICAL — clip-path SAFETY: when you put clip-path on a panel/container (diagonal carve, custom shape, etc.), that container MUST NOT contain text children. The clip-path silently slices text descendants — right-aligned headlines inside a clipped parent get their leading characters cut off at the diagonal edge. Pattern that BREAKS: <div style="clip-path:polygon(...)"><div>Headline</div></div>. Pattern that WORKS: emit the clip-pathed shape as a STANDALONE positioned div (no text inside), then put the headline / eyebrow / cta in SEPARATE absolutely-positioned sibling divs sized to fit inside the panel's visible (post-clip) region.`);
     userLines.push(`  5. NO backdrop-filter — DO NOT use \`backdrop-filter: blur(...)\` or any other backdrop-filter value on ANY element. Puppeteer's omitBackground:true leaves NO backdrop to blur during the screenshot — backdrop-filter silently degrades to a no-op and your "frosted glass over video" effect becomes a flat semi-opaque rectangle. Use \`background: rgba(<color>, 0.80-0.88)\` for translucent panels, subtle \`box-shadow\` for depth, \`background: linear-gradient(...)\` at 0.80-0.88 opacity for multi-tone glass. If recommended_components specifies "glass_panel", interpret as "translucent rgba panel" — never backdrop-filter.`);
+    userLines.push(`  6. CSS ANIMATIONS ARE ALLOWED and strongly encouraged for video overlays. Use @keyframes for text entrances, exits, and cycling proof elements. All animation timing MUST complete within 5 seconds (the video base duration). Guidelines:`);
+    userLines.push(`     - Stagger element entrances with animation-delay: headline first (~0.3s in), proof elements follow (~1.0s in), CTA last (~2.5s in).`);
+    userLines.push(`     - animation-fill-mode: forwards for one-shot elements (appear and stay).`);
+    userLines.push(`     - For cycling reviews / testimonials: use a multi-step @keyframes per item (opacity 0→0→1→1→0→0) with animation-delay offset per item, so each review fades in, holds ~1.5s, then fades out as the next one fades in.`);
+    userLines.push(`     - animation-iteration-count: 1 for one-shot entrances; infinite ONLY for subtle ambient loops (slow breathing scale, gentle pulse) with very low amplitude.`);
+    userLines.push(`     - DO NOT animate structural layout elements (body, outer wrapper). Animate only individual chrome elements (headline div, quote card, cta button, etc.).`);
+    userLines.push(`     - Timing budget: 0.3-0.5s fade-in, 1.5-2.0s hold, 0.3-0.5s fade-out per element. Total window: 5s.`);
+
+    // Pull available reviews from richContext for cycling guidance
+    const quotes = (ctx?.copy_candidates?.quotes || []).filter(q => q?.text);
+    if (quotes.length > 1) {
+      userLines.push(`  7. CYCLING REVIEWS — you have ${quotes.length} review quotes available in copy_candidates.quotes. For social proof concepts, animate them cycling through with staggered entrance/exit @keyframes rather than showing one static quote. Suggested timing for ${quotes.length} reviews across 5s: each review visible ~${Math.floor(4500 / quotes.length)}ms with 300ms cross-fade transitions.`);
+    }
     userLines.push(``);
   }
 

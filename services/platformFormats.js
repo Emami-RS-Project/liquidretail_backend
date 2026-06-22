@@ -16,14 +16,20 @@
 // buttons, Stories caption + creator handle). All chrome MUST render
 // inside the content rect ({y: safeArea.top → height - safeArea.bottom}).
 // Feed and PMax have no native overlays so the full canvas is usable.
+// canvas dimensions follow renderService.CANVAS_DIMS — width-normalized at
+// 1000px so HTML/CSS templates render at a known reference width. deliveryDims
+// is what the platform delivers to viewers (Cloudinary upscales the screenshot
+// to this size on first hit). safeArea is the band reserved by the host's
+// native UI overlay.
 const PLATFORM_FORMATS = {
   meta_feed_1_1: {
     aspectRatio: '1:1',
     surface:     'meta_feed',
     label:       'Meta Feed (Square)',
     kinds:       ['image', 'video'],
-    canvas:      { width: 1000, height: 1000 },
-    safeArea:    { top: 0, bottom: 0 },
+    canvas:       { width: 1000, height: 1000 },
+    deliveryDims: { width: 1080, height: 1080 },
+    safeArea:     { top: 0, bottom: 0 },
     chromeStyleHints: ['ig_reels', 'editorial']
   },
   meta_feed_4_5: {
@@ -31,8 +37,9 @@ const PLATFORM_FORMATS = {
     surface:     'meta_feed',
     label:       'Meta Feed (Portrait)',
     kinds:       ['image', 'video'],
-    canvas:      { width: 1000, height: 1250 },
-    safeArea:    { top: 0, bottom: 0 },
+    canvas:       { width: 1000, height: 1250 },
+    deliveryDims: { width: 1080, height: 1350 },
+    safeArea:     { top: 0, bottom: 0 },
     chromeStyleHints: ['ig_reels', 'editorial']
   },
   meta_reels_9_16: {
@@ -40,8 +47,9 @@ const PLATFORM_FORMATS = {
     surface:     'meta_reels',
     label:       'Meta Reels',
     kinds:       ['video'],                   // Reels is video-only
-    canvas:      { width: 1000, height: 1778 },
-    safeArea:    { top: 204, bottom: 204 },   // IG/FB caption + like/share bands
+    canvas:       { width: 1000, height: 1778 },
+    deliveryDims: { width: 1080, height: 1920 },
+    safeArea:     { top: 204, bottom: 204 },  // IG/FB caption + like/share bands
     chromeStyleHints: ['ig_reels', 'tiktok', 'yt_shorts', 'editorial']
   },
   meta_stories_9_16: {
@@ -49,8 +57,9 @@ const PLATFORM_FORMATS = {
     surface:     'meta_stories',
     label:       'Meta Stories',
     kinds:       ['image', 'video'],
-    canvas:      { width: 1000, height: 1778 },
-    safeArea:    { top: 250, bottom: 250 },   // IG Stories: top creator chip + bottom reply input
+    canvas:       { width: 1000, height: 1778 },
+    deliveryDims: { width: 1080, height: 1920 },
+    safeArea:     { top: 250, bottom: 250 },  // IG Stories: top creator chip + bottom reply input
     chromeStyleHints: ['ig_reels', 'editorial']
   },
   pmax_16_9: {
@@ -58,8 +67,9 @@ const PLATFORM_FORMATS = {
     surface:     'pmax',
     label:       'Google Performance Max',
     kinds:       ['image', 'video'],
-    canvas:      { width: 1778, height: 1000 },
-    safeArea:    { top: 0, bottom: 0 },
+    canvas:       { width: 1000, height: 563 },   // aligned with renderService.CANVAS_DIMS['16:9']
+    deliveryDims: { width: 1920, height: 1080 },
+    safeArea:     { top: 0, bottom: 0 },
     chromeStyleHints: ['editorial', 'yt_shorts']
   }
 };
