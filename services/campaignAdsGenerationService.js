@@ -1281,6 +1281,7 @@ function computeV2IdentityDigest({ campaignId, productId, conceptId, platformFor
 // keep their semantic tier so readinessScore math stays consistent.
 function matchTierForUniverseRole(role) {
   switch (role) {
+    case 'catalog':
     case 'catalog_hero':
     case 'catalog_alt':
       return 'product_match';
@@ -1299,7 +1300,7 @@ function matchTierForUniverseRole(role) {
 // are catalog product photography ('product_image'); UGC roles surface
 // as 'ugc'. Used by downstream readers that gate on this enum.
 function variantKindForUniverseRole(role) {
-  return (role === 'catalog_hero' || role === 'catalog_alt') ? 'product_image' : 'ugc';
+  return (role === 'catalog' || role === 'catalog_hero' || role === 'catalog_alt') ? 'product_image' : 'ugc';
 }
 
 async function runConceptDrivenExpansion({
@@ -1462,7 +1463,7 @@ async function runConceptDrivenExpansion({
 
       console.log(
         `📦 conceptDriven[product=${productId}]: round=${roundIndex} ` +
-        `universe=${filtered.length} (catalog=${counts.catalog_hero + counts.catalog_alt} ` +
+        `universe=${filtered.length} (catalog=${counts.catalog || (counts.catalog_hero + counts.catalog_alt)} ` +
         `ugc=${counts.ugc_product_match + counts.ugc_product_category + counts.ugc_brand_match}) ` +
         `concepts=${concepts.length} payloads=${payloads.length} ` +
         `dirWarnings=${dirWarnings.length} judge=${judgeArtifactId ? 'ok' : 'skipped'}`

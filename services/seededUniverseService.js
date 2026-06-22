@@ -133,7 +133,7 @@ function projectEntry(media, role) {
       adSuitability: media.adSuitability?.score ?? null
     }
   };
-  if (role === 'catalog_hero' || role === 'catalog_alt') {
+  if (role === 'catalog' || role === 'catalog_hero' || role === 'catalog_alt') {
     out.metadata.imageRole = media.metadata?.imageRole || null;
     out.metadata.shotType  = media.classification?.shotType || null;
   } else {
@@ -192,6 +192,9 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
 
   const universe = [];
   const counts = {
+    catalog: 0,
+    // Legacy keys kept zeroed for any caller that still reads them; the
+    // catalog count lives on `counts.catalog` now that hero/alt is flattened.
     catalog_hero: 0, catalog_alt: 0,
     ugc_product_match: 0, ugc_product_category: 0, ugc_brand_match: 0
   };
@@ -203,11 +206,16 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
     'metadata.catalogProductId': productOid
   }).select('_id fileType fileUrl adSuitability classification metadata').lean() : [];
 
+  // Flatten the catalog-hero / catalog-alt split to a single `catalog`
+  // role. The deterministic "first ranked image = the hero" labeling was
+  // biasing the Director toward the same image every run for hero-anchored
+  // concepts (full_bleed_hero_bottom_panel, hero_quote_overlay, etc.).
+  // Ranked order is preserved so the array still presents the best photo
+  // first, but the LLM picks based on actual content rather than the label.
   const rankedCatalog = rankCatalogMedias(catalogMedias);
-  rankedCatalog.forEach((m, i) => {
-    const role = i === 0 ? 'catalog_hero' : 'catalog_alt';
-    universe.push(projectEntry(m, role));
-    counts[role]++;
+  rankedCatalog.forEach((m) => {
+    universe.push(projectEntry(m, 'catalog'));
+    counts.catalog++;
   });
 
   // ── UGC tier 1 (product_match) ─────────────────────────────────

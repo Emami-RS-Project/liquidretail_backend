@@ -1004,7 +1004,11 @@ function buildPromptRound({ inputSummary, creativeIntent, platformFormat, univer
         `AVOID — concepts already shipped in earlier rounds for this product:`,
         ...avoidList.map(l => `  ${l}`),
         ``,
-        `Your ${N_CONCEPTS_ROUND} new concepts MUST differ from every line above on AT LEAST TWO of: archetype, output_shape.format, media_picks composition, copy headline angle. Round counter is below — later rounds should lean harder into less-used media combinations and underused archetypes.`
+        `Your ${N_CONCEPTS_ROUND} new concepts MUST differ from every line above. Hierarchy of variety, in order:`,
+        `  1. (HARD) PREFER DIFFERENT MEDIA. If the seeded universe contains media_ids that have NOT been used in any prior round, prioritize those for at least 1 of your N concepts. Reusing the same primary media as a prior round is allowed ONLY when the universe offers no fresh alternative.`,
+        `  2. Differ on archetype or output_shape from prior rounds.`,
+        `  3. Differ on copy headline angle (emotional hook).`,
+        `Round counter is below — later rounds should lean harder into less-used media. The detect pipeline ranks the universe by quality; lower-ranked entries are still valid picks once the top ones have been used.`
       ].join('\n')
     : `AVOID — no prior rounds for this product. You're on round 0; lead with the strongest signal.`;
 
