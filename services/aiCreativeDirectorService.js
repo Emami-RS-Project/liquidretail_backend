@@ -493,34 +493,69 @@ function distribution(values) {
 // Phase-3). The Generator + Validator (Phases 3/4) enforce safe-area
 // pixel boxes; the Director just picks archetypes that work for the
 // surface.
+// Per-format archetype steering. Only Reels has explicit overrides today —
+// vertical full-screen breaks layouts that work on Feed (typographic_dominant
+// competes with IG caption, product_card_grid feels cramped). Other formats
+// get the default "all archetypes work" until we learn which ones flop.
+const ARCHETYPE_WEIGHTING = {
+  meta_reels_9_16: [
+    `  ARCHETYPE WEIGHTING:`,
+    `    PREFER  hero_quote_overlay (chrome lives in middle band as floating quote_card — natural fit)`,
+    `    PREFER  full_bleed_hero_bottom_panel (the "bottom panel" lands inside the safe middle band, not in the reserved bottom strip)`,
+    `    PREFER  diagonal_carve (carved chrome inside the middle 1338px is striking on vertical)`,
+    `    DEPRIORITIZE typographic_dominant (large headline competes with IG's caption text in the top safe zone — feels visually noisy)`,
+    `    DEPRIORITIZE magazine_editorial (inset image + editorial stack reads as static on a video surface)`,
+    `    DEPRIORITIZE product_card_grid (multi-card layouts feel cramped on tall vertical)`,
+    `    AVOID        stat_led_social_proof (numeric stat as hero competes with creator-handle overlays in top safe zone)`
+  ].join('\n'),
+  pmax_16_9: [
+    `  ARCHETYPE WEIGHTING:`,
+    `    PREFER  magazine_editorial (clean editorial spread reads as commercial/professional on landscape)`,
+    `    PREFER  typographic_dominant (landscape gives headlines room to breathe — works well as a YouTube pre-roll)`,
+    `    DEPRIORITIZE hero_quote_overlay (creator-quote energy reads as "Instagram ad" on YouTube/Display)`,
+    `    AVOID        product_card_grid (multi-card layouts get clipped on small Display banner placements)`
+  ].join('\n')
+};
+
 function buildFormatConstraints(platformFormat) {
-  if (platformFormat === 'meta_reels_9_16') {
-    return [
-      `FORMAT CONSTRAINTS — meta_reels_9_16 (Reels, vertical 9:16):`,
-      `  Canvas:        1080×1920 (delivered as 1000×1778 in our normalized space)`,
-      `  Safe zones:    top 0-220px (IG/FB caption + creator overlay) AND bottom 1558-1778px (like / comment / share controls) are RESERVED — no chrome / text / CTA in those bands`,
-      `  Content rect:  x:0, y:220, w:1000, h:1338 (the middle 75% of canvas height)`,
-      `  Media format:  video strongly preferred — Reels is a video surface and image-source ads compete poorly with native video creator content`,
-      `  ARCHETYPE WEIGHTING:`,
-      `    PREFER  hero_quote_overlay (chrome lives in middle band as floating quote_card — natural fit)`,
-      `    PREFER  full_bleed_hero_bottom_panel (the "bottom panel" lands inside the safe middle band, not in the reserved bottom strip)`,
-      `    PREFER  diagonal_carve (carved chrome inside the middle 1338px is striking on vertical)`,
-      `    DEPRIORITIZE typographic_dominant (large headline competes with IG's caption text in the top safe zone — feels visually noisy)`,
-      `    DEPRIORITIZE magazine_editorial (inset image + editorial stack reads as static on a video surface)`,
-      `    DEPRIORITIZE product_card_grid (multi-card layouts feel cramped on tall vertical)`,
-      `    AVOID        stat_led_social_proof (numeric stat as hero competes with creator-handle overlays in top safe zone)`,
-      `  Honor the safe zones in your hierarchy — every concept's chrome must fit inside the middle 1338px band. The downstream Generator + Validator will reject zones intruding the reserved bands.`
-    ].join('\n');
+  const { getFormatCaps, creativeBriefForPlatformFormat } = require('./platformFormats');
+  const caps = getFormatCaps(platformFormat) || getFormatCaps('meta_feed_1_1');
+  const { canvas, deliveryDims, safeArea, label, aspectRatio } = caps;
+  const brief = creativeBriefForPlatformFormat(platformFormat);
+
+  const lines = [];
+
+  if (brief) {
+    lines.push(`SURFACE CONTEXT — ${label}:`);
+    lines.push(`  ${brief}`);
+    lines.push(``);
   }
-  // meta_feed_1_1 — no extra constraints (default). Kept as an empty
-  // block so the prompt position stays stable; future formats slot in
-  // their own constraints without restructuring.
-  return [
-    `FORMAT CONSTRAINTS — meta_feed_1_1 (Feed, square 1:1):`,
-    `  Canvas:        1080×1080 (delivered as 1000×1000 in our normalized space)`,
-    `  Safe zones:    none — feed surface has no reserved bands`,
-    `  ARCHETYPE WEIGHTING: all archetypes work; pick by signal as usual.`
-  ].join('\n');
+
+  lines.push(`FORMAT CONSTRAINTS — ${platformFormat} (${label}, ${aspectRatio}):`);
+  const deliveryStr = deliveryDims
+    ? ` (host delivers as ${deliveryDims.width}×${deliveryDims.height}; normalized to ${canvas.width}×${canvas.height})`
+    : '';
+  lines.push(`  Canvas:        ${canvas.width}×${canvas.height}${deliveryStr}`);
+
+  if (safeArea.top > 0 || safeArea.bottom > 0) {
+    const safeY = safeArea.top;
+    const safeH = canvas.height - safeArea.top - safeArea.bottom;
+    const pct   = Math.round((safeH / canvas.height) * 100);
+    lines.push(`  Safe zones:    top 0–${safeArea.top}px AND bottom ${canvas.height - safeArea.bottom}–${canvas.height}px reserved for native UI — no chrome / text / CTA in those bands`);
+    lines.push(`  Content rect:  x:0, y:${safeY}, w:${canvas.width}, h:${safeH} (the middle ${pct}% of canvas height)`);
+  } else {
+    lines.push(`  Safe zones:    none — surface has no reserved bands`);
+  }
+
+  const weighting = ARCHETYPE_WEIGHTING[platformFormat];
+  if (weighting) {
+    lines.push(weighting);
+    lines.push(`  Honor the safe zones in your hierarchy — every concept's chrome must fit inside the content rect. The downstream Generator + Validator will reject zones intruding the reserved bands.`);
+  } else {
+    lines.push(`  ARCHETYPE WEIGHTING: all archetypes work; pick by signal as usual.`);
+  }
+
+  return lines.join('\n');
 }
 
 function buildPrompt({ inputSummary, creativeIntent, platformFormat = 'meta_feed_1_1' }) {
@@ -785,11 +820,9 @@ async function directConceptsRound({
   if (!process.env.OPENAI_API_KEY) {
     const e = new Error('OPENAI_API_KEY not set'); e.status = 500; throw e;
   }
-  const SUPPORTED_FORMATS_ROUND = ['meta_feed_1_1', 'meta_reels_9_16'];
-  if (!SUPPORTED_FORMATS_ROUND.includes(platformFormat)) {
-    // Future formats (carousel, pmax) emit explicit errors so a flag
-    // flip can't silently produce broken concepts.
-    throw badRequest(`directConceptsRound: platformFormat="${platformFormat}" not supported. Allowed: ${SUPPORTED_FORMATS_ROUND.join(', ')}.`);
+  const { PLATFORM_FORMAT_KEYS } = require('./platformFormats');
+  if (!PLATFORM_FORMAT_KEYS.includes(platformFormat)) {
+    throw badRequest(`directConceptsRound: platformFormat="${platformFormat}" not supported. Allowed: ${PLATFORM_FORMAT_KEYS.join(', ')}.`);
   }
 
   // Compute roundIndex from prior artifact rows for this cache key when

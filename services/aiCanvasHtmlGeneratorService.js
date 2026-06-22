@@ -388,11 +388,17 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
 // instead of the actual 1080×1920) so the LLM thinks in the same
 // coordinate space the rest of the prompt uses.
 function buildFormatConstraintsBlock(platformFormat, dims) {
-  const { getFormatCaps } = require('./platformFormats');
+  const { getFormatCaps, creativeBriefForPlatformFormat } = require('./platformFormats');
   const caps = getFormatCaps(platformFormat) || getFormatCaps('meta_feed_1_1');
   const { canvas, deliveryDims, safeArea, label, aspectRatio } = caps;
+  const brief = creativeBriefForPlatformFormat(platformFormat);
 
   const lines = [];
+  if (brief) {
+    lines.push(`SURFACE CONTEXT — ${label}:`);
+    lines.push(`  ${brief}`);
+    lines.push(``);
+  }
   lines.push(`FORMAT CONSTRAINTS — ${platformFormat} (${label}, ${aspectRatio}):`);
   const deliveryStr = deliveryDims
     ? ` (host delivers as ${deliveryDims.width}×${deliveryDims.height}; our normalized space is ${canvas.width}×${canvas.height})`

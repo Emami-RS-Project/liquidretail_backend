@@ -30,7 +30,12 @@ const PLATFORM_FORMATS = {
     canvas:       { width: 1000, height: 1000 },
     deliveryDims: { width: 1080, height: 1080 },
     safeArea:     { top: 0, bottom: 0 },
-    chromeStyleHints: ['ig_reels', 'editorial']
+    chromeStyleHints: ['ig_reels', 'editorial'],
+    creativeBrief:
+      'Square Meta Feed (Instagram + Facebook). Viewers scroll a vertical feed; ads appear inline ' +
+      'with friends\' posts. ~1–2 seconds of attention per scroll, longer only if the creative hooks. ' +
+      'Native creative is polished but feels social — UGC and editorial both work. Design for ' +
+      'thumb-stopping clarity in the first half-second; CTA should land within the first frame, no scroll required.'
   },
   meta_feed_4_5: {
     aspectRatio: '4:5',
@@ -40,7 +45,12 @@ const PLATFORM_FORMATS = {
     canvas:       { width: 1000, height: 1250 },
     deliveryDims: { width: 1080, height: 1350 },
     safeArea:     { top: 0, bottom: 0 },
-    chromeStyleHints: ['ig_reels', 'editorial']
+    chromeStyleHints: ['ig_reels', 'editorial'],
+    creativeBrief:
+      'Portrait Meta Feed. Same surface as 1:1 but ~25% more vertical real estate — bigger ' +
+      'mobile screen presence and the highest-performing Feed aspect ratio for most brands. ' +
+      'Better for product-heavy or layered compositions where copy needs room. Same scroll ' +
+      'behavior as 1:1; the first half-second still decides engagement.'
   },
   meta_reels_9_16: {
     aspectRatio: '9:16',
@@ -50,7 +60,13 @@ const PLATFORM_FORMATS = {
     canvas:       { width: 1000, height: 1778 },
     deliveryDims: { width: 1080, height: 1920 },
     safeArea:     { top: 204, bottom: 204 },  // IG/FB caption + like/share bands
-    chromeStyleHints: ['ig_reels', 'tiktok', 'yt_shorts', 'editorial']
+    chromeStyleHints: ['ig_reels', 'tiktok', 'yt_shorts', 'editorial'],
+    creativeBrief:
+      'Vertical Reels on Instagram + Facebook. Full-screen, fast-paced, sound-on by default. ' +
+      'Native creator content sets the tone — trends, hooks, direct-to-camera energy. Ads compete ' +
+      'head-to-head with that energy, so polished-static reads as "ad" instantly and gets swiped. ' +
+      'Open with a visual hook in the first second, escalate, close with a CTA in the back half. ' +
+      'Top + bottom 204px reserved for IG\'s caption + reaction UI.'
   },
   meta_stories_9_16: {
     aspectRatio: '9:16',
@@ -60,7 +76,12 @@ const PLATFORM_FORMATS = {
     canvas:       { width: 1000, height: 1778 },
     deliveryDims: { width: 1080, height: 1920 },
     safeArea:     { top: 250, bottom: 250 },  // IG Stories: top creator chip + bottom reply input
-    chromeStyleHints: ['ig_reels', 'editorial']
+    chromeStyleHints: ['ig_reels', 'editorial'],
+    creativeBrief:
+      'Vertical IG Stories. Full-screen, 5–15s per slide, viewers tap-through or swipe-away ' +
+      'aggressively. More ephemeral and intimate than Reels — feels behind-the-scenes and ' +
+      'personal. Native creative is overlay-heavy (text, stickers, polls). Drive curiosity or ' +
+      'urgency rather than direct sell. Top 250 + bottom 250 reserved for the creator chip and reply input.'
   },
   pmax_16_9: {
     aspectRatio: '16:9',
@@ -70,7 +91,13 @@ const PLATFORM_FORMATS = {
     canvas:       { width: 1000, height: 563 },   // aligned with renderService.CANVAS_DIMS['16:9']
     deliveryDims: { width: 1920, height: 1080 },
     safeArea:     { top: 0, bottom: 0 },
-    chromeStyleHints: ['editorial', 'yt_shorts']
+    chromeStyleHints: ['editorial', 'yt_shorts'],
+    creativeBrief:
+      'Google Performance Max landscape. Distributes across YouTube, Display Network, Discovery, ' +
+      'Gmail, and Maps — the operator cannot pick placement. The single creative MUST work as both ' +
+      'a YouTube pre-roll AND a Display banner. Direct-response copy, prominent CTA, broad-appeal ' +
+      'imagery. Avoid platform-native styling cues (no IG/TikTok aesthetics) — go editorial / clean / ' +
+      'commercial. Treat it as a billboard, not a social post.'
   }
 };
 
@@ -95,6 +122,10 @@ function safeAreaForPlatformFormat(platformFormat) {
 function chromeStyleHintsForPlatformFormat(platformFormat) {
   return PLATFORM_FORMATS[platformFormat]?.chromeStyleHints
     || ['ig_reels', 'tiktok', 'yt_shorts', 'editorial'];
+}
+
+function creativeBriefForPlatformFormat(platformFormat) {
+  return PLATFORM_FORMATS[platformFormat]?.creativeBrief || '';
 }
 
 function kindsForPlatformFormat(platformFormat) {
@@ -125,6 +156,7 @@ module.exports = {
   canvasForPlatformFormat,
   safeAreaForPlatformFormat,
   chromeStyleHintsForPlatformFormat,
+  creativeBriefForPlatformFormat,
   kindsForPlatformFormat,
   resolveKinds,
   renderRouteForKind

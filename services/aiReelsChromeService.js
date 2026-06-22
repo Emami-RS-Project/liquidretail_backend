@@ -28,7 +28,9 @@ const {
   canvasForPlatformFormat,
   safeAreaForPlatformFormat,
   chromeStyleHintsForPlatformFormat,
-  aspectRatioForPlatformFormat
+  creativeBriefForPlatformFormat,
+  aspectRatioForPlatformFormat,
+  getFormatCaps
 } = require('./platformFormats');
 
 const MODEL_ID         = process.env.REELS_CHROME_MODEL_ID || 'gpt-4.1';
@@ -118,6 +120,8 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
   const cta      = li.cta      || {};
   const { canvas: CANVAS, safe: SAFE, safeRect: SAFE_RECT } = dimsFor(platformFormat);
   const styleHints = chromeStyleHintsForPlatformFormat(platformFormat);
+  const surfaceBrief = creativeBriefForPlatformFormat(platformFormat);
+  const surfaceLabel = getFormatCaps(platformFormat)?.label || platformFormat;
 
   const headline    = copy.headline    || copy.headline_main || null;
   const eyebrow     = copy.eyebrow     || copy.headline_lead || null;
@@ -147,11 +151,16 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
 
   lines.push(`You are a world-class social video creative director specializing in video ads.`);
   lines.push(``);
-  lines.push(`Generate a self-contained HTML document for the TEXT CHROME OVERLAY of a ${aspectRatio} video ad.`);
+  lines.push(`Generate a self-contained HTML document for the TEXT CHROME OVERLAY of a ${aspectRatio} ${surfaceLabel} video ad.`);
   lines.push(`The HTML will be screenshot with a transparent background and composited over a Veo-generated base video.`);
   lines.push(`Your HTML is the CHROME ONLY — no background fills, no product images, no video embeds.`);
   lines.push(`The base video plays underneath. Transparent regions in your overlay let the video show through.`);
   lines.push(``);
+  if (surfaceBrief) {
+    lines.push(`SURFACE CONTEXT — ${surfaceLabel}:`);
+    lines.push(`  ${surfaceBrief}`);
+    lines.push(``);
+  }
   lines.push(`CANVAS: ${CANVAS.width}×${CANVAS.height}px`);
   if (SAFE.top > 0 || SAFE.bottom > 0) {
     lines.push(`SAFE AREA (CRITICAL HARD CONSTRAINT):`);
