@@ -11,41 +11,56 @@
 // Wizard, expandWizardJob, and dispatch all read this table — don't hard-code
 // platform strings anywhere else.
 
+// safeArea defines the UI band reserved by the host platform — anything
+// in those bands gets covered by native chrome (IG comments, like/share
+// buttons, Stories caption + creator handle). All chrome MUST render
+// inside the content rect ({y: safeArea.top → height - safeArea.bottom}).
+// Feed and PMax have no native overlays so the full canvas is usable.
 const PLATFORM_FORMATS = {
   meta_feed_1_1: {
     aspectRatio: '1:1',
     surface:     'meta_feed',
     label:       'Meta Feed (Square)',
     kinds:       ['image', 'video'],
-    canvas:      { width: 1000, height: 1000 }
+    canvas:      { width: 1000, height: 1000 },
+    safeArea:    { top: 0, bottom: 0 },
+    chromeStyleHints: ['ig_reels', 'editorial']
   },
   meta_feed_4_5: {
     aspectRatio: '4:5',
     surface:     'meta_feed',
     label:       'Meta Feed (Portrait)',
     kinds:       ['image', 'video'],
-    canvas:      { width: 1000, height: 1250 }
+    canvas:      { width: 1000, height: 1250 },
+    safeArea:    { top: 0, bottom: 0 },
+    chromeStyleHints: ['ig_reels', 'editorial']
   },
   meta_reels_9_16: {
     aspectRatio: '9:16',
     surface:     'meta_reels',
     label:       'Meta Reels',
     kinds:       ['video'],                   // Reels is video-only
-    canvas:      { width: 1000, height: 1778 }
+    canvas:      { width: 1000, height: 1778 },
+    safeArea:    { top: 204, bottom: 204 },   // IG/FB caption + like/share bands
+    chromeStyleHints: ['ig_reels', 'tiktok', 'yt_shorts', 'editorial']
   },
   meta_stories_9_16: {
     aspectRatio: '9:16',
     surface:     'meta_stories',
     label:       'Meta Stories',
     kinds:       ['image', 'video'],
-    canvas:      { width: 1000, height: 1778 }
+    canvas:      { width: 1000, height: 1778 },
+    safeArea:    { top: 250, bottom: 250 },   // IG Stories: top creator chip + bottom reply input
+    chromeStyleHints: ['ig_reels', 'editorial']
   },
   pmax_16_9: {
     aspectRatio: '16:9',
     surface:     'pmax',
     label:       'Google Performance Max',
     kinds:       ['image', 'video'],
-    canvas:      { width: 1778, height: 1000 }
+    canvas:      { width: 1778, height: 1000 },
+    safeArea:    { top: 0, bottom: 0 },
+    chromeStyleHints: ['editorial', 'yt_shorts']
   }
 };
 
@@ -61,6 +76,15 @@ function aspectRatioForPlatformFormat(platformFormat) {
 
 function canvasForPlatformFormat(platformFormat) {
   return PLATFORM_FORMATS[platformFormat]?.canvas || null;
+}
+
+function safeAreaForPlatformFormat(platformFormat) {
+  return PLATFORM_FORMATS[platformFormat]?.safeArea || { top: 0, bottom: 0 };
+}
+
+function chromeStyleHintsForPlatformFormat(platformFormat) {
+  return PLATFORM_FORMATS[platformFormat]?.chromeStyleHints
+    || ['ig_reels', 'tiktok', 'yt_shorts', 'editorial'];
 }
 
 function kindsForPlatformFormat(platformFormat) {
@@ -89,6 +113,8 @@ module.exports = {
   getFormatCaps,
   aspectRatioForPlatformFormat,
   canvasForPlatformFormat,
+  safeAreaForPlatformFormat,
+  chromeStyleHintsForPlatformFormat,
   kindsForPlatformFormat,
   resolveKinds,
   renderRouteForKind

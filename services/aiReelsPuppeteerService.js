@@ -26,6 +26,7 @@ const ffmpegPath = require('ffmpeg-static');
 
 const Ad = require('../models/Ad');
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
+const { canvasForPlatformFormat }   = require('./platformFormats');
 
 async function downloadToFile(url, destPath) {
   const res = await axios.get(url, { responseType: 'stream', timeout: 120000 });
@@ -38,23 +39,30 @@ async function downloadToFile(url, destPath) {
   });
 }
 
-const CANVAS_W     = 1000;
-const CANVAS_H     = 1778;
 const TARGET_FPS   = parseInt(process.env.REELS_CHROME_FPS || '24', 10);
 const DURATION_SEC = parseInt(process.env.REELS_CHROME_DURATION_SEC || '5', 10);
 const TOTAL_FRAMES = TARGET_FPS * DURATION_SEC;
-// Encode output dims — kept smaller than canvas to bound libx264 memory on
-// Render's 512MB tier. 720×1280 is the same 9:16 aspect at ~half the pixels
-// of 1000×1778; libx264 memory scales with frame area × refs.
-const OUTPUT_W     = 720;
-const OUTPUT_H     = 1280;
+
+// Encode output dims are scaled DOWN from the canvas to bound libx264 memory
+// on Render's 512MB tier. We cap the longest side at 1280px and preserve
+// aspect — gives ~720×1280 (9:16), 1024×1280 (4:5), 1280×1280 (1:1), and
+// 1280×720 (16:9). Always rounded to even values (libx264 yuv420p constraint).
+const MAX_OUTPUT_LONG_EDGE = 1280;
+function dimsForFormat(platformFormat) {
+  const canvas = canvasForPlatformFormat(platformFormat) || { width: 1000, height: 1778 };
+  const longEdge = Math.max(canvas.width, canvas.height);
+  const scale = longEdge > MAX_OUTPUT_LONG_EDGE ? MAX_OUTPUT_LONG_EDGE / longEdge : 1;
+  const outW = Math.round((canvas.width  * scale) / 2) * 2;
+  const outH = Math.round((canvas.height * scale) / 2) * 2;
+  return { canvas, output: { width: outW, height: outH } };
+}
 
 // ── Frame capture ──────────────────────────────────────────────────────
 
 // Puppeteer-side animation stepping. Pauses every CSS animation on the
 // page, then advances each animation's currentTime in lockstep with the
 // frame index. Yields one PNG buffer per frame.
-async function captureChromeFrames(chromeHtml, tmpDir) {
+async function captureChromeFrames(chromeHtml, tmpDir, canvas) {
   let browser;
   const paths = [];
   try {
@@ -63,7 +71,7 @@ async function captureChromeFrames(chromeHtml, tmpDir) {
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     });
     const page = await browser.newPage();
-    await page.setViewport({ width: CANVAS_W, height: CANVAS_H, deviceScaleFactor: 1 });
+    await page.setViewport({ width: canvas.width, height: canvas.height, deviceScaleFactor: 1 });
     await page.setContent(chromeHtml, { waitUntil: 'domcontentloaded' });
 
     // Wait for fonts so the first frame doesn't FOUT.
@@ -90,7 +98,7 @@ async function captureChromeFrames(chromeHtml, tmpDir) {
         path:           framePath,
         type:           'png',
         omitBackground: true,
-        clip: { x: 0, y: 0, width: CANVAS_W, height: CANVAS_H }
+        clip: { x: 0, y: 0, width: canvas.width, height: canvas.height }
       });
       paths.push(framePath);
     }
@@ -127,22 +135,23 @@ function runFfmpeg(args) {
 //     stream ends (defensive — tpad should already cover it).
 //   - -shortest + -map 0:a? matches output duration to base video and carries audio
 //     if Veo ever emits it.
-async function compositeWithFfmpeg(veoVideoPath, framePattern, outputPath) {
+async function compositeWithFfmpeg(veoVideoPath, framePattern, outputPath, output) {
   // Memory-conservative encode for Render's 512MB tier:
   //   - -threads 1 + -tune fastdecode keeps libx264 RAM low.
   //   - preset ultrafast trades file size for ~3× less RAM than 'fast'.
-  //   - Output dims 720×1280 (vs 1000×1778) further cuts encoder working set.
+  //   - Output dims downscaled from canvas (longest edge capped at 1280)
+  //     to bound encoder working set.
   //   - Chrome frames are scaled down to OUTPUT dims before overlay so the
-  //     overlay filter doesn't hold a 1000×1778 RGBA buffer per frame.
+  //     overlay filter doesn't hold a full-canvas RGBA buffer per frame.
   const args = [
     '-y',
     '-i', veoVideoPath,                  // local file (downloaded ahead of time)
     '-framerate', String(TARGET_FPS),
     '-i', framePattern,
     '-filter_complex',
-      `[0:v]scale=${OUTPUT_W}:${OUTPUT_H}:force_original_aspect_ratio=increase,` +
-        `crop=${OUTPUT_W}:${OUTPUT_H}[base];` +
-      `[1:v]scale=${OUTPUT_W}:${OUTPUT_H},tpad=stop_mode=clone:stop_duration=10[chrome];` +
+      `[0:v]scale=${output.width}:${output.height}:force_original_aspect_ratio=increase,` +
+        `crop=${output.width}:${output.height}[base];` +
+      `[1:v]scale=${output.width}:${output.height},tpad=stop_mode=clone:stop_duration=10[chrome];` +
       `[base][chrome]overlay=0:0:format=auto:eof_action=pass[out]`,
     '-map', '[out]',
     '-map', '0:a?',
@@ -168,10 +177,15 @@ async function compositeForAd({ ad }) {
   const t0     = Date.now();
   const runId  = crypto.randomBytes(6).toString('hex');
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), `reels_${runId}_`));
+  const { canvas, output } = dimsForFormat(ad.platformFormat);
 
   try {
-    console.log(`🎬 reelsPuppeteer[ad=${ad._id}]: capturing ${TOTAL_FRAMES} chrome frames...`);
-    await captureChromeFrames(ad.chromeHtml, tmpDir);
+    console.log(
+      `🎬 reelsPuppeteer[ad=${ad._id}]: ${ad.platformFormat || 'meta_reels_9_16'} ` +
+      `canvas=${canvas.width}×${canvas.height} output=${output.width}×${output.height} ` +
+      `capturing ${TOTAL_FRAMES} chrome frames...`
+    );
+    await captureChromeFrames(ad.chromeHtml, tmpDir, canvas);
     const captureMs = Date.now() - t0;
 
     const outputPath   = path.join(tmpDir, 'composite.mp4');
@@ -182,7 +196,7 @@ async function compositeForAd({ ad }) {
     await downloadToFile(ad.veoVideoUrl, veoPath);
 
     console.log(`🎬 reelsPuppeteer[ad=${ad._id}]: ffmpeg compositing (captured in ${captureMs}ms)...`);
-    await compositeWithFfmpeg(veoPath, framePattern, outputPath);
+    await compositeWithFfmpeg(veoPath, framePattern, outputPath, output);
 
     const buffer = await fsp.readFile(outputPath);
     const uploaded = await uploadBufferToCloudinary(buffer, {

@@ -24,25 +24,49 @@ const { trackLlmCall }          = require('./costTracker');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+const {
+  canvasForPlatformFormat,
+  safeAreaForPlatformFormat,
+  chromeStyleHintsForPlatformFormat,
+  aspectRatioForPlatformFormat
+} = require('./platformFormats');
+
 const MODEL_ID         = process.env.REELS_CHROME_MODEL_ID || 'gpt-4.1';
 const TEMPERATURE      = 0.85;
 const MAX_TOKENS       = 12000;
-const CHROME_VERSION   = '1.0.0';
+const CHROME_VERSION   = '1.1.0';                          // bumped: format-aware canvas + safe area
 
-// Reels normalized canvas + safe area (matches aiCanvasHtmlGeneratorService)
-const CANVAS = { width: 1000, height: 1778 };
-const SAFE   = { top: 204, bottom: 204 };  // IG/FB UI chrome bands
-const SAFE_RECT = {
-  y:      SAFE.top,
-  height: CANVAS.height - SAFE.top - SAFE.bottom,  // 1370px
-};
-
-function enabled() {
-  return String(process.env.AI_VEO_REELS || '').toLowerCase() === 'true';
+// Resolve per-format canvas + safe area. Reels keeps 1000×1778 with 204px
+// top/bottom UI bands; other formats use their declared canvas (e.g.
+// 1000×1000 for Feed square, 1778×1000 for PMax) and zero or smaller safe
+// areas. Single source of truth: services/platformFormats.js.
+function dimsFor(platformFormat) {
+  const canvas    = canvasForPlatformFormat(platformFormat) || { width: 1000, height: 1778 };
+  const safe      = safeAreaForPlatformFormat(platformFormat) || { top: 0, bottom: 0 };
+  const safeRect  = { y: safe.top, height: canvas.height - safe.top - safe.bottom };
+  return { canvas, safe, safeRect };
 }
 
+// Chrome generation runs whenever the Veo pipeline is on for the ad's
+// format. Reels keys off AI_VEO_REELS, all other formats key off
+// AI_VEO_FEED. Defaults to checking either so legacy callers without a
+// platformFormat keep working when AI_VEO_REELS is on.
+function enabledFor(platformFormat) {
+  const reelsOn = String(process.env.AI_VEO_REELS || '').toLowerCase() === 'true';
+  const feedOn  = String(process.env.AI_VEO_FEED  || '').toLowerCase() === 'true';
+  if (!platformFormat) return reelsOn || feedOn;
+  return platformFormat === 'meta_reels_9_16' ? reelsOn : feedOn;
+}
+
+function enabled() { return enabledFor(null); }
+
 (function logConfig() {
-  console.log(`🎨 aiReelsChromeService config — enabled=${enabled()} model=${MODEL_ID}`);
+  console.log(
+    `🎨 aiReelsChromeService config — ` +
+    `reels=${String(process.env.AI_VEO_REELS || 'false').toLowerCase() === 'true'} ` +
+    `feed=${String(process.env.AI_VEO_FEED  || 'false').toLowerCase() === 'true'} ` +
+    `model=${MODEL_ID}`
+  );
 })();
 
 // ── Context loading ────────────────────────────────────────────────────
@@ -68,12 +92,14 @@ async function loadContext(ad) {
 
 // ── Prompt builder ─────────────────────────────────────────────────────
 
-function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText }) {
+function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText, platformFormat }) {
   const li       = layoutInput || {};
   const copy     = li.copy     || {};
   const proof    = li.social_proof || {};
   const brandLi  = li.brand    || {};
   const cta      = li.cta      || {};
+  const { canvas: CANVAS, safe: SAFE, safeRect: SAFE_RECT } = dimsFor(platformFormat);
+  const styleHints = chromeStyleHintsForPlatformFormat(platformFormat);
 
   const headline    = copy.headline    || copy.headline_main || null;
   const eyebrow     = copy.eyebrow     || copy.headline_lead || null;
@@ -94,24 +120,34 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
 
   const lines = [];
 
-  lines.push(`You are a world-class social video creative director specializing in short-form vertical video ads.`);
+  const STYLE_DESCRIPTIONS = {
+    ig_reels:  `  ig_reels    — Instagram-native: soft gradients, pill-shaped CTAs, clean sans-serif, subtle shadows`,
+    tiktok:    `  tiktok      — TikTok-native: bold white text with dark stroke/shadow, high contrast, punchy`,
+    yt_shorts: `  yt_shorts   — YouTube Shorts: editorial, slightly larger type, confident color blocks`,
+    editorial: `  editorial   — Platform-agnostic premium: refined typography, muted palette, minimal chrome`
+  };
+
+  lines.push(`You are a world-class social video creative director specializing in video ads.`);
   lines.push(``);
-  lines.push(`Generate a self-contained HTML document for the TEXT CHROME OVERLAY of a ${aspectRatio} Reels video ad.`);
-  lines.push(`The HTML will be screenshot with a transparent background and composited over a 5-second Veo-generated base video.`);
+  lines.push(`Generate a self-contained HTML document for the TEXT CHROME OVERLAY of a ${aspectRatio} video ad.`);
+  lines.push(`The HTML will be screenshot with a transparent background and composited over a Veo-generated base video.`);
   lines.push(`Your HTML is the CHROME ONLY — no background fills, no product images, no video embeds.`);
   lines.push(`The base video plays underneath. Transparent regions in your overlay let the video show through.`);
   lines.push(``);
   lines.push(`CANVAS: ${CANVAS.width}×${CANVAS.height}px`);
-  lines.push(`SAFE AREA (CRITICAL HARD CONSTRAINT):`);
-  lines.push(`  Reserved top band:    y:0 to y:${SAFE.top} — covered by IG/FB caption + creator overlay UI. NO chrome here.`);
-  lines.push(`  Reserved bottom band: y:${CANVAS.height - SAFE.bottom} to y:${CANVAS.height} — covered by like/comment/share UI. NO chrome here.`);
-  lines.push(`  Content safe rect:    y:${SAFE_RECT.y} to y:${SAFE_RECT.y + SAFE_RECT.height} (${SAFE_RECT.height}px tall). ALL chrome MUST fit inside this zone.`);
+  if (SAFE.top > 0 || SAFE.bottom > 0) {
+    lines.push(`SAFE AREA (CRITICAL HARD CONSTRAINT):`);
+    if (SAFE.top > 0)    lines.push(`  Reserved top band:    y:0 to y:${SAFE.top} — covered by platform UI. NO chrome here.`);
+    if (SAFE.bottom > 0) lines.push(`  Reserved bottom band: y:${CANVAS.height - SAFE.bottom} to y:${CANVAS.height} — covered by platform UI. NO chrome here.`);
+    lines.push(`  Content safe rect:    y:${SAFE_RECT.y} to y:${SAFE_RECT.y + SAFE_RECT.height} (${SAFE_RECT.height}px tall). ALL chrome MUST fit inside this zone.`);
+  } else {
+    lines.push(`SAFE AREA: full canvas — no native platform UI overlay. Chrome may use the entire ${CANVAS.width}×${CANVAS.height} area.`);
+  }
   lines.push(``);
   lines.push(`PLATFORM STYLE — choose the ONE style that best fits this brand's tone and content:`);
-  lines.push(`  ig_reels    — Instagram-native: soft gradients, pill-shaped CTAs, clean sans-serif, subtle shadows`);
-  lines.push(`  tiktok      — TikTok-native: bold white text with dark stroke/shadow, high contrast, punchy`);
-  lines.push(`  yt_shorts   — YouTube Shorts: editorial, slightly larger type, confident color blocks`);
-  lines.push(`  editorial   — Platform-agnostic premium: refined typography, muted palette, minimal chrome`);
+  for (const k of styleHints) {
+    if (STYLE_DESCRIPTIONS[k]) lines.push(STYLE_DESCRIPTIONS[k]);
+  }
   lines.push(`Declare your choice as a HTML comment <!-- platform_style: <choice> --> at the top of the document.`);
   lines.push(``);
   lines.push(`BRAND`);
@@ -176,13 +212,14 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
 // ── Public API ─────────────────────────────────────────────────────────
 
 async function generateForAd({ ad }) {
-  if (!enabled())                   return { skipped: true, reason: 'AI_VEO_REELS not enabled' };
+  const platformFormat = ad.platformFormat || 'meta_reels_9_16';
+  if (!enabledFor(platformFormat))  return { skipped: true, reason: `Veo flag off for ${platformFormat}` };
   if (!process.env.OPENAI_API_KEY)  return { skipped: true, reason: 'OPENAI_API_KEY not set' };
 
   const { media, brand, product, layoutInput, concept } = await loadContext(ad);
-  const aspectRatio = '9:16';
+  const aspectRatio = aspectRatioForPlatformFormat(platformFormat) || '9:16';
 
-  const prompt = buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText: ad.ctaText });
+  const prompt = buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText: ad.ctaText, platformFormat });
 
   const t0 = Date.now();
   console.log(`🎨 reelsChrome[ad=${ad._id}]: generating chrome (model=${MODEL_ID})...`);
@@ -230,4 +267,4 @@ async function generateForAd({ ad }) {
   return { chromeHtml, elapsedMs };
 }
 
-module.exports = { generateForAd, enabled, CANVAS, SAFE_RECT };
+module.exports = { generateForAd, enabled, enabledFor, dimsFor };
