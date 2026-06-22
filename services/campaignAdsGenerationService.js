@@ -1336,10 +1336,15 @@ async function runConceptDrivenExpansion({
 
   const perProductResults = await Promise.all(productIds.map(async productId => {
     try {
-      // 1. Seeded universe
+      // 1. Seeded universe. wantsVideo flips a ranking bias inside the
+      // universe service — text-burned-in candidates get deprioritized
+      // because Veo's image-to-video mode bakes overlay text into the
+      // generated video (which we can't remove later). Text-free seeds
+      // ranked first; text-burned only used if nothing else exists.
       const { universe, seedUniverseHash, counts } =
         await seededUniverseSvc.buildSeededUniverse(brandId, productId, {
-          includeCategoryMatched, includeBrandMatched, topN: 10
+          includeCategoryMatched, includeBrandMatched, topN: 10,
+          wantsVideo: resolvedKinds.includes('video')
         });
       const filtered = filterUniverseForProduct(productId, universe);
       if (!filtered.length) {

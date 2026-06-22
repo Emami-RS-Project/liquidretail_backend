@@ -190,6 +190,27 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
     }
   }
 
+  // Multi-reference: when the primary seed is NOT already the catalog
+  // hero, attach the catalog product image as a second reference so the
+  // model has a ground-truth product photo to composite from. Without
+  // this, ugc-source / html_render seeds (which often lack a clean
+  // product shot) force the model to INVENT a product — invented
+  // bottles / labels / packaging that don't match the actual SKU.
+  // gpt-image-1's images.edit accepts up to 16 reference images.
+  const refFiles = [];
+  let productRefAttached = false;
+  if (seedFile) refFiles.push(seedFile);
+  if (product?.imageUrl && seedSource !== 'catalog-hero') {
+    try {
+      const raw = await fetchImageBuffer(product.imageUrl);
+      const png = await sharp(raw).png().toBuffer();
+      refFiles.push(await toFile(png, 'product.png', { type: 'image/png' }));
+      productRefAttached = true;
+    } catch (err) {
+      console.warn(`   ⚠️  image-ref: product reference fetch failed (${err.message}) — proceeding without it`);
+    }
+  }
+
   // Build the prompt AFTER the seed source is decided — the language
   // changes meaningfully ("refine this design" for html_render vs
   // "compose ad around this product photo" for catalog-hero vs
@@ -200,14 +221,15 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
     creativeStyle: canvas.creativeStyle,
     canvasSpec:    canvas.canvasSpec,
     copyPicks:     canvas.copyPicks || null,
-    seedSource
+    seedSource,
+    productRefAttached
   });
   const promptHash = sha256(prompt);
 
-  const callOpenAi = () => seedFile
+  const callOpenAi = () => refFiles.length
     ? openai.images.edit({
         model:   MODEL_ID,
-        image:   seedFile,
+        image:   refFiles.length === 1 ? refFiles[0] : refFiles,
         prompt,
         size,
         quality: QUALITY,
@@ -420,7 +442,7 @@ async function fetchImageBuffer(url) {
 // canvas picked, AND the actual proof data so it doesn't fabricate fake
 // testimonials/star ratings.
 
-function buildPrompt({ brand, product, media, concept, proofData, aspectRatio, creativeStyle, canvasSpec, copyPicks = null, seedSource = 'none' }) {
+function buildPrompt({ brand, product, media, concept, proofData, aspectRatio, creativeStyle, canvasSpec, copyPicks = null, seedSource = 'none', productRefAttached = false }) {
   const brandName    = brand?.name || 'the brand';
   const brandTone    = Array.isArray(brand?.tone) && brand.tone.length ? brand.tone.slice(0, 4).join(', ') : null;
 
@@ -444,16 +466,38 @@ function buildPrompt({ brand, product, media, concept, proofData, aspectRatio, c
 
   const lines = [];
   lines.push(`A polished social-media advertisement at ${aspectRatio} aspect ratio.`);
-  // Phase 6.4 — opening line adapts to seed source. HTML render seed
-  // gets a "refine this design" ask; product/UGC photo seed gets the
-  // existing "compose ad around this photo" ask.
+
+  // Reference-image roster — describes each attached image so the model
+  // knows what each one is for. IMAGE 1 is always the primary composition
+  // seed; IMAGE 2 (when present) is the actual catalog product photo to
+  // use as ground truth when rendering the product anywhere in the ad.
   if (seedSource === 'html_render') {
-    lines.push(`The provided reference image is a draft of the ad's composition (rendered from HTML). REFINE it into a polished photoreal version while keeping the LAYOUT, hierarchy, text content, and image positions intact. Replace any rendered product photography in the draft with photoreal product imagery; replace placeholder background colors with cohesive photoreal backgrounds; smooth typography rendering; preserve all text exactly as it appears. The composition is given — your job is to make it look like a finished ad.`);
-  } else if (seedSource === 'catalog-hero' || seedSource === 'ugc-source') {
-    lines.push(`The provided reference image shows the actual product. Preserve the product's identity, shape, color, label, and packaging exactly — do NOT redesign the product. You may reframe it, recolor the background, change the composition, add overlays, etc.`);
+    lines.push(`IMAGE 1 (primary seed): a draft of the ad's composition rendered from HTML. REFINE it into a polished photoreal version while keeping the LAYOUT, hierarchy, text content, and image positions intact. Replace rendered product photography in the draft with photoreal imagery; replace placeholder background colors with cohesive photoreal backgrounds; smooth typography rendering; preserve all text exactly as it appears.`);
+  } else if (seedSource === 'catalog-hero') {
+    lines.push(`IMAGE 1 (primary seed): the actual product. Preserve the product's identity, shape, color, label, and packaging exactly — do NOT redesign the product. You may reframe it, recolor the background, change the composition, add overlays, etc.`);
+  } else if (seedSource === 'ugc-source') {
+    lines.push(`IMAGE 1 (primary seed): a UGC source photo. Use it as the composition anchor — hand/subject position, lighting, mood, and overall scene. You may reframe, add overlays, change background tones, etc.`);
   } else {
     lines.push(`Compose the ad from scratch — no seed image provided. Make it look photoreal and complete.`);
   }
+  if (productRefAttached) {
+    lines.push(`IMAGE 2 (product reference): the ACTUAL catalog product. If the design renders the product anywhere in the composition — bottle, jar, package, garment, container — match IMAGE 2 EXACTLY: same shape, same color, same label text, same packaging, same proportions. Do NOT invent a similar-but-different product. Do NOT modify the product's label or branding. The ONLY product allowed in this ad is the one shown in IMAGE 2.`);
+  } else if (seedSource !== 'catalog-hero' && seedSource !== 'html_render') {
+    lines.push(`No standalone product photo is available for this run. Do NOT invent a product bottle / jar / package / garment / container that isn't visible in IMAGE 1. If the seed photo shows the product in use (in a hand, on skin, etc.), feature THAT — do not add a separate product shot.`);
+  }
+  lines.push(``);
+
+  // Physical accuracy — gpt-image-1 will silently generate extra fingers,
+  // mismatched eyes, distorted hands, etc. unless the prompt explicitly
+  // calls out human-rendering requirements. Same constraints apply when
+  // the seed image already contains a person; we want the polish to
+  // preserve their natural anatomy, not "improve" it into surrealism.
+  lines.push(`PHYSICAL ACCURACY (HARD CONSTRAINT):`);
+  lines.push(`- Hands: exactly 5 fingers per hand, natural finger length and joint placement. Count fingers before rendering. No extra digits, no missing digits, no fused fingers, no impossible bends.`);
+  lines.push(`- Eyes: 2 symmetric eyes per face, matching color and size, natural placement. No mismatched colors, no warped pupils, no asymmetry.`);
+  lines.push(`- Faces: natural proportions, normal tooth count, smooth skin without melted/blurred features. No extra ears, no duplicated features.`);
+  lines.push(`- Limbs: standard human anatomy — two arms, two legs, normal joint count. No extra/missing limbs, no impossible angles.`);
+  lines.push(`- If a person appears in IMAGE 1, PRESERVE THAT person's face, hair, skin tone, and identity — do not generate a different person.`);
   lines.push(``);
   lines.push(`Brand: ${brandName}${brandTone ? ` (tone: ${brandTone})` : ''}.`);
   if (productName) lines.push(`Featured product: ${productName}${category ? ` — ${category}` : ''}.`);

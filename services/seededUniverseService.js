@@ -84,10 +84,26 @@ function rankCatalogMedias(medias) {
   });
 }
 
-function rankUgcMedias(medias) {
+function hasBurnedText(media) {
+  return Array.isArray(media?.text) && media.text.length > 0;
+}
+
+function rankUgcMedias(medias, { wantsVideo = false } = {}) {
   // adSuitability.score is the canonical 0..1 ranking signal; nulls
   // sort last. Tiebreak by engagement signal when present.
+  //
+  // wantsVideo bias: when the run will feed Veo's image-to-video mode,
+  // text-burned candidates (captions / stickers / watermarks detected by
+  // OCR in the detect pipeline) get pushed BELOW text-free candidates
+  // regardless of score. Veo bakes overlay text into the generated
+  // video; once it's there we can't remove it. Text-free seeds always
+  // preferred; text-burned only used when nothing else exists.
   return medias.slice().sort((a, b) => {
+    if (wantsVideo) {
+      const ta = hasBurnedText(a) ? 1 : 0;
+      const tb = hasBurnedText(b) ? 1 : 0;
+      if (ta !== tb) return ta - tb;             // 0 (no text) wins
+    }
     const sa = a.adSuitability?.score ?? -1;
     const sb = b.adSuitability?.score ?? -1;
     if (sa !== sb) return sb - sa;
@@ -170,6 +186,9 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
   const topN = opts.topN ?? DEFAULT_TOP_N;
   const includeCategoryMatched = opts.includeCategoryMatched === true;
   const includeBrandMatched    = opts.includeBrandMatched    === true;
+  // wantsVideo flips rankUgcMedias' text-presence penalty — burned-in
+  // text candidates rank below text-free for Veo image-to-video seeds.
+  const wantsVideo = opts.wantsVideo === true;
 
   const universe = [];
   const counts = {
@@ -220,7 +239,7 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
   const allUgcIds = Array.from(new Set([...tier1Ids, ...tier2Ids, ...tier3Ids]));
   const ugcMedias = allUgcIds.length ? await Media.find({
     _id: { $in: allUgcIds }
-  }).select('_id fileType fileUrl source adSuitability classification metadata platformStats matchedProducts refinedProducts').lean() : [];
+  }).select('_id fileType fileUrl source adSuitability classification metadata platformStats matchedProducts refinedProducts text').lean() : [];
   const ugcById = new Map(ugcMedias.map(m => [String(m._id), m]));
 
   // Tier 1 — apply content-nature gate; no cross-product guard (the
@@ -228,7 +247,7 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
   const tier1Medias = tier1Ids
     .map(id => ugcById.get(id))
     .filter(m => m && isContentNatureEligible(m));
-  rankUgcMedias(tier1Medias).forEach(m => {
+  rankUgcMedias(tier1Medias, { wantsVideo }).forEach(m => {
     universe.push(projectEntry(m, 'ugc_product_match'));
     counts.ugc_product_match++;
   });
@@ -239,7 +258,7 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
     const tier2Medias = tier2Ids
       .map(id => ugcById.get(id))
       .filter(m => m && isContentNatureEligible(m) && !hasIdentifiedSpecificProduct(m));
-    rankUgcMedias(tier2Medias).forEach(m => {
+    rankUgcMedias(tier2Medias, { wantsVideo }).forEach(m => {
       universe.push(projectEntry(m, 'ugc_product_category'));
       counts.ugc_product_category++;
     });
@@ -254,7 +273,7 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
         && isContentNatureEligible(m)
         && !hasIdentifiedSpecificProduct(m)
         && !hasVisibleUnmatchedProduct(m));
-    rankUgcMedias(tier3Medias).forEach(m => {
+    rankUgcMedias(tier3Medias, { wantsVideo }).forEach(m => {
       universe.push(projectEntry(m, 'ugc_brand_match'));
       counts.ugc_brand_match++;
     });

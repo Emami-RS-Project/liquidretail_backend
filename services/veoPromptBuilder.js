@@ -158,7 +158,7 @@ function buildOverlayIntent({ concept, hasHeadline, hasCta }) {
 // Main export. layoutInput is LayoutInputArtifact.input (preferred source for
 // scene data). sourceMedia is layoutInput.input.source_media from the detect
 // pipeline (richer bbox data when available). Both are optional.
-function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1' }) {
+function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false }) {
   const lines   = [];
   const subject = resolveSubject({ layoutInput, sourceMedia, media });
 
@@ -222,6 +222,39 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     `The frame must be visually clean — product and scene only. ` +
     `All text overlays, animated review quotes, headlines, CTAs, and logos are added in a separate compositing step. ` +
     `Generating ANY text in the video itself will cause rejection.`
+  );
+
+  // When the seed image carries burned-in text (caption, sticker, watermark
+  // from a source post), Veo's image-to-video mode will faithfully animate
+  // those overlays into the output — which we then can't remove. Tell Veo
+  // explicitly to ignore them and recompose the scene without the overlays.
+  if (seedHasText) {
+    lines.push(
+      `The reference image contains text overlays / captions / stickers / watermarks burned into the source frame. ` +
+      `IGNORE all visible text on the reference. Recompose the scene as if those overlays weren't there — clean product and subject only, no text artifacts carried through.`
+    );
+  }
+
+  // Physical accuracy — Veo will silently produce malformed hands, extra
+  // fingers, asymmetric eyes, and warped faces unless explicitly steered.
+  // Especially critical for image-to-video Track 2 where the seed already
+  // shows a person/hand and we want their natural anatomy preserved.
+  lines.push(
+    `PHYSICAL ACCURACY: Every person, hand, or face rendered MUST be anatomically correct. ` +
+    `Hands have exactly 5 fingers with natural length and joint placement (no extra digits, no fused fingers, no impossible bends). ` +
+    `Faces have 2 symmetric eyes with matching color and size, natural skin texture, normal tooth count, no warped features. ` +
+    `Body proportions follow real human anatomy — no extra limbs, no impossible angles. ` +
+    `If the reference image shows a person, preserve THEIR face, hair, skin tone, and identity throughout — do not morph them into a different person mid-shot.`
+  );
+
+  // Product fidelity — image-to-video should preserve the seed product
+  // exactly, but Veo occasionally "reinterprets" labels or packaging on
+  // the way to motion. Make it explicit.
+  lines.push(
+    `PRODUCT FIDELITY: The product in the reference image is the actual catalog product. ` +
+    `Preserve its exact shape, color, label text, packaging, and proportions throughout the entire 5 seconds. ` +
+    `Do NOT reinterpret the label, do NOT shift colors, do NOT generate a similar-but-different product variant. ` +
+    `The product is the source of truth.`
   );
 
   return lines.join(' ');

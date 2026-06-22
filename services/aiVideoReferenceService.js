@@ -191,17 +191,24 @@ async function generateForAd({ ad }) {
     concept = direction?.concepts?.find(c => c.concept_id === ad.conceptId) || null;
   }
 
+  // OCR text the detect pipeline found on this seed. Non-empty means the
+  // seed has burned-in captions / stickers / watermarks that Veo's
+  // image-to-video mode will faithfully animate into the output — we
+  // can't remove them after the fact. Tell Veo to ignore overlay text.
+  const seedHasText = Array.isArray(media.text) && media.text.length > 0;
+
   const prompt = buildVeoPrompt({
     concept, brand, product, media,
     layoutInput:  layoutInput?.input || null,
     sourceMedia:  layoutInput?.input?.source_media || null,
-    aspectRatio
+    aspectRatio,
+    seedHasText
   });
 
   const t0 = Date.now();
   console.log(
     `🎬 veoReference[ad=${ad._id}]: track=${track} aspect=${aspectRatio} ` +
-    `media=${media._id} (${media.fileType}) submitting...`
+    `media=${media._id} (${media.fileType})${seedHasText ? ` seedHasText=true (${media.text.length} regions)` : ''} submitting...`
   );
 
   const imageBase64   = await fetchAsBase64(refUrl);
