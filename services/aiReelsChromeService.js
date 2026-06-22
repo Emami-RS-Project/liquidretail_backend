@@ -238,6 +238,16 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
   lines.push(`    • Pick the guarantor that fits the chosen platform_style: ig_reels/editorial favor (a)/(b)/(c); tiktok/yt_shorts favor (d)/(e) for the SHORT headline only.`);
   lines.push(`  Self-check before emitting: walk each text element and confirm it has at least one guarantor — and that multi-line / body copy uses (a)/(b)/(c), not (d) alone.`);
   lines.push(``);
+  lines.push(`CONTAINER SIZING (HARD CONSTRAINT)`);
+  lines.push(`  Every text container (panel, card, pill, badge, quote card, CTA button) MUST FIT its text content without clipping or overflow at the right or bottom edge.`);
+  lines.push(`  RULES:`);
+  lines.push(`    • Apply box-sizing: border-box on every container so padding does not reduce the inner content width.`);
+  lines.push(`    • Use width: auto with max-width set to a sensible portion of the canvas (e.g., max-width: 80% of canvas width / max-width: 760px), or width: fit-content. NEVER hardcode a fixed pixel width that's narrower than the longest line of text it contains.`);
+  lines.push(`    • Add overflow-wrap: break-word and word-break: normal so long words wrap rather than overflow.`);
+  lines.push(`    • Multi-line text: line-height 1.3–1.5; padding 16–32px so the text breathes inside the container.`);
+  lines.push(`    • Quote text varies in length across concepts (40–200 chars). Size the container to accommodate the LONGEST plausible quote — let it grow vertically with word-wrap rather than capping width too tightly.`);
+  lines.push(`    • Self-check before emitting: for every text container, trace the longest line of inner text against the container's effective inner width (width − 2× padding). If the line would exceed it, either widen the container, reduce font-size, or increase padding. Clipping at the right edge is a HARD failure.`);
+  lines.push(``);
   lines.push(`QUOTE COMPOSITION (HARD CONSTRAINT)`);
   lines.push(`  When the design uses a quote (social proof), ALL parts of the quote chrome — decorative quote glyph (" or "), quote text, author/attribution, star rating — MUST live inside a SINGLE visual container (one card / one scrim).`);
   lines.push(`  FORBIDDEN: a giant standalone " glyph floating in one corner with the quote text in a separate panel elsewhere on the canvas. The eye reads those as unrelated elements; the quote loses its anchor.`);
