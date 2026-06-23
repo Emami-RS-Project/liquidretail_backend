@@ -27,6 +27,8 @@ const ProductMatchArtifact  = require('../models/ProductMatchArtifact');
 const Category              = require('../models/Category');
 const CropArtifact          = require('../models/CropArtifact');
 const DetectionArtifact     = require('../models/DetectionArtifact');
+const Ad                    = require('../models/Ad');
+const Campaign              = require('../models/Campaign');
 const catalogProductPromoteService = require('../services/catalogProductPromoteService');
 const { tenantFilter, assertMediaInTenant } = require('../middleware/tenantHelpers');
 void assertMediaInTenant;     // kept for future :id verification helpers
@@ -300,6 +302,218 @@ router.get('/', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message || 'catalog list failed' });
+  }
+});
+
+// ── Product Ads (Phase 1) ─────────────────────────────────────────────
+//
+// Per-product ad summary. Drives the new product-centric Ads page —
+// each row is a product, with ad coverage / campaign count / ad count /
+// last activity aggregated from the Ad collection. Registered BEFORE
+// the /:id route below so static-path matches ('/ads-summary',
+// '/:id/ads-detail') take precedence over the generic '/:id' catch.
+//
+// Coverage is a placeholder formula: min(adCount / TARGET_PER_PRODUCT, 1).
+// Phase 2 will replace this with the proper opportunity scoring engine
+// (fresh UGC × engagement × inverse ad coverage).
+const TARGET_ADS_PER_PRODUCT = 5;
+
+// Single aggregation grouping ads by productId. Brand-scoped, excludes
+// archived. Returns counts by status + the set of distinct campaign IDs
+// + most recent generatedAt per product.
+async function buildAdStatsByProduct(brandObjectId) {
+  const rows = await Ad.aggregate([
+    { $match: { brandId: brandObjectId, status: { $ne: 'archived' } } },
+    { $group: {
+        _id:           '$productId',
+        adCount:       { $sum: 1 },
+        draftCount:    { $sum: { $cond: [{ $eq: ['$status', 'draft'] }, 1, 0] } },
+        liveCount:     { $sum: { $cond: [{ $eq: ['$status', 'live'] }, 1, 0] } },
+        failedCount:   { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+        readyToExport: {
+          $sum: {
+            $cond: [
+              { $and: [
+                { $eq: ['$status', 'draft'] },
+                { $ne: ['$metaSyncStatus', 'synced'] }
+              ] }, 1, 0
+            ]
+          }
+        },
+        campaignIds:    { $addToSet: '$campaignId' },
+        lastGeneratedAt:{ $max: '$generatedAt' }
+    } }
+  ]);
+  const byProduct = new Map();
+  for (const r of rows) {
+    if (!r._id) continue;   // skip brand-only ads (no product)
+    byProduct.set(String(r._id), r);
+  }
+  return byProduct;
+}
+
+// GET /api/catalog/ads-summary?brandId=X
+// → { summary, products: [{ productId, title, price, currency, imageUrl,
+//      category, adCount, campaignCount, coveragePct, readyToExport,
+//      lastActivityAt }] }
+router.get('/ads-summary', async (req, res) => {
+  try {
+    const brandId = req.query.brandId || req.headers['x-brand-id'];
+    if (!brandId) return res.status(400).json({ error: 'brandId is required' });
+    const brandObjectId = mongoose.isValidObjectId(brandId)
+      ? new mongoose.Types.ObjectId(String(brandId))
+      : null;
+    if (!brandObjectId) return res.status(400).json({ error: 'brandId is not a valid ObjectId' });
+
+    const filter = tenantFilter(req, { brandId });
+    // Exclude draft (review-queue) products — they're not ad-targetable yet.
+    filter.draft = { $ne: true };
+
+    // Pull products + ad aggregation in parallel.
+    const [products, adStats] = await Promise.all([
+      CatalogProduct.find(filter)
+        .select('_id title price currency imageUrl category brand size createdAt')
+        .lean(),
+      buildAdStatsByProduct(brandObjectId)
+    ]);
+
+    const productsOut = products.map(p => {
+      const stats = adStats.get(String(p._id)) || {};
+      const adCount       = stats.adCount       || 0;
+      const campaignCount = (stats.campaignIds || []).filter(Boolean).length;
+      const coveragePct   = Math.min(100, Math.round((adCount / TARGET_ADS_PER_PRODUCT) * 100));
+      return {
+        productId:      String(p._id),
+        title:          p.title || '(untitled)',
+        price:          p.price ?? null,
+        currency:       p.currency || null,
+        imageUrl:       p.imageUrl || null,
+        category:       p.category || null,
+        brand:          p.brand || null,
+        size:           p.size || null,
+        adCount,
+        campaignCount,
+        readyToExport:  stats.readyToExport  || 0,
+        draftCount:     stats.draftCount     || 0,
+        liveCount:      stats.liveCount      || 0,
+        coveragePct,
+        // Phase 2: opportunityScore will be the proper signal-driven
+        // ranking. For now, sort by lastActivity desc / coverage asc.
+        opportunityScore: null,
+        lastActivityAt: stats.lastGeneratedAt
+                        ? new Date(stats.lastGeneratedAt).toISOString()
+                        : null
+      };
+    });
+
+    // Default sort: most recent activity first, then lowest coverage
+    // (so products needing attention surface above well-covered ones
+    // with stale activity).
+    productsOut.sort((a, b) => {
+      const ta = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
+      const tb = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
+      if (tb !== ta) return tb - ta;
+      return a.coveragePct - b.coveragePct;
+    });
+
+    const totalProducts    = productsOut.length;
+    const productsWithAds  = productsOut.filter(p => p.adCount > 0).length;
+    const adsCreated       = productsOut.reduce((s, p) => s + p.adCount, 0);
+    const adsReadyToExport = productsOut.reduce((s, p) => s + p.readyToExport, 0);
+
+    res.json({
+      summary: {
+        totalProducts,
+        productsWithAds,
+        adCoveragePct: totalProducts > 0
+          ? Math.round((productsWithAds / totalProducts) * 100)
+          : 0,
+        adsCreated,
+        adsReadyToExport,
+        // Phase 2 placeholder — opportunity bucket counts.
+        goodOpportunities: null
+      },
+      products: productsOut
+    });
+  } catch (err) {
+    console.error(`❌ GET /api/catalog/ads-summary: ${err.message}\n${err.stack || ''}`);
+    res.status(500).json({ error: err.message || 'ads summary failed' });
+  }
+});
+
+// GET /api/catalog/:id/ads-detail?brandId=X
+// → { campaigns: [{ campaignId, name, status, adCount }], ads: [{ ad row }] }
+// Drives the inline expansion: campaign sidebar + ads grid for one product.
+router.get('/:id/ads-detail', async (req, res) => {
+  try {
+    const brandId = req.query.brandId || req.headers['x-brand-id'];
+    if (!brandId) return res.status(400).json({ error: 'brandId is required' });
+    const productId = req.params.id;
+    if (!mongoose.isValidObjectId(productId)) {
+      return res.status(400).json({ error: 'productId is not a valid ObjectId' });
+    }
+    const brandObjectId = mongoose.isValidObjectId(brandId)
+      ? new mongoose.Types.ObjectId(String(brandId))
+      : null;
+    if (!brandObjectId) return res.status(400).json({ error: 'brandId is not a valid ObjectId' });
+
+    const filter = tenantFilter(req, { brandId, productId });
+    // Restrict to non-archived ads — same convention as the summary
+    // endpoint so counts agree between the row and the expansion.
+    filter.status = { $ne: 'archived' };
+
+    const ads = await Ad.find(filter)
+      .select('_id campaignId template aspectRatio kind status renderUrl posterUrl photorealUrl ctaText copy generatedAt metaSyncStatus platformFormat')
+      .sort({ generatedAt: -1 })
+      .limit(60)
+      .lean();
+
+    // Distinct campaigns referenced by this product's ads + per-campaign
+    // ad count.
+    const campaignAdCounts = new Map();
+    for (const ad of ads) {
+      if (!ad.campaignId) continue;
+      const k = String(ad.campaignId);
+      campaignAdCounts.set(k, (campaignAdCounts.get(k) || 0) + 1);
+    }
+    const campaignIds = Array.from(campaignAdCounts.keys());
+    const campaignDocs = campaignIds.length
+      ? await Campaign.find({ _id: { $in: campaignIds } })
+          .select('_id name status kind')
+          .lean()
+      : [];
+    const campaigns = campaignDocs.map(c => ({
+      campaignId: String(c._id),
+      name:       c.name || '(unnamed campaign)',
+      status:     c.status || null,
+      kind:       c.kind || null,
+      adCount:    campaignAdCounts.get(String(c._id)) || 0
+    }));
+
+    // Shape ads for the expansion grid — keep the projection lean since
+    // the page is product-centric and per-ad detail still lives behind
+    // the existing /ads modal.
+    const adRows = ads.map(a => ({
+      adId:          String(a._id),
+      campaignId:    a.campaignId ? String(a.campaignId) : null,
+      template:      a.template,
+      aspectRatio:   a.aspectRatio,
+      platformFormat: a.platformFormat || null,
+      kind:          a.kind || 'image',
+      status:        a.status,
+      renderUrl:     a.renderUrl || null,
+      photorealUrl:  a.photorealUrl || null,
+      posterUrl:     a.posterUrl || null,
+      headline:      a.copy?.headline || null,
+      ctaText:       a.ctaText || null,
+      generatedAt:   a.generatedAt ? new Date(a.generatedAt).toISOString() : null,
+      metaSyncStatus: a.metaSyncStatus || null
+    }));
+
+    res.json({ campaigns, ads: adRows });
+  } catch (err) {
+    console.error(`❌ GET /api/catalog/:id/ads-detail: ${err.message}\n${err.stack || ''}`);
+    res.status(500).json({ error: err.message || 'ads detail failed' });
   }
 });
 
