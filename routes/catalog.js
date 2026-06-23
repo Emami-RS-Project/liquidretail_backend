@@ -457,10 +457,20 @@ router.get('/:id/ads-detail', async (req, res) => {
       : null;
     if (!brandObjectId) return res.status(400).json({ error: 'brandId is not a valid ObjectId' });
 
-    const filter = tenantFilter(req, { brandId, productId });
-    // Restrict to non-archived ads — same convention as the summary
-    // endpoint so counts agree between the row and the expansion.
-    filter.status = { $ne: 'archived' };
+    // Ad is brand-scoped (not advertiser-scoped) — can't reuse
+    // tenantFilter directly. Validate tenant access by asserting the
+    // catalog product belongs to the requesting advertiser, THEN
+    // query Ad by (brandId, productId).
+    const product = await CatalogProduct.findOne(
+      tenantFilter(req, { _id: productId, brandId })
+    ).select('_id').lean();
+    if (!product) return res.status(404).json({ error: 'product not found' });
+
+    const filter = {
+      brandId:   brandObjectId,
+      productId: new mongoose.Types.ObjectId(productId),
+      status:    { $ne: 'archived' }
+    };
 
     const ads = await Ad.find(filter)
       .select('_id campaignId template aspectRatio kind status renderUrl posterUrl photorealUrl ctaText copy generatedAt metaSyncStatus platformFormat')
