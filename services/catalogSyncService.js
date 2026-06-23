@@ -254,6 +254,19 @@ async function syncCatalogForCred(cred) {
     console.warn(`   ⚠️  product-path detect enqueue failed: ${err.message}`);
   }
 
+  // Eager review + commerce enrichment (Phase: catalog-sync-enrichment).
+  // Walks the brand's products and fires productReviews + productDetails
+  // for any row that's missing them OR has stale (>30d) cache. Both
+  // downstream services are idempotent on their caches so re-running on
+  // a fully-cached brand is a no-op. Fire-and-forget — the sync HTTP
+  // response shouldn't block on review/SerpAPI calls (cold-cache enrich
+  // of 100 products at concurrency=3 takes ~5–8 minutes).
+  setImmediate(() => {
+    require('./catalogProductEnrichmentService')
+      .enqueueBrandProductEnrichment(brandId)
+      .catch(err => console.warn(`   ⚠️  catalog enrichment enqueue failed: ${err.message}`));
+  });
+
   return {
     ok: true,
     fetched,
