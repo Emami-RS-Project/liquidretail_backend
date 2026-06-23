@@ -83,27 +83,59 @@ function deriveAspectCroppedImageUrl(imageUrl, aspectRatio) {
   return imageUrl.replace('/image/upload/', `/image/upload/c_fill,${arParam},w_1024,q_auto:good/`);
 }
 
-async function fetchAsBase64(url) {
+// Fetches a URL and returns { base64, mimeType, bytes }. Validates that
+// the response is a recognized image content-type — Cloudinary transforms
+// can quietly return an HTML error page for malformed transform strings
+// or expired assets, and Veo will silently 400 on the resulting "JPEG"
+// because the bytes aren't an image. Throws a descriptive error so the
+// caller log shows the actual fetch problem instead of a generic
+// "Unsupported video generation request" downstream.
+async function fetchAsImage(url) {
   const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000 });
-  return Buffer.from(res.data).toString('base64');
+  const ct  = String(res.headers['content-type'] || '').toLowerCase();
+  if (!ct.startsWith('image/')) {
+    const preview = Buffer.from(res.data).slice(0, 80).toString('utf8').replace(/\s+/g, ' ');
+    throw new Error(`fetchAsImage(${url}): unexpected content-type "${ct}" (preview: "${preview}")`);
+  }
+  return {
+    base64:   Buffer.from(res.data).toString('base64'),
+    mimeType: ct.split(';')[0].trim(),
+    bytes:    res.data.byteLength || res.data.length
+  };
+}
+
+// Back-compat alias for older call sites that only need the base64 string.
+async function fetchAsBase64(url) {
+  return (await fetchAsImage(url)).base64;
 }
 
 // ── Gemini API calls ───────────────────────────────────────────────────
 
 // Veo 3.1's referenceImages parameter holds asset appearance steady through
-// motion. Each entry is { base64, mimeType, referenceType: 'asset'|'style' }.
-// Empty array → omit the field entirely (older Veo models / pre-3.1 reject
-// unknown params with misleading 400s — same pattern as enhancePrompt /
-// durationSeconds).
-async function submitVeoJob({ prompt, imageBase64, aspectRatio, referenceImages = [] }) {
+// motion. Some preview Veo deployments reject the combination of an image
+// seed + referenceImages with a misleading 400 ("Unsupported video
+// generation request") — same pattern as enhancePrompt / durationSeconds
+// when they weren't accepted. Gated behind VEO_USE_REFERENCE_IMAGES
+// (default true) so an operator can flip it off without code change if
+// their key's Veo deployment rejects the field.
+function referenceImagesEnabled() {
+  const v = String(process.env.VEO_USE_REFERENCE_IMAGES ?? 'true').toLowerCase();
+  return v !== 'false' && v !== '0';
+}
+
+// imageMimeType defaults to image/jpeg for back-compat; pass the real
+// content-type when fetchAsImage gave you one (some Cloudinary transforms
+// emit image/png even though the .jpg extension says otherwise).
+async function submitVeoJob({ prompt, imageBase64, imageMimeType = 'image/jpeg', aspectRatio, referenceImages = [] }) {
   const VEO_SUPPORTED = new Set(['16:9', '9:16', '1:1', '4:5']);
   const veoAspect     = VEO_SUPPORTED.has(aspectRatio) ? aspectRatio : '16:9';
 
   const instance = {
     prompt,
-    image: { bytesBase64Encoded: imageBase64, mimeType: 'image/jpeg' }
+    image: { bytesBase64Encoded: imageBase64, mimeType: imageMimeType }
   };
-  if (referenceImages.length) {
+  const willSendRefs = referenceImages.length > 0 && referenceImagesEnabled();
+  if (willSendRefs) {
     instance.referenceImages = referenceImages.map(r => ({
       image:         { bytesBase64Encoded: r.base64, mimeType: r.mimeType || 'image/jpeg' },
       referenceType: r.referenceType || 'asset'
@@ -118,6 +150,17 @@ async function submitVeoJob({ prompt, imageBase64, aspectRatio, referenceImages 
       personGeneration: 'allow_adult'
     }
   };
+
+  // Diagnostic — logs the shape of the request without the base64
+  // bodies. Helps narrow misleading 400s when the model rejects the
+  // call: are we sending a recognized aspect, the right MIME, refs on
+  // or off, etc.
+  console.log(
+    `🎬 veoReference.submit: model=${MODEL_ID} aspect=${veoAspect} ` +
+    `seedMime=${imageMimeType} seedBytes≈${Math.round((imageBase64.length * 3) / 4)} ` +
+    `refImages=${willSendRefs ? referenceImages.length : 0}` +
+    (referenceImages.length && !willSendRefs ? ' (gated off via VEO_USE_REFERENCE_IMAGES)' : '')
+  );
 
   let res;
   try {
@@ -230,24 +273,40 @@ async function generateForAd({ ad }) {
     `media=${media._id} (${media.fileType})${seedHasText ? ` seedHasText=true (${media.text.length} regions)` : ''} submitting...`
   );
 
-  const imageBase64 = await fetchAsBase64(refUrl);
+  // fetchAsImage validates content-type so a Cloudinary transform that
+  // quietly returns an HTML error page fails LOUDLY here instead of
+  // surfacing as Veo's misleading "Unsupported video generation
+  // request" downstream.
+  const seedImage = await fetchAsImage(refUrl);
 
   // Veo 3.1 referenceImages — asset-type references hold the product's
   // appearance steady through motion. Without this, Veo can drift the
   // product's label/color/shape over the 5–8s clip even when the seed
   // shows it clearly. Best-effort: failure to fetch leaves the array
-  // empty and Veo falls back to seed-only (current behavior).
+  // empty and Veo falls back to seed-only (current behavior). Can be
+  // disabled entirely via VEO_USE_REFERENCE_IMAGES=false if the model's
+  // preview API rejects the combination of an image seed + references.
   const referenceImages = [];
   if (product?.imageUrl) {
     try {
-      const productBase64 = await fetchAsBase64(product.imageUrl);
-      referenceImages.push({ base64: productBase64, mimeType: 'image/jpeg', referenceType: 'asset' });
+      const productImage = await fetchAsImage(product.imageUrl);
+      referenceImages.push({
+        base64:        productImage.base64,
+        mimeType:      productImage.mimeType,
+        referenceType: 'asset'
+      });
     } catch (err) {
       console.warn(`   ⚠️  veoReference[ad=${ad._id}]: product reference fetch failed (${err.message}) — proceeding without it`);
     }
   }
 
-  const operationName = await submitVeoJob({ prompt, imageBase64, aspectRatio, referenceImages });
+  const operationName = await submitVeoJob({
+    prompt,
+    imageBase64:   seedImage.base64,
+    imageMimeType: seedImage.mimeType,
+    aspectRatio,
+    referenceImages
+  });
   console.log(`🎬 veoReference[ad=${ad._id}]: operation started — ${operationName}${referenceImages.length ? ` (refs=${referenceImages.length})` : ''}`);
 
   const response    = await pollOperation(operationName);
