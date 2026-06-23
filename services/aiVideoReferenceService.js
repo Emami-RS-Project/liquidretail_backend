@@ -112,15 +112,17 @@ async function fetchAsBase64(url) {
 // ── Gemini API calls ───────────────────────────────────────────────────
 
 // Veo 3.1's referenceImages parameter holds asset appearance steady through
-// motion. Some preview Veo deployments reject the combination of an image
-// seed + referenceImages with a misleading 400 ("Unsupported video
-// generation request") — same pattern as enhancePrompt / durationSeconds
-// when they weren't accepted. Gated behind VEO_USE_REFERENCE_IMAGES
-// (default true) so an operator can flip it off without code change if
-// their key's Veo deployment rejects the field.
+// motion — BUT the preview API rejects the combination of an image seed +
+// referenceImages with "Unsupported video generation request" (same pattern
+// as enhancePrompt / durationSeconds when they weren't accepted). Image-to-
+// video and ingredients-to-video are distinct modes; you can't mix them.
+//
+// Default OFF. Operator can flip to true via VEO_USE_REFERENCE_IMAGES=true
+// to experiment once Veo's API supports the combo (or once we switch to
+// pure ingredients-to-video by dropping the seed `image` field).
 function referenceImagesEnabled() {
-  const v = String(process.env.VEO_USE_REFERENCE_IMAGES ?? 'true').toLowerCase();
-  return v !== 'false' && v !== '0';
+  const v = String(process.env.VEO_USE_REFERENCE_IMAGES ?? 'false').toLowerCase();
+  return v === 'true' || v === '1';
 }
 
 // imageMimeType defaults to image/jpeg for back-compat; pass the real
@@ -134,6 +136,9 @@ async function submitVeoJob({ prompt, imageBase64, imageMimeType = 'image/jpeg',
     prompt,
     image: { bytesBase64Encoded: imageBase64, mimeType: imageMimeType }
   };
+  // Defense-in-depth: caller is expected to honor referenceImagesEnabled()
+  // before populating the array (so the fetch can be skipped), but enforce
+  // the gate again here so a misbehaving caller can't slip refs through.
   const willSendRefs = referenceImages.length > 0 && referenceImagesEnabled();
   if (willSendRefs) {
     instance.referenceImages = referenceImages.map(r => ({
@@ -253,18 +258,19 @@ async function generateForAd({ ad }) {
   // can't remove them after the fact. Tell Veo to ignore overlay text.
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
 
-  // We won't know if referenceImages succeeded until after fetch below,
-  // but we can predict it from data availability — the prompt is built
-  // before the fetch and informs Veo whether to expect a separate
-  // product reference image alongside the seed.
-  const hasProductReference = !!product?.imageUrl;
+  // hasProductReference reflects what we'll ACTUALLY send — gated by
+  // referenceImagesEnabled() (default false because Veo 3.1's preview
+  // rejects seed + refImages together). When off, the prompt falls
+  // back to "preserve the seed product" wording instead of pointing
+  // at a separate reference image.
+  const willSendRefs = referenceImagesEnabled() && !!product?.imageUrl;
   const prompt = buildVeoPrompt({
     concept, brand, product, media,
     layoutInput:  layoutInput?.input || null,
     sourceMedia:  layoutInput?.input?.source_media || null,
     aspectRatio,
     seedHasText,
-    hasProductReference
+    hasProductReference: willSendRefs
   });
 
   const t0 = Date.now();
@@ -280,14 +286,14 @@ async function generateForAd({ ad }) {
   const seedImage = await fetchAsImage(refUrl);
 
   // Veo 3.1 referenceImages — asset-type references hold the product's
-  // appearance steady through motion. Without this, Veo can drift the
-  // product's label/color/shape over the 5–8s clip even when the seed
-  // shows it clearly. Best-effort: failure to fetch leaves the array
-  // empty and Veo falls back to seed-only (current behavior). Can be
-  // disabled entirely via VEO_USE_REFERENCE_IMAGES=false if the model's
-  // preview API rejects the combination of an image seed + references.
+  // appearance steady through motion. Off by default (Veo's preview
+  // rejects seed+refs together with a 400). Skip the fetch entirely
+  // when disabled so we don't pay for bandwidth on a payload that
+  // submitVeoJob will drop. Flip VEO_USE_REFERENCE_IMAGES=true to
+  // experiment once Veo accepts the combo (or once we switch to pure
+  // ingredients-to-video and drop the seed image).
   const referenceImages = [];
-  if (product?.imageUrl) {
+  if (referenceImagesEnabled() && product?.imageUrl) {
     try {
       const productImage = await fetchAsImage(product.imageUrl);
       referenceImages.push({
