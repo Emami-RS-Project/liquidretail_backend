@@ -128,9 +128,27 @@ function referenceImagesEnabled() {
 // imageMimeType defaults to image/jpeg for back-compat; pass the real
 // content-type when fetchAsImage gave you one (some Cloudinary transforms
 // emit image/png even though the .jpg extension says otherwise).
+// Veo 3.1's preview API only accepts 16:9 + 9:16. We map every other
+// canvas aspect to one of those at request time, and Stage 3 ffmpeg
+// crops the resulting video back to canvas dims (existing scale +
+// crop with force_original_aspect_ratio=increase behavior).
+//
+// Mapping rule:
+//   '9:16', '16:9' → exact (no crop loss)
+//   '1:1', '4:5'   → '9:16' (prefer portrait source; products are
+//                    typically framed vertically, so cropping
+//                    top/bottom is safer than cropping the sides
+//                    of a 16:9 source)
+//   anything else  → '9:16' (defensive default)
+function veoAspectForCanvas(canvasAspect) {
+  const a = String(canvasAspect || '');
+  if (a === '9:16' || a === '16:9') return a;
+  return '9:16';
+}
+
 async function submitVeoJob({ prompt, imageBase64, imageMimeType = 'image/jpeg', aspectRatio, referenceImages = [] }) {
-  const VEO_SUPPORTED = new Set(['16:9', '9:16', '1:1', '4:5']);
-  const veoAspect     = VEO_SUPPORTED.has(aspectRatio) ? aspectRatio : '16:9';
+  const VEO_SUPPORTED = new Set(['16:9', '9:16']);
+  const veoAspect     = VEO_SUPPORTED.has(aspectRatio) ? aspectRatio : '9:16';
 
   const instance = {
     prompt,
@@ -231,11 +249,17 @@ async function generateForAd({ ad }) {
   if (!media) throw new Error(`Media ${ad.mediaId} not found`);
 
   const aspectRatio = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
-  const track       = media.fileType === 'video' ? 1 : 2;
+  // Veo only accepts 9:16 + 16:9. For other canvases (1:1 / 4:5) we
+  // request Veo at the closest supported aspect and let Stage 3 ffmpeg
+  // crop the video to the canvas dims (existing scale + crop behavior).
+  // Seed image is cropped to the Veo aspect too — Veo expects the seed
+  // to match the requested output aspect.
+  const veoAspect = veoAspectForCanvas(aspectRatio);
+  const track     = media.fileType === 'video' ? 1 : 2;
 
   const refUrl = track === 1
-    ? deriveFirstFrameUrl(media.fileUrl, aspectRatio)
-    : deriveAspectCroppedImageUrl(media.fileUrl, aspectRatio);
+    ? deriveFirstFrameUrl(media.fileUrl, veoAspect)
+    : deriveAspectCroppedImageUrl(media.fileUrl, veoAspect);
 
   if (!refUrl) throw new Error(`Cannot derive reference image for ad ${ad._id} (fileType=${media.fileType})`);
 
@@ -274,8 +298,11 @@ async function generateForAd({ ad }) {
   });
 
   const t0 = Date.now();
+  const aspectLabel = aspectRatio === veoAspect
+    ? `aspect=${aspectRatio}`
+    : `aspect=${aspectRatio} (veo=${veoAspect}, will crop)`;
   console.log(
-    `🎬 veoReference[ad=${ad._id}]: track=${track} aspect=${aspectRatio} ` +
+    `🎬 veoReference[ad=${ad._id}]: track=${track} ${aspectLabel} ` +
     `media=${media._id} (${media.fileType})${seedHasText ? ` seedHasText=true (${media.text.length} regions)` : ''} submitting...`
   );
 
@@ -310,7 +337,7 @@ async function generateForAd({ ad }) {
     prompt,
     imageBase64:   seedImage.base64,
     imageMimeType: seedImage.mimeType,
-    aspectRatio,
+    aspectRatio:   veoAspect,        // map to a Veo-supported aspect; ffmpeg crops downstream
     referenceImages
   });
   console.log(`🎬 veoReference[ad=${ad._id}]: operation started — ${operationName}${referenceImages.length ? ` (refs=${referenceImages.length})` : ''}`);
