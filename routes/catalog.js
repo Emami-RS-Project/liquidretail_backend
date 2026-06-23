@@ -29,6 +29,7 @@ const CropArtifact          = require('../models/CropArtifact');
 const DetectionArtifact     = require('../models/DetectionArtifact');
 const Ad                    = require('../models/Ad');
 const Campaign              = require('../models/Campaign');
+const { loadPhotorealUrlMap, loadUseImageRefMap } = require('../services/adDisplayUrlService');
 const catalogProductPromoteService = require('../services/catalogProductPromoteService');
 const { tenantFilter, assertMediaInTenant } = require('../middleware/tenantHelpers');
 void assertMediaInTenant;     // kept for future :id verification helpers
@@ -473,10 +474,18 @@ router.get('/:id/ads-detail', async (req, res) => {
     };
 
     const ads = await Ad.find(filter)
-      .select('_id campaignId template aspectRatio kind status renderUrl posterUrl photorealUrl ctaText copy generatedAt metaSyncStatus platformFormat')
+      .select('_id campaignId template aspectRatio kind status renderUrl posterUrl ctaText copy generatedAt metaSyncStatus platformFormat aiCanvasArtifactId mediaId productId variantKind paletteSource sourceFileType')
       .sort({ generatedAt: -1 })
       .limit(60)
       .lean();
+
+    // Join the photoreal polish URL + the per-campaign
+    // useImageRefAsProduction flag — same shape /api/ads returns so the
+    // expansion thumbnails render identically to the flat ads list.
+    const [photorealMap, useImageRefMap] = await Promise.all([
+      loadPhotorealUrlMap(ads),
+      loadUseImageRefMap(ads)
+    ]);
 
     // Distinct campaigns referenced by this product's ads + per-campaign
     // ad count.
@@ -500,23 +509,30 @@ router.get('/:id/ads-detail', async (req, res) => {
       adCount:    campaignAdCounts.get(String(c._id)) || 0
     }));
 
-    // Shape ads for the expansion grid — keep the projection lean since
-    // the page is product-centric and per-ad detail still lives behind
-    // the existing /ads modal.
+    // Shape ads for the expansion grid. photorealUrl is the gpt-image-1
+    // polished version (joined via aiCanvasArtifactId → AiFullRenderArtifact);
+    // useImageRefAsProduction is the per-campaign flag that tells the
+    // frontend whether to display photorealUrl in place of renderUrl.
+    // Same projection shape /api/ads emits so the frontend thumbnail
+    // code can be shared.
     const adRows = ads.map(a => ({
-      adId:          String(a._id),
-      campaignId:    a.campaignId ? String(a.campaignId) : null,
-      template:      a.template,
-      aspectRatio:   a.aspectRatio,
+      adId:           String(a._id),
+      campaignId:     a.campaignId ? String(a.campaignId) : null,
+      template:       a.template,
+      aspectRatio:    a.aspectRatio,
       platformFormat: a.platformFormat || null,
-      kind:          a.kind || 'image',
-      status:        a.status,
-      renderUrl:     a.renderUrl || null,
-      photorealUrl:  a.photorealUrl || null,
-      posterUrl:     a.posterUrl || null,
-      headline:      a.copy?.headline || null,
-      ctaText:       a.ctaText || null,
-      generatedAt:   a.generatedAt ? new Date(a.generatedAt).toISOString() : null,
+      kind:           a.kind || 'image',
+      sourceFileType: a.sourceFileType || null,
+      status:         a.status,
+      renderUrl:      a.renderUrl || null,
+      photorealUrl:   photorealMap.get(String(a._id)) || null,
+      useImageRefAsProduction: a.campaignId
+        ? !!useImageRefMap.get(String(a.campaignId))
+        : false,
+      posterUrl:      a.posterUrl || null,
+      headline:       a.copy?.headline || null,
+      ctaText:        a.ctaText || null,
+      generatedAt:    a.generatedAt ? new Date(a.generatedAt).toISOString() : null,
       metaSyncStatus: a.metaSyncStatus || null
     }));
 
