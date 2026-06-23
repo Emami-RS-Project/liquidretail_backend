@@ -201,21 +201,27 @@ async function submitVeoJob({ prompt, imageBase64, imageMimeType = 'image/jpeg',
 }
 
 async function pollOperation(operationName) {
-  const deadline = Date.now() + MAX_POLL_MS;
+  const startedAt = Date.now();
+  const deadline  = startedAt + MAX_POLL_MS;
+  let pollCount = 0;
 
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL));
+    pollCount += 1;
 
     const res = await axios.get(
       `${API_BASE}/${operationName}?key=${apiKey()}`,
       { timeout: 30000 }
     );
     const op = res.data;
+    const elapsedSec  = Math.round((Date.now() - startedAt) / 1000);
     if (op.done) {
-      if (op.error) throw new Error(`Veo operation failed: ${JSON.stringify(op.error)}`);
+      if (op.error) throw new Error(`Veo operation failed after ${elapsedSec}s: ${JSON.stringify(op.error)}`);
+      console.log(`🎬 veoReference: ${operationName} done after ${elapsedSec}s (${pollCount} polls)`);
       return op.response;
     }
-    console.log(`🎬 veoReference: polling ${operationName} — not done yet`);
+    const remainingSec = Math.round((deadline - Date.now()) / 1000);
+    console.log(`🎬 veoReference: polling ${operationName} — not done yet (elapsed=${elapsedSec}s, remaining=${remainingSec}s, poll #${pollCount})`);
   }
   throw new Error(`Veo operation timed out after ${MAX_POLL_MS / 1000}s: ${operationName}`);
 }
