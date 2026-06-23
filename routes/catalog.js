@@ -474,7 +474,7 @@ router.get('/:id/ads-detail', async (req, res) => {
     };
 
     const ads = await Ad.find(filter)
-      .select('_id campaignId template aspectRatio kind status renderUrl posterUrl ctaText copy generatedAt metaSyncStatus platformFormat aiCanvasArtifactId mediaId productId variantKind paletteSource sourceFileType')
+      .select('_id campaignId template aspectRatio kind status approved approvedAt renderUrl posterUrl ctaText copy generatedAt metaSyncStatus metaAdId metaAdsetId platformFormat aiCanvasArtifactId mediaId productId variantKind paletteSource sourceFileType')
       .sort({ generatedAt: -1 })
       .limit(60)
       .lean();
@@ -524,6 +524,8 @@ router.get('/:id/ads-detail', async (req, res) => {
       kind:           a.kind || 'image',
       sourceFileType: a.sourceFileType || null,
       status:         a.status,
+      approved:       !!a.approved,
+      approvedAt:     a.approvedAt ? new Date(a.approvedAt).toISOString() : null,
       renderUrl:      a.renderUrl || null,
       photorealUrl:   photorealMap.get(String(a._id)) || null,
       useImageRefAsProduction: a.campaignId
@@ -533,7 +535,9 @@ router.get('/:id/ads-detail', async (req, res) => {
       headline:       a.copy?.headline || null,
       ctaText:        a.ctaText || null,
       generatedAt:    a.generatedAt ? new Date(a.generatedAt).toISOString() : null,
-      metaSyncStatus: a.metaSyncStatus || null
+      metaSyncStatus: a.metaSyncStatus || null,
+      metaAdId:       a.metaAdId || null,
+      metaAdsetId:    a.metaAdsetId || null
     }));
 
     res.json({ campaigns, ads: adRows });

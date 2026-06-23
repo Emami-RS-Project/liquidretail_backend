@@ -154,6 +154,15 @@ const adSchema = new mongoose.Schema({
     index:    true
   },
 
+  // Operator approval flag — orthogonal to `status` (which tracks the
+  // render lifecycle). Flipped via PATCH /api/ads/:id/approve on the
+  // Product Ads page. Drives the Draft / Approved / Exported grouping
+  // in the inline expansion (combined with metaSyncStatus for Exported).
+  // Indexed so the future "approved-only" / "export-ready" lists are fast.
+  approved:    { type: Boolean, default: false, index: true },
+  approvedAt:  { type: Date,    default: null },
+  approvedBy:  { type: String,  default: null },
+
   // sha256 over identity inputs (campaignId, productId, mediaId,
   // template, aspectRatio, variantKind, paletteSource, ctaText,
   // ctaUrl, ctaUrlParams, rafflePrizeMediaId). Computed at queue time;

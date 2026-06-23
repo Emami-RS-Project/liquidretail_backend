@@ -890,6 +890,34 @@ router.post('/push-to-meta', express.json(), async (req, res) => {
 
 // PATCH /api/ads/:id — flip status. Body: { status: 'draft' | 'live' | 'archived' }.
 // Caller passes ?brandId or X-Brand-Id so the lookup is tenant-scoped.
+// POST /api/ads/:id/approve — flip the operator-approval flag.
+// Body: { approved: boolean }. Orthogonal to status (which tracks the
+// render lifecycle); drives the Draft / Approved / Exported grouping
+// on the Product Ads page. Tenant-scoped via brandId.
+router.post('/:id/approve', express.json(), async (req, res) => {
+  try {
+    const brandId = req.query.brandId || req.headers['x-brand-id'];
+    if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    const approved = req.body?.approved !== false;   // default true
+    const set = {
+      approved,
+      approvedAt: approved ? new Date() : null,
+      approvedBy: approved ? (req.user?.userId || req.user?.email || null) : null,
+      updatedAt:  new Date()
+    };
+    const ad = await Ad.findOneAndUpdate(
+      { _id: req.params.id, brandId },
+      { $set: set },
+      { new: true }
+    ).lean();
+    if (!ad) return res.status(404).json({ error: 'ad not found' });
+    res.json({ ad: projectAd(ad, /* full */ true) });
+  } catch (err) {
+    console.error('ad approve failed:', err);
+    res.status(500).json({ error: err.message || 'ad approve failed' });
+  }
+});
+
 router.patch('/:id', express.json(), async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
