@@ -36,20 +36,36 @@ const {
 const MODEL_ID         = process.env.REELS_CHROME_MODEL_ID || 'gpt-4.1';
 const TEMPERATURE      = 0.85;
 const MAX_TOKENS       = 12000;
-const CHROME_VERSION   = '1.2.0';                          // bumped: video-frame-aware contrast + hard contrast requirements
+const CHROME_VERSION   = '1.3.0';                          // bumped: canvas-aspect frame samples (Veo→canvas crop preview)
 const FRAME_SAMPLE_COUNT = parseInt(process.env.REELS_CHROME_FRAME_SAMPLES || '8', 10);
 
+// Veo aspect ratios for the c_fill,ar_<X> Cloudinary transform. The
+// transform string uses ar_W:H (e.g. ar_1:1) — we keep the raw aspect
+// string and rewrite the colon when slugifying the transform.
+function arParamForAspect(aspectRatio) {
+  const a = String(aspectRatio || '').trim();
+  if (!a) return null;
+  // Cloudinary accepts ar_<w>:<h>; '1:1' / '4:5' / '9:16' / '16:9' all work
+  return `ar_${a}`;
+}
+
 // Derive evenly-spaced still-frame URLs from a Cloudinary video URL via the
-// so_<seconds> transform. Used to show GPT-4.1 what the Veo base video looks
-// like at each second, so it can pick text placement + scrim colors that work
-// against the actual underlying pixels (not best-effort guessing). Returns
-// [] for non-Cloudinary URLs (or null input).
-function deriveFrameUrls(videoUrl, count = FRAME_SAMPLE_COUNT) {
+// so_<seconds> transform. Each frame is cropped to the CANVAS aspect (1:1,
+// 4:5, 9:16, 16:9) via c_fill,g_auto so GPT sees what the chrome will
+// ACTUALLY overlay — Veo produces at 9:16 or 16:9 and Stage 3 ffmpeg
+// crops to canvas dims, so the raw Veo frame (which includes pixels that
+// will be cropped away) would mis-steer placement decisions.
+//
+// canvasAspect defaults to '9:16' so legacy callers (Reels-only) keep
+// their previous behavior. Returns [] for non-Cloudinary URLs.
+function deriveFrameUrls(videoUrl, count = FRAME_SAMPLE_COUNT, canvasAspect = '9:16') {
   if (!videoUrl?.includes('/video/upload/')) return [];
+  const ar = arParamForAspect(canvasAspect);
+  const cropPart = ar ? `c_fill,${ar},g_auto,` : '';
   const urls = [];
   for (let i = 0; i < count; i++) {
     const u = videoUrl
-      .replace('/video/upload/', `/video/upload/so_${i},f_jpg,w_400,q_auto:good/`)
+      .replace('/video/upload/', `/video/upload/so_${i},${cropPart}f_jpg,w_400,q_auto:good/`)
       .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2');
     urls.push(u);
   }
@@ -290,10 +306,14 @@ async function generateForAd({ ad }) {
 
   const prompt = buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText: ad.ctaText, platformFormat });
 
-  // Frame sampling — show GPT what the Veo base video actually looks like so
-  // it can place text/scrims against real pixels (not best-effort guessing).
-  // detail:'low' keeps each image at a flat 85 tokens regardless of size.
-  const frameUrls = deriveFrameUrls(ad.veoVideoUrl);
+  // Frame sampling — show GPT what the FINAL composited video will look
+  // like (Veo output cropped to the canvas aspect). For 1:1 / 4:5
+  // canvases, Veo produces a 9:16 video that Stage 3 ffmpeg center-crops
+  // to canvas dims — passing the raw 9:16 frames would mis-steer
+  // placement because GPT would plan against pixels that get cropped
+  // away. detail:'low' keeps each image at a flat 85 tokens regardless
+  // of size.
+  const frameUrls = deriveFrameUrls(ad.veoVideoUrl, FRAME_SAMPLE_COUNT, aspectRatio);
   const userContent = [
     { type: 'text', text: prompt },
     ...frameUrls.map(url => ({
