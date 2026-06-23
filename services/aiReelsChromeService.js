@@ -96,6 +96,16 @@ function enabledFor(platformFormat) {
 
 function enabled() { return enabledFor(null); }
 
+// Mirrors aiVideoReferenceService.referenceImagesEnabled() — chrome's
+// "no invented product imagery" guardrail flips off when a separate
+// product reference IS being attached (in which case the chrome can
+// reference the product without inventing it). Kept as a local copy
+// rather than imported so chrome's guardrail logic is self-contained.
+function referenceImagesEnabledForChrome() {
+  const v = String(process.env.VEO_USE_REFERENCE_IMAGES ?? 'false').toLowerCase();
+  return v === 'true' || v === '1';
+}
+
 (function logConfig() {
   console.log(
     `🎨 aiReelsChromeService config — ` +
@@ -128,7 +138,7 @@ async function loadContext(ad) {
 
 // ── Prompt builder ─────────────────────────────────────────────────────
 
-function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText, platformFormat }) {
+function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText, platformFormat, sourceText = [], hasProductReference = false }) {
   const li       = layoutInput || {};
   const copy     = li.copy     || {};
   const proof    = li.social_proof || {};
@@ -272,6 +282,51 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
   lines.push(`    • Quote glyph subtly behind / overlapping the quote text within the same panel (low-opacity, decorative).`);
   lines.push(`    • No glyph at all — quote text alone in a scrim panel, with attribution stacked beneath in the same panel.`);
   lines.push(``);
+
+  // ── Guardrail 1: don't overlay on existing text in the source media ──
+  // OCR data from the detect pipeline gives us bounding boxes of any
+  // burned-in text on the seed (captions, watermarks, product labels,
+  // creator handles). Stack the new chrome over those regions and the
+  // viewer sees a double-text mess. When OCR found text, list the
+  // bboxes (normalized 0-1 → pixel space) so GPT can route around them.
+  const visibleTextBoxes = (sourceText || []).filter(
+    t => t && Number.isFinite(t.x1) && Number.isFinite(t.y1)
+      && Number.isFinite(t.x2) && Number.isFinite(t.y2)
+  );
+  if (visibleTextBoxes.length > 0) {
+    lines.push(`AVOID OVERLAYING EXISTING TEXT (HARD CONSTRAINT)`);
+    lines.push(`  The base video has visible text burned into the frame (captions, watermarks, product labels, creator handle, etc.). Chrome placed on top of those regions creates a double-text mess that's unreadable. Route your chrome AROUND these regions, NOT over them.`);
+    lines.push(`  Pixel-space bounding boxes of existing text (normalized 0–1 coords scaled to the ${CANVAS.width}×${CANVAS.height} canvas):`);
+    for (const t of visibleTextBoxes.slice(0, 8)) {
+      const x = Math.round(t.x1 * CANVAS.width);
+      const y = Math.round(t.y1 * CANVAS.height);
+      const w = Math.round((t.x2 - t.x1) * CANVAS.width);
+      const h = Math.round((t.y2 - t.y1) * CANVAS.height);
+      const snippet = String(t.content || '').slice(0, 30).replace(/\s+/g, ' ');
+      lines.push(`    • x:${x} y:${y} w:${w} h:${h}${snippet ? ` ("${snippet}")` : ''}`);
+    }
+    lines.push(`  If a chrome zone must occupy a region that intersects one of these boxes, MOVE the chrome to a different part of the canvas (try the opposite half: if the existing text is top-left, place chrome bottom-right or center).`);
+    lines.push(``);
+  }
+
+  // ── Guardrail 2: don't invent product imagery when no reference exists ──
+  // Chrome is text + scrims only. When no separate product reference
+  // image is attached (e.g. catalog imageUrl missing, video-only run),
+  // GPT shouldn't sketch CSS/SVG/HTML that LOOKS like the product —
+  // it has nothing real to base it on and will invent silhouettes,
+  // colors, or label text that don't match the actual SKU. The base
+  // video is the only product representation; chrome supplements with
+  // text/CTAs/scrims, not invented product graphics.
+  if (!hasProductReference) {
+    lines.push(`NO INVENTED PRODUCT IMAGERY (HARD CONSTRAINT)`);
+    lines.push(`  No separate product reference image is attached for this run — the base video is the ONLY product representation available. Your chrome must NOT depict the product in any form:`);
+    lines.push(`    • No CSS shapes / divs / SVG icons that imitate the product silhouette, packaging, or label.`);
+    lines.push(`    • No decorative product illustrations, stylized bottle/jar/garment renderings, or product callout graphics.`);
+    lines.push(`    • No "alternate angle" mini-thumbnails of the product (you don't have data for that — you'd be inventing).`);
+    lines.push(`  Acceptable chrome content: typography (headlines, eyebrows, subheadlines, CTAs, quote text, attribution, ratings), scrims/panels for contrast, brand-color accent bars/borders, abstract decorative shapes that DON'T resemble the product, social-proof badges with text only.`);
+    lines.push(``);
+  }
+
   lines.push(`ANIMATION REQUIREMENTS`);
   lines.push(`  All animations MUST complete within 5 seconds (match Veo video duration).`);
   lines.push(`  Use CSS @keyframes — no JavaScript.`);
@@ -304,7 +359,21 @@ async function generateForAd({ ad }) {
   const { media, brand, product, layoutInput, concept } = await loadContext(ad);
   const aspectRatio = aspectRatioForPlatformFormat(platformFormat) || '9:16';
 
-  const prompt = buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText: ad.ctaText, platformFormat });
+  // Guardrail inputs:
+  //  - sourceText: OCR boxes from the detect pipeline on the seed media.
+  //    Drives the "avoid overlaying existing text" prompt block.
+  //  - hasProductReference: catalog product image will be attached as a
+  //    separate ref to Veo (kept off by default since Veo 3.1 rejects
+  //    the combo). When false, chrome must not invent product graphics —
+  //    no CSS shapes / SVG / divs mimicking the product silhouette.
+  const sourceText = Array.isArray(media?.text) ? media.text : [];
+  const hasProductReference = referenceImagesEnabledForChrome() && !!product?.imageUrl;
+
+  const prompt = buildPrompt({
+    brand, product, layoutInput, concept,
+    aspectRatio, ad_ctaText: ad.ctaText, platformFormat,
+    sourceText, hasProductReference
+  });
 
   // Frame sampling — show GPT what the FINAL composited video will look
   // like (Veo output cropped to the canvas aspect). For 1:1 / 4:5

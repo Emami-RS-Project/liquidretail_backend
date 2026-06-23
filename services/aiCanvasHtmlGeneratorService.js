@@ -144,8 +144,13 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   const { canvasForPlatformFormat } = require('./platformFormats');
   const dims = canvasForPlatformFormat(canvas.platformFormat) || canvasDims(canvas.aspectRatio);
   const Media = require('../models/Media');
-  const sourceMedia = await Media.findById(canvas.mediaId).select('fileType').lean();
+  // text[] = OCR boxes from the detect pipeline. Drives the AVOID
+  // OVERLAYING EXISTING TEXT guardrail in buildPrompt — chrome placed
+  // on top of burned-in captions / watermarks / labels creates an
+  // unreadable double-text mess.
+  const sourceMedia = await Media.findById(canvas.mediaId).select('fileType text').lean();
   const isVideoSource = sourceMedia?.fileType === 'video';
+  const sourceText    = Array.isArray(sourceMedia?.text) ? sourceMedia.text : [];
   // When the JSON Gen is retired (AI_LAYOUT_DIRECT_HTML=true) the canvas
   // arrives here with canvasSpec=null and there are no zones[] to mine
   // for a media-slot rect. Fall back to the full canvas as the implied
@@ -195,10 +200,11 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   const { system, user, images } = isV2Concept
     ? buildPromptV2({
         canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat,
-        mediaUrlMap
+        mediaUrlMap, sourceText
       })
     : buildPrompt({
-        canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat
+        canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat,
+        sourceText
       });
 
   const nCandidates = N_CANDIDATES_DEFAULT;
@@ -387,6 +393,33 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
 // Pixel boxes use the normalized canvas dims (1000×1778 for 9:16
 // instead of the actual 1080×1920) so the LLM thinks in the same
 // coordinate space the rest of the prompt uses.
+// AVOID OVERLAYING EXISTING TEXT — if the detect pipeline's OCR found
+// burned-in text on the source media (captions, watermarks, product
+// labels, creator handles), warn the LLM with pixel-space bboxes so it
+// can route chrome around those regions. Returns '' when no OCR text
+// is available (empty block stays out of the prompt entirely).
+function buildAvoidExistingTextBlock(sourceText, dims) {
+  const boxes = (sourceText || []).filter(
+    t => t && Number.isFinite(t.x1) && Number.isFinite(t.y1)
+      && Number.isFinite(t.x2) && Number.isFinite(t.y2)
+  );
+  if (!boxes.length) return '';
+  const lines = [];
+  lines.push(`AVOID OVERLAYING EXISTING TEXT (HARD CONSTRAINT)`);
+  lines.push(`  The source media has visible text burned into the photo (captions, watermarks, product labels, etc.). Chrome layered on top of those regions creates a double-text mess that's unreadable. Route your layout AROUND these regions, NOT over them.`);
+  lines.push(`  Pixel-space bounding boxes of existing text on the ${dims.width}×${dims.height} canvas:`);
+  for (const t of boxes.slice(0, 8)) {
+    const x = Math.round((t.x1 || 0) * dims.width);
+    const y = Math.round((t.y1 || 0) * dims.height);
+    const w = Math.round(((t.x2 || 0) - (t.x1 || 0)) * dims.width);
+    const h = Math.round(((t.y2 || 0) - (t.y1 || 0)) * dims.height);
+    const snippet = String(t.content || '').slice(0, 30).replace(/\s+/g, ' ');
+    lines.push(`    • x:${x} y:${y} w:${w} h:${h}${snippet ? ` ("${snippet}")` : ''}`);
+  }
+  lines.push(`  If a chrome zone you'd place lands on one of these boxes, MOVE it to the opposite half of the canvas (or a different quadrant) so the existing text stays visible and your text doesn't compete with it.`);
+  return lines.join('\n');
+}
+
 function buildFormatConstraintsBlock(platformFormat, dims) {
   const { getFormatCaps, creativeBriefForPlatformFormat } = require('./platformFormats');
   const caps = getFormatCaps(platformFormat) || getFormatCaps('meta_feed_1_1');
@@ -444,11 +477,12 @@ function buildFormatConstraintsBlock(platformFormat, dims) {
 //   • Output shape block instructs single/collage/grid composition
 //   • Same hard rules (size, no scripts, no Lorem, allowed hosts, etc.)
 //     and same FORMAT CONSTRAINTS for safe-area enforcement.
-function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', mediaUrlMap = null }) {
+function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', mediaUrlMap = null, sourceText = [] }) {
   const ctx    = richContext?.text || null;
   const images = richContext?.images || [];
   const aspectRatio   = canvas.aspectRatio;
   const formatConstraints = buildFormatConstraintsBlock(platformFormat, dims);
+  const avoidTextBlock    = buildAvoidExistingTextBlock(sourceText, dims);
 
   // Resolve concept.media_picks → URLs. Skip picks whose mediaId
   // didn't resolve (defensive — should not happen since the Director
@@ -512,6 +546,7 @@ function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = 
     ``,
     formatConstraints,
     ``,
+    ...(avoidTextBlock ? [avoidTextBlock, ``] : []),
     `HARD RULES:`,
     `- Output a complete <html>...</html> document. <head> with <meta charset>, <title>, single inline <style>. <body> with the ad's visible content.`,
     `- <body> MUST be sized exactly ${dims.width}px × ${dims.height}px via inline style="width:${dims.width}px;height:${dims.height}px;margin:0;overflow:hidden". No scrollbars, no overflow.`,
@@ -605,12 +640,13 @@ function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = 
   return { system, user, images };
 }
 
-function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1' }) {
+function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', sourceText = [] }) {
   const ctx    = richContext?.text || null;
   const images = richContext?.images || [];
   const creativeStyle = canvas.creativeStyle;
   const aspectRatio   = canvas.aspectRatio;
   const formatConstraints = buildFormatConstraintsBlock(platformFormat, dims);
+  const avoidTextBlock    = buildAvoidExistingTextBlock(sourceText, dims);
 
   const system = [
     `You are a senior creative director + frontend developer producing a single complete HTML+CSS social-media ad creative.`,
@@ -619,6 +655,7 @@ function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = fa
     ``,
     formatConstraints,
     ``,
+    ...(avoidTextBlock ? [avoidTextBlock, ``] : []),
     `HARD RULES:`,
     `- Output a complete <html>...</html> document. <head> with <meta charset>, <title>, single inline <style>. <body> with the ad's visible content.`,
     `- <body> MUST be sized exactly ${dims.width}px × ${dims.height}px via inline style="width:${dims.width}px;height:${dims.height}px;margin:0;overflow:hidden". No scrollbars, no overflow.`,
