@@ -103,10 +103,10 @@ function buildSubjectFramingInstruction(subject) {
   if (!subject) return null;
   const { label, hPos } = subject;
   const posText = hPos ? ` on the ${hPos} side of the frame` : '';
-  return `Keep the ${label}${posText} clearly visible and well-lit for the full 5 seconds.`;
+  return `Keep the ${label}${posText} clearly visible and well-lit for the full 8 seconds.`;
 }
 
-// Generates the 0:01–0:03 motion beat. Person subjects get a natural
+// Generates the 0:02–0:05 motion beat. Person subjects get a natural
 // micro-action; product-only scenes get physics-based sway.
 function buildMotionBeat(subject) {
   const combined = `${subject?.label || ''} ${subject?.richDesc || ''}`.toLowerCase();
@@ -115,14 +115,14 @@ function buildMotionBeat(subject) {
 
   if (isPerson) {
     return (
-      `0:01–0:03: Gentle organic motion. The product elements sway slightly with realistic wind physics. ` +
+      `0:02–0:05: Gentle organic motion. The product elements sway slightly with realistic wind physics. ` +
       `The ${subject.label} makes extremely subtle hand or body micro-movements — ` +
       `as if naturally shifting or making a small adjustment — remaining calm and anchored in the composition.`
     );
   }
 
   return (
-    `0:01–0:03: Subtle organic motion — gentle natural sway and surface contact with realistic physics, ` +
+    `0:02–0:05: Subtle organic motion — gentle natural sway and surface contact with realistic physics, ` +
     `slight simulated handheld Y/X axis micro-drift.`
   );
 }
@@ -178,7 +178,7 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     );
   }
 
-  lines.push(`5-second premium cinematic product commercial. Animate the scene in the reference image.`);
+  lines.push(`8-second premium cinematic product commercial. Animate the scene in the reference image.`);
 
   const sceneDesc = buildSceneDescription({ layoutInput, sourceMedia });
   const lighting  = buildLightingDescription({ layoutInput, sourceMedia });
@@ -218,7 +218,7 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     const beatLines = storyboard.beats
       .map(b => `${b.time}: ${b.description}`)
       .join(' ');
-    lines.push(`5-second storyboard: ${beatLines}`);
+    lines.push(`8-second storyboard: ${beatLines}`);
     lines.push(
       `Camera: ${storyboard.camera}. ` +
       `High-end lifestyle commercial color grading, photorealistic, 8K resolution.`
@@ -228,11 +228,11 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
   } else {
     const motionBeat = buildMotionBeat(subject);
     lines.push(
-      `5-second storyboard: ` +
-      `0:00–0:01: Establish the scene exactly as composed in the reference image — soft diffused cinematic lighting, ` +
+      `8-second storyboard: ` +
+      `0:00–0:02: Establish the scene exactly as composed in the reference image — soft diffused cinematic lighting, ` +
       `natural shallow depth of field, pristine clean background. ` +
       motionBeat + ` ` +
-      `0:03–0:05: The camera executes a slow, elegant z-axis forward push-in with micro-handheld Y/X axis drift ` +
+      `0:05–0:08: The camera executes a slow, elegant z-axis forward push-in with micro-handheld Y/X axis drift ` +
       `and organic jitter, settling into a clean hold with razor-sharp focus on the primary subject.`
     );
     lines.push(
@@ -294,7 +294,7 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
   } else {
     lines.push(
       `PRODUCT FIDELITY: The product in the reference image is the actual catalog product. ` +
-      `Preserve its exact shape, color, label text, packaging, and proportions throughout the entire 5 seconds. ` +
+      `Preserve its exact shape, color, label text, packaging, and proportions throughout the entire 8 seconds. ` +
       `Do NOT reinterpret the label, do NOT shift colors, do NOT generate a similar-but-different product variant. ` +
       `The product is the source of truth.`
     );
