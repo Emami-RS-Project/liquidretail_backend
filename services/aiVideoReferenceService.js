@@ -66,6 +66,7 @@ function deriveFirstFrameUrl(videoUrl, aspectRatio) {
   if (!videoUrl?.includes('/video/upload/')) return null;
   const arParam =
     aspectRatio === '9:16'   ? 'ar_9:16'    :
+    aspectRatio === '16:9'   ? 'ar_16:9'    :
     aspectRatio === '4:5'    ? 'ar_4:5'     :
     aspectRatio === '1.91:1' ? 'ar_191:100' :
                                'ar_1:1';
@@ -79,6 +80,7 @@ function deriveAspectCroppedImageUrl(imageUrl, aspectRatio) {
   if (!imageUrl?.includes('/image/upload/')) return imageUrl;
   const arParam =
     aspectRatio === '9:16' ? 'ar_9:16' :
+    aspectRatio === '16:9' ? 'ar_16:9' :
     aspectRatio === '4:5'  ? 'ar_4:5'  :
                              'ar_1:1';
   return imageUrl.replace('/image/upload/', `/image/upload/c_fill,${arParam},w_1024,q_auto:good/`);
