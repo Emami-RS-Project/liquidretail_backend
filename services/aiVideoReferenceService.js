@@ -247,7 +247,7 @@ async function extractVideoBuffer(response) {
 
 // ── Public API ─────────────────────────────────────────────────────────
 
-async function generateForAd({ ad }) {
+async function generateForAd({ ad, operatorPrompt = null }) {
   if (!enabled())  return { skipped: true, reason: 'AI_VEO_REELS not enabled' };
   if (!apiKey())   return { skipped: true, reason: 'GEMINI_API_KEY not set' };
 
@@ -300,7 +300,8 @@ async function generateForAd({ ad }) {
     sourceMedia:  layoutInput?.input?.source_media || null,
     aspectRatio,
     seedHasText,
-    hasProductReference: willSendRefs
+    hasProductReference: willSendRefs,
+    operatorPrompt
   });
 
   const t0 = Date.now();

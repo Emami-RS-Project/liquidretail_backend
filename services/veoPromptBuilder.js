@@ -158,9 +158,19 @@ function buildOverlayIntent({ concept, hasHeadline, hasCta }) {
 // Main export. layoutInput is LayoutInputArtifact.input (preferred source for
 // scene data). sourceMedia is layoutInput.input.source_media from the detect
 // pipeline (richer bbox data when available). Both are optional.
-function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false, hasProductReference = false }) {
+function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false, hasProductReference = false, operatorPrompt = null }) {
   const lines   = [];
   const subject = resolveSubject({ layoutInput, sourceMedia, media });
+
+  // Operator refinement (regeneration only). Leads the prompt so Veo
+  // sees the requested change before the rest of the storyboard.
+  if (operatorPrompt && String(operatorPrompt).trim()) {
+    lines.push(
+      `OPERATOR REFINEMENT (HIGHEST PRIORITY — overrides conflicting guidance below): ` +
+      `${String(operatorPrompt).trim()}. ` +
+      `Apply this refinement to the generated video. The scene, brand voice, and product fidelity guidance still apply, but where the operator's instruction conflicts with stylistic defaults the operator wins.`
+    );
+  }
 
   lines.push(`5-second premium cinematic product commercial. Animate the scene in the reference image.`);
 

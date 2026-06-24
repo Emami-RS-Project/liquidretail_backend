@@ -138,7 +138,7 @@ async function loadContext(ad) {
 
 // ── Prompt builder ─────────────────────────────────────────────────────
 
-function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText, platformFormat, sourceText = [], hasProductReference = false }) {
+function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText, platformFormat, sourceText = [], hasProductReference = false, operatorPrompt = null }) {
   const li       = layoutInput || {};
   const copy     = li.copy     || {};
   const proof    = li.social_proof || {};
@@ -177,6 +177,19 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
 
   lines.push(`You are a world-class social video creative director specializing in video ads.`);
   lines.push(``);
+
+  // Operator refinement — when present, this is a REGENERATION run
+  // (not a fresh generation). The operator has already seen a prior
+  // chrome output and is asking for a specific change. Their text
+  // takes precedence over anything below that conflicts.
+  if (operatorPrompt && String(operatorPrompt).trim()) {
+    lines.push(`OPERATOR REFINEMENT (HIGHEST PRIORITY — overrides any conflicting guidance below):`);
+    lines.push(`  ${String(operatorPrompt).trim()}`);
+    lines.push(``);
+    lines.push(`Apply that refinement to your output. The Director concept, brand, copy, and surface still set the foundation — but where the operator's instruction conflicts with a stylistic default, the operator wins.`);
+    lines.push(``);
+  }
+
   lines.push(`Generate a self-contained HTML document for the TEXT CHROME OVERLAY of a ${aspectRatio} ${surfaceLabel} video ad.`);
   lines.push(`The HTML will be screenshot with a transparent background and composited over a Veo-generated base video.`);
   lines.push(`Your HTML is the CHROME ONLY — no background fills, no product images, no video embeds.`);
@@ -351,7 +364,7 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
 
 // ── Public API ─────────────────────────────────────────────────────────
 
-async function generateForAd({ ad }) {
+async function generateForAd({ ad, operatorPrompt = null }) {
   const platformFormat = ad.platformFormat || 'meta_reels_9_16';
   if (!enabledFor(platformFormat))  return { skipped: true, reason: `Veo flag off for ${platformFormat}` };
   if (!process.env.OPENAI_API_KEY)  return { skipped: true, reason: 'OPENAI_API_KEY not set' };
@@ -372,7 +385,8 @@ async function generateForAd({ ad }) {
   const prompt = buildPrompt({
     brand, product, layoutInput, concept,
     aspectRatio, ad_ctaText: ad.ctaText, platformFormat,
-    sourceText, hasProductReference
+    sourceText, hasProductReference,
+    operatorPrompt
   });
 
   // Frame sampling — show GPT what the FINAL composited video will look

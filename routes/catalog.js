@@ -474,7 +474,7 @@ router.get('/:id/ads-detail', async (req, res) => {
     };
 
     const ads = await Ad.find(filter)
-      .select('_id campaignId template aspectRatio kind status approved approvedAt renderUrl posterUrl ctaText copy generatedAt metaSyncStatus metaAdId metaAdsetId platformFormat aiCanvasArtifactId mediaId productId variantKind paletteSource sourceFileType')
+      .select('_id campaignId template aspectRatio kind status approved approvedAt renderUrl posterUrl ctaText copy generatedAt metaSyncStatus metaAdId metaAdsetId platformFormat aiCanvasArtifactId mediaId productId variantKind paletteSource sourceFileType regenerating regenerationStage regenerationHistory')
       .sort({ generatedAt: -1 })
       .limit(60)
       .lean();
@@ -537,7 +537,20 @@ router.get('/:id/ads-detail', async (req, res) => {
       generatedAt:    a.generatedAt ? new Date(a.generatedAt).toISOString() : null,
       metaSyncStatus: a.metaSyncStatus || null,
       metaAdId:       a.metaAdId || null,
-      metaAdsetId:    a.metaAdsetId || null
+      metaAdsetId:    a.metaAdsetId || null,
+      regenerating:   !!a.regenerating,
+      regenerationStage: a.regenerationStage || null,
+      regenerationHistory: Array.isArray(a.regenerationHistory)
+        ? a.regenerationHistory.map(h => ({
+            prompt:      h.prompt,
+            mode:        h.mode,
+            requestedBy: h.requestedBy || null,
+            at:          h.at ? new Date(h.at).toISOString() : null,
+            status:      h.status,
+            error:       h.error || null,
+            durationMs:  h.durationMs || null
+          }))
+        : []
     }));
 
     res.json({ campaigns, ads: adRows });

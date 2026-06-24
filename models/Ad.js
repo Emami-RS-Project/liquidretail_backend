@@ -163,6 +163,39 @@ const adSchema = new mongoose.Schema({
   approvedAt:  { type: Date,    default: null },
   approvedBy:  { type: String,  default: null },
 
+  // ── Regenerate-with-prompt (Phase 2.5) ───────────────────────────
+  // regenerating: true while a regen worker is running on this ad.
+  //               The endpoint refuses to start a second regen until
+  //               this clears. UI polls /api/catalog/:id/ads-detail
+  //               every 5s watching this flag.
+  // regenerationStage: where the worker is in the pipeline. UI shows
+  //               a friendly label per stage. null when not running.
+  //                 'pending'    — worker scheduled, not started yet
+  //                 'veo'        — Veo image-to-video in flight
+  //                 'chrome'     — GPT chrome HTML being generated
+  //                 'composite'  — Puppeteer frame capture + ffmpeg
+  //                 'image-gen'  — Image-ad HTML Gen + Puppeteer screenshot
+  //                 'image-ref'  — gpt-image-1 photoreal polish (shadow)
+  //                 'done'       — completed; cleared to null shortly after
+  //                 'failed'     — see regenerationHistory[-1].error
+  // regenerationHistory: capped at 5 entries; oldest dropped on push.
+  //               Operator can re-enter a prior prompt from the modal.
+  regenerating:      { type: Boolean, default: false, index: true },
+  regenerationStage: { type: String,  default: null },
+  regenerationHistory: {
+    type: [{
+      _id:         false,
+      prompt:      String,
+      mode:        { type: String, enum: ['light', 'full'] },  // light = chrome-only re-comp; full = re-run pipeline
+      requestedBy: String,
+      at:          Date,
+      status:      { type: String, enum: ['pending', 'done', 'failed'] },
+      error:       String,
+      durationMs:  Number
+    }],
+    default: []
+  },
+
   // sha256 over identity inputs (campaignId, productId, mediaId,
   // template, aspectRatio, variantKind, paletteSource, ctaText,
   // ctaUrl, ctaUrlParams, rafflePrizeMediaId). Computed at queue time;

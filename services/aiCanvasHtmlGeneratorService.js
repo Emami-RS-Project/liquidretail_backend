@@ -42,7 +42,7 @@ function enabled() {
 // the JSON spec generation completes. Idempotent on (aiCanvasArtifactId,
 // htmlSchemaVersion) — if the artifact already has outputHtml at the
 // current schema version, skip.
-async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
+async function generateForArtifact({ aiCanvasArtifactId, refresh = false, operatorPrompt = null }) {
   if (!enabled() && !refresh) {
     return { skipped: true, reason: 'AI_HTML_LAYOUT_ENABLED=false' };
   }
@@ -200,11 +200,11 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   const { system, user, images } = isV2Concept
     ? buildPromptV2({
         canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat,
-        mediaUrlMap, sourceText
+        mediaUrlMap, sourceText, operatorPrompt
       })
     : buildPrompt({
         canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat,
-        sourceText
+        sourceText, operatorPrompt
       });
 
   const nCandidates = N_CANDIDATES_DEFAULT;
@@ -477,7 +477,7 @@ function buildFormatConstraintsBlock(platformFormat, dims) {
 //   • Output shape block instructs single/collage/grid composition
 //   • Same hard rules (size, no scripts, no Lorem, allowed hosts, etc.)
 //     and same FORMAT CONSTRAINTS for safe-area enforcement.
-function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', mediaUrlMap = null, sourceText = [] }) {
+function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', mediaUrlMap = null, sourceText = [], operatorPrompt = null }) {
   const ctx    = richContext?.text || null;
   const images = richContext?.images || [];
   const aspectRatio   = canvas.aspectRatio;
@@ -585,6 +585,17 @@ function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = 
   // body + media slot, no <img> using the source video's frames, no
   // clip-path-on-text-children, no backdrop-filter.
   const userLines = [];
+
+  // Regeneration entry point — operator's refinement leads the user
+  // prompt so GPT sees the requested change before the rest of the
+  // copy/media context. Empty / null prompt → block omitted entirely.
+  if (operatorPrompt && String(operatorPrompt).trim()) {
+    userLines.push(`OPERATOR REFINEMENT (HIGHEST PRIORITY — overrides any conflicting stylistic default below):`);
+    userLines.push(`  ${String(operatorPrompt).trim()}`);
+    userLines.push(`Apply that refinement to your output. Concept, brand, copy, media URLs, and the hard rules above still bind — but where the operator's instruction conflicts with a stylistic default, the operator wins.`);
+    userLines.push(``);
+  }
+
   if (videoMode && mediaRect) {
     userLines.push(`VIDEO-OVERLAY MODE — source media is a video. Your HTML will be screenshot with omitBackground:true; transparent regions of the PNG become "video shows through" areas in the final composite.`);
     userLines.push(`HARD REQUIREMENTS:`);
@@ -640,7 +651,7 @@ function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = 
   return { system, user, images };
 }
 
-function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', sourceText = [] }) {
+function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', sourceText = [], operatorPrompt = null }) {
   const ctx    = richContext?.text || null;
   const images = richContext?.images || [];
   const creativeStyle = canvas.creativeStyle;
@@ -708,6 +719,16 @@ function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = fa
   ].join('\n');
 
   const userLines = [];
+
+  // Regeneration entry point — operator's refinement leads so GPT sees
+  // the requested change before the Director concept block.
+  if (operatorPrompt && String(operatorPrompt).trim()) {
+    userLines.push(`OPERATOR REFINEMENT (HIGHEST PRIORITY — overrides any conflicting stylistic default below):`);
+    userLines.push(`  ${String(operatorPrompt).trim()}`);
+    userLines.push(`Apply that refinement to your output. Concept, copy, media URLs, and the hard rules still bind — but where the operator's instruction conflicts with a stylistic default, the operator wins.`);
+    userLines.push(``);
+  }
+
   userLines.push(`── CREATIVE DIRECTION (from the Director — MATERIALIZE THIS CONCEPT) ──`);
   userLines.push('```json');
   userLines.push(JSON.stringify({

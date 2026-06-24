@@ -918,6 +918,50 @@ router.post('/:id/approve', express.json(), async (req, res) => {
   }
 });
 
+// POST /api/ads/:id/regenerate — re-run the render pipeline for this
+// ad with an operator refinement prompt. Body: { prompt, mode? }.
+//   prompt: required, up to ~1000 chars
+//   mode:   'light' (default, video only — re-runs chrome + composite,
+//                    Veo unchanged) | 'full' (re-runs Veo too).
+//           Image ads always do full HTML Gen re-render; mode ignored.
+// Returns 202 with a poll target. Frontend polls
+// /api/catalog/:productId/ads-detail watching ad.regenerating.
+router.post('/:id/regenerate', express.json(), async (req, res) => {
+  try {
+    const brandId = req.query.brandId || req.headers['x-brand-id'];
+    if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    const prompt = String(req.body?.prompt || '').trim();
+    if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+    if (prompt.length > 1000) return res.status(400).json({ error: 'prompt is too long (max 1000 chars)' });
+    const mode = req.body?.mode === 'full' ? 'full' : 'light';
+
+    const regen = require('../services/adRegenerateService');
+    let ad;
+    try {
+      ad = await regen.preflight(req.params.id, brandId);
+    } catch (err) {
+      return res.status(err.status || 400).json({ error: err.message });
+    }
+    const requestedBy = req.user?.userId || req.user?.email || null;
+
+    // 202 — operator polls /api/catalog/:productId/ads-detail for stage.
+    res.status(202).json({
+      adId:               String(ad._id),
+      regenerating:       true,
+      regenerationStage:  'pending',
+      mode:               ad.kind === 'image' ? 'full' : mode
+    });
+
+    setImmediate(() => {
+      regen.regenerateAd({ ad, prompt, mode, requestedBy })
+        .catch(err => console.error(`❌ regenerate setImmediate crash: ${err.message}`));
+    });
+  } catch (err) {
+    console.error('regenerate request failed:', err);
+    res.status(500).json({ error: err.message || 'regenerate failed' });
+  }
+});
+
 router.patch('/:id', express.json(), async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
@@ -1068,7 +1112,24 @@ function projectAd(ad, full = false, extras = {}) {
     metaAdAccountId:    ad.metaAdAccountId  || null,
     metaSyncStatus:     ad.metaSyncStatus   || null,
     metaSyncError:      ad.metaSyncError    || null,
-    metaSyncedAt:       ad.metaSyncedAt     || null
+    metaSyncedAt:       ad.metaSyncedAt     || null,
+    // Product Ads page state (Phase 2): operator approval + regenerate-
+    // with-prompt. Polled by AdDetailModal while a regen is in flight.
+    approved:           !!ad.approved,
+    approvedAt:         ad.approvedAt || null,
+    regenerating:       !!ad.regenerating,
+    regenerationStage:  ad.regenerationStage || null,
+    regenerationHistory: Array.isArray(ad.regenerationHistory)
+      ? ad.regenerationHistory.map(h => ({
+          prompt:      h.prompt,
+          mode:        h.mode,
+          requestedBy: h.requestedBy || null,
+          at:          h.at ? new Date(h.at).toISOString() : null,
+          status:      h.status,
+          error:       h.error || null,
+          durationMs:  h.durationMs || null
+        }))
+      : []
   };
   if (full) {
     base.layoutInputArtifactId = ad.layoutInputArtifactId ? String(ad.layoutInputArtifactId) : null;
