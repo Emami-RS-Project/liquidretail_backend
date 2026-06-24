@@ -144,13 +144,18 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false, operat
   const { canvasForPlatformFormat } = require('./platformFormats');
   const dims = canvasForPlatformFormat(canvas.platformFormat) || canvasDims(canvas.aspectRatio);
   const Media = require('../models/Media');
-  // text[] = OCR boxes from the detect pipeline. Drives the AVOID
-  // OVERLAYING EXISTING TEXT guardrail in buildPrompt — chrome placed
-  // on top of burned-in captions / watermarks / labels creates an
-  // unreadable double-text mess.
-  const sourceMedia = await Media.findById(canvas.mediaId).select('fileType text').lean();
+  // Detect-pipeline outputs the prompts use as hard guardrails:
+  //   text[]             OCR boxes → AVOID OVERLAYING EXISTING TEXT block
+  //   subjects[]         subject bboxes → AVOID OVERLAYING THE SUBJECT block
+  //   primarySubjectDesc human-readable label of the dominant subject
+  // Chrome placed on top of either set creates legibility problems
+  // (double-text) or hides the product (subject occlusion).
+  const sourceMedia = await Media.findById(canvas.mediaId)
+    .select('fileType text subjects primarySubjectDesc').lean();
   const isVideoSource = sourceMedia?.fileType === 'video';
   const sourceText    = Array.isArray(sourceMedia?.text) ? sourceMedia.text : [];
+  const sourceSubjects = Array.isArray(sourceMedia?.subjects) ? sourceMedia.subjects : [];
+  const sourcePrimarySubjectDesc = sourceMedia?.primarySubjectDesc || null;
   // When the JSON Gen is retired (AI_LAYOUT_DIRECT_HTML=true) the canvas
   // arrives here with canvasSpec=null and there are no zones[] to mine
   // for a media-slot rect. Fall back to the full canvas as the implied
@@ -200,11 +205,11 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false, operat
   const { system, user, images } = isV2Concept
     ? buildPromptV2({
         canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat,
-        mediaUrlMap, sourceText, operatorPrompt
+        mediaUrlMap, sourceText, sourceSubjects, sourcePrimarySubjectDesc, operatorPrompt
       })
     : buildPrompt({
         canvas, concept, input, richContext, dims, videoMode, mediaRect, platformFormat,
-        sourceText, operatorPrompt
+        sourceText, sourceSubjects, sourcePrimarySubjectDesc, operatorPrompt
       });
 
   const nCandidates = N_CANDIDATES_DEFAULT;
@@ -420,6 +425,65 @@ function buildAvoidExistingTextBlock(sourceText, dims) {
   return lines.join('\n');
 }
 
+// AVOID OVERLAYING THE SUBJECT — chrome placed on top of the detected
+// subject(s) hides the product / hero subject of the ad. Lists pixel-
+// space bboxes for primary + secondary subjects and proposes safe
+// zones based on where the primary sits. Returns '' when no subjects
+// were detected (the block stays out of the prompt entirely).
+function buildAvoidSubjectBlock(subjects, primarySubjectDesc, dims) {
+  const boxes = (subjects || []).filter(
+    s => s && (s.role === 'primary' || s.role === 'secondary')
+      && Number.isFinite(s.x1) && Number.isFinite(s.y1)
+      && Number.isFinite(s.x2) && Number.isFinite(s.y2)
+  );
+  if (!boxes.length) return '';
+  const primaries = boxes.filter(s => s.role === 'primary');
+  const secondaries = boxes.filter(s => s.role === 'secondary');
+  const lines = [];
+  lines.push(`AVOID OVERLAYING THE SUBJECT (HARD CONSTRAINT)`);
+  lines.push(`  The detect pipeline identified the visual subject(s) of the source media. Chrome placed on top of these regions OBSCURES THE PRODUCT — defeating the purpose of the ad. Route every chrome zone AROUND the subject, never on top of it.`);
+  if (primarySubjectDesc) {
+    lines.push(`  Primary subject: "${String(primarySubjectDesc).slice(0, 120)}"`);
+  }
+  lines.push(`  Pixel-space bounding boxes on the ${dims.width}×${dims.height} canvas:`);
+  for (const s of primaries.slice(0, 3)) {
+    const x = Math.round((s.x1 || 0) * dims.width);
+    const y = Math.round((s.y1 || 0) * dims.height);
+    const w = Math.round(((s.x2 || 0) - (s.x1 || 0)) * dims.width);
+    const h = Math.round(((s.y2 || 0) - (s.y1 || 0)) * dims.height);
+    const desc = String(s.description || s.id || 'subject').slice(0, 40).replace(/\s+/g, ' ');
+    lines.push(`    • PRIMARY: x:${x} y:${y} w:${w} h:${h} ("${desc}")`);
+  }
+  for (const s of secondaries.slice(0, 4)) {
+    const x = Math.round((s.x1 || 0) * dims.width);
+    const y = Math.round((s.y1 || 0) * dims.height);
+    const w = Math.round(((s.x2 || 0) - (s.x1 || 0)) * dims.width);
+    const h = Math.round(((s.y2 || 0) - (s.y1 || 0)) * dims.height);
+    const desc = String(s.description || s.id || 'subject').slice(0, 40).replace(/\s+/g, ' ');
+    lines.push(`    • secondary: x:${x} y:${y} w:${w} h:${h} ("${desc}")`);
+  }
+  const primary = primaries[0];
+  if (primary) {
+    const cy = ((primary.y1 || 0) + (primary.y2 || 0)) / 2;
+    const cx = ((primary.x1 || 0) + (primary.x2 || 0)) / 2;
+    lines.push(`  Suggested safe zones (chrome MAY land here):`);
+    if (cy >= 0.35 && cy <= 0.65) {
+      lines.push(`    • Top strip: above the subject`);
+      lines.push(`    • Bottom strip: below the subject`);
+    } else if (cy < 0.5) {
+      lines.push(`    • Bottom strip: below the subject (roomiest)`);
+    } else {
+      lines.push(`    • Top strip: above the subject (roomiest)`);
+    }
+    if (cx <= 0.35 || cx >= 0.65) {
+      const otherSide = cx <= 0.35 ? 'right' : 'left';
+      lines.push(`    • Vertical strip on the ${otherSide} side of the canvas (subject is offset to the other side)`);
+    }
+  }
+  lines.push(`  Self-check before emitting: for each chrome zone, confirm its bbox does NOT intersect any of the boxes above. If it does, move the zone into one of the suggested safe zones.`);
+  return lines.join('\n');
+}
+
 function buildFormatConstraintsBlock(platformFormat, dims) {
   const { getFormatCaps, creativeBriefForPlatformFormat } = require('./platformFormats');
   const caps = getFormatCaps(platformFormat) || getFormatCaps('meta_feed_1_1');
@@ -477,12 +541,13 @@ function buildFormatConstraintsBlock(platformFormat, dims) {
 //   • Output shape block instructs single/collage/grid composition
 //   • Same hard rules (size, no scripts, no Lorem, allowed hosts, etc.)
 //     and same FORMAT CONSTRAINTS for safe-area enforcement.
-function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', mediaUrlMap = null, sourceText = [], operatorPrompt = null }) {
+function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', mediaUrlMap = null, sourceText = [], sourceSubjects = [], sourcePrimarySubjectDesc = null, operatorPrompt = null }) {
   const ctx    = richContext?.text || null;
   const images = richContext?.images || [];
   const aspectRatio   = canvas.aspectRatio;
   const formatConstraints = buildFormatConstraintsBlock(platformFormat, dims);
   const avoidTextBlock    = buildAvoidExistingTextBlock(sourceText, dims);
+  const avoidSubjectBlock = buildAvoidSubjectBlock(sourceSubjects, sourcePrimarySubjectDesc, dims);
 
   // Resolve concept.media_picks → URLs. Skip picks whose mediaId
   // didn't resolve (defensive — should not happen since the Director
@@ -546,7 +611,8 @@ function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = 
     ``,
     formatConstraints,
     ``,
-    ...(avoidTextBlock ? [avoidTextBlock, ``] : []),
+    ...(avoidSubjectBlock ? [avoidSubjectBlock, ``] : []),
+    ...(avoidTextBlock    ? [avoidTextBlock,    ``] : []),
     `HARD RULES:`,
     `- Output a complete <html>...</html> document. <head> with <meta charset>, <title>, single inline <style>. <body> with the ad's visible content.`,
     `- <body> MUST be sized exactly ${dims.width}px × ${dims.height}px via inline style="width:${dims.width}px;height:${dims.height}px;margin:0;overflow:hidden". No scrollbars, no overflow.`,
@@ -651,13 +717,14 @@ function buildPromptV2({ canvas, concept, input, richContext, dims, videoMode = 
   return { system, user, images };
 }
 
-function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', sourceText = [], operatorPrompt = null }) {
+function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = false, mediaRect = null, platformFormat = 'meta_feed_1_1', sourceText = [], sourceSubjects = [], sourcePrimarySubjectDesc = null, operatorPrompt = null }) {
   const ctx    = richContext?.text || null;
   const images = richContext?.images || [];
   const creativeStyle = canvas.creativeStyle;
   const aspectRatio   = canvas.aspectRatio;
   const formatConstraints = buildFormatConstraintsBlock(platformFormat, dims);
   const avoidTextBlock    = buildAvoidExistingTextBlock(sourceText, dims);
+  const avoidSubjectBlock = buildAvoidSubjectBlock(sourceSubjects, sourcePrimarySubjectDesc, dims);
 
   const system = [
     `You are a senior creative director + frontend developer producing a single complete HTML+CSS social-media ad creative.`,
@@ -666,7 +733,8 @@ function buildPrompt({ canvas, concept, input, richContext, dims, videoMode = fa
     ``,
     formatConstraints,
     ``,
-    ...(avoidTextBlock ? [avoidTextBlock, ``] : []),
+    ...(avoidSubjectBlock ? [avoidSubjectBlock, ``] : []),
+    ...(avoidTextBlock    ? [avoidTextBlock,    ``] : []),
     `HARD RULES:`,
     `- Output a complete <html>...</html> document. <head> with <meta charset>, <title>, single inline <style>. <body> with the ad's visible content.`,
     `- <body> MUST be sized exactly ${dims.width}px × ${dims.height}px via inline style="width:${dims.width}px;height:${dims.height}px;margin:0;overflow:hidden". No scrollbars, no overflow.`,

@@ -138,7 +138,7 @@ async function loadContext(ad) {
 
 // ── Prompt builder ─────────────────────────────────────────────────────
 
-function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText, platformFormat, sourceText = [], hasProductReference = false, operatorPrompt = null }) {
+function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_ctaText, platformFormat, sourceText = [], subjects = [], primarySubjectDesc = null, hasProductReference = false, operatorPrompt = null }) {
   const li       = layoutInput || {};
   const copy     = li.copy     || {};
   const proof    = li.social_proof || {};
@@ -257,7 +257,7 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
   lines.push(`  You are being shown ${FRAME_SAMPLE_COUNT} still frames sampled from the Veo base video at t=0,1,2,...,${FRAME_SAMPLE_COUNT - 1}s.`);
   lines.push(`  Use them to:`);
   lines.push(`    1. Identify which region of the frame is consistently DARKEST and LEAST BUSY across all frames — place text/CTA there.`);
-  lines.push(`    2. Avoid placing chrome over the product, faces, or moving focal points (track them across frames).`);
+  lines.push(`    2. Avoid placing chrome over the product, faces, or moving focal points. The detect pipeline already gave you a hard subject bbox in the AVOID OVERLAYING THE SUBJECT block below — that's the floor. Use the frames to refine within it (track motion across frames to nudge chrome away from the subject's actual position at each timestamp).`);
   lines.push(`    3. Pick scrim/panel colors that complement the video's palette (dark scrims on bright video, light scrims on dark video).`);
   lines.push(`    4. Account for any motion: if the product moves right at t=4s, keep chrome on the left.`);
   lines.push(`  The LAST 3 frames (t=${FRAME_SAMPLE_COUNT - 3}s..${FRAME_SAMPLE_COUNT - 1}s) are the most load-bearing — that's when chrome is at full opacity (animations complete) and viewers read it.`);
@@ -322,6 +322,82 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
     lines.push(``);
   }
 
+  // ── Subject-aware placement (HARD CONSTRAINT) ────────────────────
+  // The detect pipeline labels each subject in the seed media with a
+  // normalized bbox + role (primary/secondary/background) + description.
+  // Without an explicit "don't cover the subject" constraint, GPT
+  // routinely places chrome on top of the product or person — the very
+  // thing the ad is trying to show. The frame samples help (8 cropped
+  // stills are attached for contrast-aware placement), but they're
+  // advisory; a pixel-space bbox is a hard floor GPT can't ignore.
+  //
+  // Primary subjects emit individually; secondaries are listed in a
+  // compact line. background-role subjects are skipped — they're
+  // decor, not the hero, and over-restricting wastes canvas.
+  const subjectBoxes = (subjects || []).filter(
+    s => s && (s.role === 'primary' || s.role === 'secondary')
+      && Number.isFinite(s.x1) && Number.isFinite(s.y1)
+      && Number.isFinite(s.x2) && Number.isFinite(s.y2)
+  );
+  if (subjectBoxes.length > 0) {
+    const primaries = subjectBoxes.filter(s => s.role === 'primary');
+    const secondaries = subjectBoxes.filter(s => s.role === 'secondary');
+    lines.push(`AVOID OVERLAYING THE SUBJECT (HARD CONSTRAINT)`);
+    lines.push(`  The detect pipeline identified the visual subject(s) of the seed media. Chrome placed on top of these regions OBSCURES THE PRODUCT — defeating the purpose of the ad. Route every chrome zone AROUND the subject, never on top of it.`);
+    if (primarySubjectDesc) {
+      lines.push(`  Primary subject: "${String(primarySubjectDesc).slice(0, 120)}"`);
+    }
+    lines.push(`  Pixel-space bounding boxes on the ${CANVAS.width}×${CANVAS.height} canvas (normalized 0–1 coords scaled to canvas pixels):`);
+    for (const s of primaries.slice(0, 3)) {
+      const x = Math.round(s.x1 * CANVAS.width);
+      const y = Math.round(s.y1 * CANVAS.height);
+      const w = Math.round((s.x2 - s.x1) * CANVAS.width);
+      const h = Math.round((s.y2 - s.y1) * CANVAS.height);
+      const desc = String(s.description || s.id || 'subject').slice(0, 40).replace(/\s+/g, ' ');
+      lines.push(`    • PRIMARY: x:${x} y:${y} w:${w} h:${h} ("${desc}")`);
+    }
+    for (const s of secondaries.slice(0, 4)) {
+      const x = Math.round(s.x1 * CANVAS.width);
+      const y = Math.round(s.y1 * CANVAS.height);
+      const w = Math.round((s.x2 - s.x1) * CANVAS.width);
+      const h = Math.round((s.y2 - s.y1) * CANVAS.height);
+      const desc = String(s.description || s.id || 'subject').slice(0, 40).replace(/\s+/g, ' ');
+      lines.push(`    • secondary: x:${x} y:${y} w:${w} h:${h} ("${desc}")`);
+    }
+    // Suggest concrete safe zones based on where the primary subject sits.
+    // If primary occupies the middle band → place chrome top + bottom.
+    // If primary is left-anchored → place chrome right side, and vice versa.
+    const primary = primaries[0];
+    if (primary) {
+      const cy = (primary.y1 + primary.y2) / 2;
+      const cx = (primary.x1 + primary.x2) / 2;
+      const py = Math.round(primary.y1 * CANVAS.height);
+      const pyEnd = Math.round(primary.y2 * CANVAS.height);
+      const safeTop = Math.max(SAFE_RECT.y, py - 20);          // 20px breathing room
+      const safeBottom = Math.min(SAFE_RECT.y + SAFE_RECT.height, pyEnd + 20);
+      lines.push(`  Suggested chrome zones (subject-aware, inside the content rect):`);
+      if (cy >= 0.35 && cy <= 0.65) {
+        // Subject in middle → top + bottom strips are safe
+        lines.push(`    • Top strip: y:${SAFE_RECT.y} to y:${safeTop} (above the subject)`);
+        lines.push(`    • Bottom strip: y:${safeBottom} to y:${SAFE_RECT.y + SAFE_RECT.height} (below the subject)`);
+      } else if (cy < 0.5) {
+        // Subject top-half → bottom strip is roomy
+        lines.push(`    • Bottom strip: y:${safeBottom} to y:${SAFE_RECT.y + SAFE_RECT.height} (below the subject — roomiest zone)`);
+        lines.push(`    • Narrow top strip: y:${SAFE_RECT.y} to y:${safeTop} (above the subject, tight)`);
+      } else {
+        // Subject bottom-half → top strip is roomy
+        lines.push(`    • Top strip: y:${SAFE_RECT.y} to y:${safeTop} (above the subject — roomiest zone)`);
+        lines.push(`    • Narrow bottom strip: y:${safeBottom} to y:${SAFE_RECT.y + SAFE_RECT.height} (below the subject, tight)`);
+      }
+      if (cx <= 0.35 || cx >= 0.65) {
+        const otherSide = cx <= 0.35 ? 'right' : 'left';
+        lines.push(`    • Or a vertical strip on the ${otherSide} side of the canvas where the subject isn't.`);
+      }
+    }
+    lines.push(`  Self-check before emitting: for each chrome zone, confirm its bbox does NOT intersect any of the boxes above. If it does, move the zone into one of the suggested safe zones.`);
+    lines.push(``);
+  }
+
   // ── Guardrail 2: don't invent product imagery when no reference exists ──
   // Chrome is text + scrims only. When no separate product reference
   // image is attached (e.g. catalog imageUrl missing, video-only run),
@@ -380,12 +456,19 @@ async function generateForAd({ ad, operatorPrompt = null }) {
   //    the combo). When false, chrome must not invent product graphics —
   //    no CSS shapes / SVG / divs mimicking the product silhouette.
   const sourceText = Array.isArray(media?.text) ? media.text : [];
+  // Subject bboxes from the detect pipeline — drives the "don't overlay
+  // the subject" hard guardrail. Without this, GPT routinely places
+  // chrome on top of the product / hero subject because the 8 frame
+  // samples are advisory; a bbox is enforceable.
+  const subjects = Array.isArray(media?.subjects) ? media.subjects : [];
+  const primarySubjectDesc = media?.primarySubjectDesc || null;
   const hasProductReference = referenceImagesEnabledForChrome() && !!product?.imageUrl;
 
   const prompt = buildPrompt({
     brand, product, layoutInput, concept,
     aspectRatio, ad_ctaText: ad.ctaText, platformFormat,
-    sourceText, hasProductReference,
+    sourceText, subjects, primarySubjectDesc,
+    hasProductReference,
     operatorPrompt
   });
 
