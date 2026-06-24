@@ -95,6 +95,192 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ── Product-ads-style campaign summary ────────────────────────────────
+//
+// GET /api/campaigns/ads-summary?brandId=X
+// → { summary, campaigns: [...] }
+//
+// Drives the redesigned /campaigns page (mirrors /api/catalog/ads-summary
+// for the /product-ads page). Per-campaign aggregation of:
+//   - coveragePct  (placeholder formula: productsWithAds / totalProducts;
+//                    Phase 2 swaps in the opportunity-score engine)
+//   - productCount, ugcCount, adCount, readyToExport
+//   - channels[]   derived from the platformFormat distribution on
+//                  this campaign's ads (meta_* → 'Meta', pmax_* → 'Google')
+//   - lastActivityAt + lastActivityLabel
+//   - opportunityScore = null (Phase 2 placeholder)
+//
+// Registered BEFORE the /:id route below so '/ads-summary' isn't matched
+// as id='ads-summary' (same precedence trick as the catalog endpoint).
+router.get('/ads-summary', async (req, res) => {
+  try {
+    const brandId = req.query.brandId || req.headers['x-brand-id'];
+    if (!brandId) return res.status(400).json({ error: 'brandId is required' });
+    if (!mongoose.isValidObjectId(brandId)) {
+      return res.status(400).json({ error: 'brandId is not a valid ObjectId' });
+    }
+    const brandObjectId = new mongoose.Types.ObjectId(String(brandId));
+
+    // Brand-scoped, archived excluded. status/platform left in for the
+    // frontend filter dropdowns to slice locally.
+    const filter = tenantFilter(req, { brandId });
+    filter.status = { $ne: 'ARCHIVED' };
+    const campaigns = await Campaign.find(filter)
+      .select('_id name status platform kind matchedProductIds productSetIds mediaIds lastSyncedAt firstSeenAt promotionalDetails schedule')
+      .sort({ lastSyncedAt: -1 })
+      .lean();
+
+    if (!campaigns.length) {
+      return res.json({
+        summary: {
+          totalCampaigns:        0,
+          campaignsWithAds:      0,
+          campaignCoveragePct:   0,
+          adsCreated:            0,
+          adsReadyToExport:      0,
+          goodOpportunities:     null
+        },
+        campaigns: []
+      });
+    }
+
+    // Single aggregation over Ad: per-campaign counts + distinct
+    // products with ads + distinct platformFormats + last generatedAt.
+    const campaignIds = campaigns.map(c => c._id);
+    const agg = await Ad.aggregate([
+      { $match: {
+          brandId:    brandObjectId,
+          campaignId: { $in: campaignIds },
+          status:     { $ne: 'archived' }
+      } },
+      { $group: {
+          _id: '$campaignId',
+          adCount:       { $sum: 1 },
+          ugcCount:      { $sum: { $cond: [{ $eq: ['$variantKind', 'ugc'] }, 1, 0] } },
+          readyToExport: {
+            $sum: {
+              $cond: [
+                { $and: [
+                  { $eq: ['$status', 'draft'] },
+                  { $ne: ['$metaSyncStatus', 'synced'] }
+                ] }, 1, 0
+              ]
+            }
+          },
+          productsWithAds: { $addToSet: '$productId' },
+          platformFormats: { $addToSet: '$platformFormat' },
+          lastGeneratedAt: { $max: '$generatedAt' }
+      } }
+    ]);
+    const adStatsByCampaign = new Map();
+    for (const r of agg) if (r._id) adStatsByCampaign.set(String(r._id), r);
+
+    // Hydrate first-product thumbnail per campaign (one bulk query).
+    const allProductIds = new Set();
+    for (const c of campaigns) {
+      const first = (c.matchedProductIds || [])[0];
+      if (first) allProductIds.add(String(first));
+    }
+    const productThumbs = new Map();
+    if (allProductIds.size) {
+      const rows = await CatalogProduct.find({ _id: { $in: [...allProductIds] } })
+        .select('_id imageUrl').lean();
+      for (const p of rows) productThumbs.set(String(p._id), p.imageUrl || null);
+    }
+
+    // Project channels from the platformFormat distribution on this
+    // campaign's ads. Meta surfaces (feed/reels/stories) collapse to
+    // 'Meta'; PMax to 'Google'. Empty when no ads yet — frontend renders
+    // the campaign's platform field as fallback.
+    function channelsFromFormats(formats) {
+      const set = new Set();
+      for (const f of formats || []) {
+        if (!f) continue;
+        if (f.startsWith('meta_')) set.add('Meta');
+        else if (f.startsWith('pmax_') || f.startsWith('google_')) set.add('Google');
+        else if (f.startsWith('tiktok_')) set.add('TikTok');
+      }
+      return [...set];
+    }
+
+    function lastActivityLabel(c, stats) {
+      if (stats?.lastGeneratedAt) return 'Ads generated';
+      if (c.lastSyncedAt) return 'Synced';
+      return 'No activity';
+    }
+
+    const out = campaigns.map(c => {
+      const stats        = adStatsByCampaign.get(String(c._id));
+      const totalProducts = (c.matchedProductIds || []).length;
+      const productsWithAds = stats
+        ? (stats.productsWithAds || []).filter(Boolean).length
+        : 0;
+      const coveragePct = totalProducts > 0
+        ? Math.round((productsWithAds / totalProducts) * 100)
+        : 0;
+      const firstProduct = (c.matchedProductIds || [])[0];
+      const thumbUrl     = firstProduct ? productThumbs.get(String(firstProduct)) : null;
+
+      // last activity: latest of ad-generation, sync. Fall back to firstSeen.
+      const adAt  = stats?.lastGeneratedAt ? new Date(stats.lastGeneratedAt).getTime() : 0;
+      const syncAt= c.lastSyncedAt        ? new Date(c.lastSyncedAt).getTime()         : 0;
+      const seenAt= c.firstSeenAt         ? new Date(c.firstSeenAt).getTime()          : 0;
+      const lastTs = Math.max(adAt, syncAt, seenAt);
+
+      return {
+        campaignId:        String(c._id),
+        name:              c.name || '(unnamed campaign)',
+        status:            c.status || null,
+        kind:              c.kind   || null,
+        platform:          c.platform || null,
+        thumbUrl:          thumbUrl || null,
+        productCount:      totalProducts,
+        productsWithAds,
+        ugcCount:          stats?.ugcCount       || 0,
+        adCount:           stats?.adCount        || 0,
+        readyToExport:     stats?.readyToExport  || 0,
+        coveragePct,
+        channels:          channelsFromFormats(stats?.platformFormats),
+        opportunityScore:  null,   // Phase 2 — see backlog
+        lastActivityAt:    lastTs ? new Date(lastTs).toISOString() : null,
+        lastActivityLabel: lastActivityLabel(c, stats),
+        isExpired:         computeIsExpired(c)
+      };
+    });
+
+    // Default sort: lastActivity desc, then lowest coverage first
+    // (operator attention surfaces above stale-but-fine campaigns).
+    out.sort((a, b) => {
+      const ta = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
+      const tb = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
+      if (tb !== ta) return tb - ta;
+      return a.coveragePct - b.coveragePct;
+    });
+
+    const totalCampaigns      = out.length;
+    const campaignsWithAds    = out.filter(c => c.adCount > 0).length;
+    const adsCreated          = out.reduce((s, c) => s + c.adCount, 0);
+    const adsReadyToExport    = out.reduce((s, c) => s + c.readyToExport, 0);
+
+    res.json({
+      summary: {
+        totalCampaigns,
+        campaignsWithAds,
+        campaignCoveragePct: totalCampaigns > 0
+          ? Math.round((campaignsWithAds / totalCampaigns) * 100)
+          : 0,
+        adsCreated,
+        adsReadyToExport,
+        goodOpportunities: null   // Phase 2
+      },
+      campaigns: out
+    });
+  } catch (err) {
+    console.error(`❌ GET /api/campaigns/ads-summary: ${err.message}\n${err.stack || ''}`);
+    res.status(500).json({ error: err.message || 'ads summary failed' });
+  }
+});
+
 // GET /api/campaigns/:id — full doc including adSets[] for the
 // Generate Ads wizard step that needs to know which products are in
 // the campaign's product set.
