@@ -158,7 +158,13 @@ function buildOverlayIntent({ concept, hasHeadline, hasCta }) {
 // Main export. layoutInput is LayoutInputArtifact.input (preferred source for
 // scene data). sourceMedia is layoutInput.input.source_media from the detect
 // pipeline (richer bbox data when available). Both are optional.
-function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false, hasProductReference = false, operatorPrompt = null }) {
+//
+// storyboard (optional) — structured { camera, audio, beats[], vibe } from
+// veoStoryboardService. When provided, the camera move + time-coded beats
+// section is rendered from the storyboard instead of the hardcoded
+// 3-beat template, and an explicit AUDIO line is added. When null,
+// behavior is unchanged.
+function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false, hasProductReference = false, operatorPrompt = null, storyboard = null }) {
   const lines   = [];
   const subject = resolveSubject({ layoutInput, sourceMedia, media });
 
@@ -206,20 +212,34 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
   const subjectLine = buildSubjectFramingInstruction(subject);
   if (subjectLine) lines.push(subjectLine);
 
-  const motionBeat = buildMotionBeat(subject);
-  lines.push(
-    `5-second storyboard: ` +
-    `0:00–0:01: Establish the scene exactly as composed in the reference image — soft diffused cinematic lighting, ` +
-    `natural shallow depth of field, pristine clean background. ` +
-    motionBeat + ` ` +
-    `0:03–0:05: The camera executes a slow, elegant z-axis forward push-in with micro-handheld Y/X axis drift ` +
-    `and organic jitter, settling into a clean hold with razor-sharp focus on the primary subject.`
-  );
-
-  lines.push(
-    `Camera: slow z-axis push-in with organic handheld micro-movements. ` +
-    `High-end lifestyle commercial color grading, photorealistic, 8K resolution.`
-  );
+  if (storyboard && Array.isArray(storyboard.beats) && storyboard.beats.length > 0) {
+    // GPT-composed storyboard. Camera + beats + audio are all directed
+    // per-ad rather than locked to the legacy 3-beat template.
+    const beatLines = storyboard.beats
+      .map(b => `${b.time}: ${b.description}`)
+      .join(' ');
+    lines.push(`5-second storyboard: ${beatLines}`);
+    lines.push(
+      `Camera: ${storyboard.camera}. ` +
+      `High-end lifestyle commercial color grading, photorealistic, 8K resolution.`
+    );
+    if (storyboard.vibe) lines.push(`Vibe: ${storyboard.vibe}.`);
+    if (storyboard.audio) lines.push(`AUDIO: ${storyboard.audio}.`);
+  } else {
+    const motionBeat = buildMotionBeat(subject);
+    lines.push(
+      `5-second storyboard: ` +
+      `0:00–0:01: Establish the scene exactly as composed in the reference image — soft diffused cinematic lighting, ` +
+      `natural shallow depth of field, pristine clean background. ` +
+      motionBeat + ` ` +
+      `0:03–0:05: The camera executes a slow, elegant z-axis forward push-in with micro-handheld Y/X axis drift ` +
+      `and organic jitter, settling into a clean hold with razor-sharp focus on the primary subject.`
+    );
+    lines.push(
+      `Camera: slow z-axis push-in with organic handheld micro-movements. ` +
+      `High-end lifestyle commercial color grading, photorealistic, 8K resolution.`
+    );
+  }
 
   lines.push(buildOverlayIntent({
     concept,
@@ -285,6 +305,7 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
 
 module.exports = {
   buildVeoPrompt,
+  resolveSubject,
   archetypeDescription,
   archetypeNegativeSpaceGuidance,
   aspectRatioForPlatformFormat,

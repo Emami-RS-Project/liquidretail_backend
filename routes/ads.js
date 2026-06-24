@@ -461,6 +461,7 @@ async function renderOne(run, job, adId, index, renderToken) {
             kind:               'video',
             veoVideoUrl:        veoResult.videoUrl,
             veoPrompt:          veoResult.prompt || null,
+            veoStoryboard:      veoResult.storyboard || null,
             renderUrl:          veoResult.videoUrl,
             posterUrl:          fallbackPosterUrl || veoResult.videoUrl,
             cloudinaryPublicId: veoResult.cloudinaryPublicId,

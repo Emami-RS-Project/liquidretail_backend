@@ -222,6 +222,11 @@ const adSchema = new mongoose.Schema({
   sourceFileType:     { type: String, enum: ['image', 'video', null], default: null },
   veoVideoUrl:        { type: String, default: null },  // raw Veo base video (before chrome + Puppeteer)
   veoPrompt:          { type: String, default: null },  // storyboard prompt sent to Veo — preserved for debugging + reproduction
+  // GPT-composed structured storyboard. Null when VEO_USE_GPT_STORYBOARD
+  // is off or the GPT call failed (Veo prompt then carries the legacy
+  // hardcoded storyboard instead). Stored as Mixed so the shape can
+  // evolve without a migration.
+  veoStoryboard:      { type: mongoose.Schema.Types.Mixed, default: null },
   chromeHtml:         { type: String, default: null },  // GPT-generated transparent overlay HTML
   chromeVersion:      { type: String, default: null },
   renderUrl:          { type: String, default: null },

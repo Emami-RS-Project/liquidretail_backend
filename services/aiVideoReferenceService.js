@@ -20,7 +20,8 @@ const CatalogProduct            = require('../models/CatalogProduct');
 const LayoutInputArtifact       = require('../models/LayoutInputArtifact');
 const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact');
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
-const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('./veoPromptBuilder');
+const { buildVeoPrompt, resolveSubject, aspectRatioForPlatformFormat } = require('./veoPromptBuilder');
+const { generateStoryboard } = require('./veoStoryboardService');
 
 const MODEL_ID      = process.env.VEO_MODEL_ID       || 'veo-3.1-generate-preview';
 const POLL_INTERVAL = parseInt(process.env.VEO_POLL_INTERVAL_MS, 10) || 15000;
@@ -294,14 +295,34 @@ async function generateForAd({ ad, operatorPrompt = null }) {
   // back to "preserve the seed product" wording instead of pointing
   // at a separate reference image.
   const willSendRefs = referenceImagesEnabled() && !!product?.imageUrl;
+
+  // GPT-composed storyboard (camera + per-beat motion + audio). Gated
+  // by VEO_USE_GPT_STORYBOARD; returns null when the flag is off or the
+  // GPT call fails, and buildVeoPrompt falls back to the hardcoded
+  // 3-beat template.
+  const lpInput     = layoutInput?.input || null;
+  const lpSrcMedia  = lpInput?.source_media || null;
+  const subject     = resolveSubject({ layoutInput: lpInput, sourceMedia: lpSrcMedia, media });
+  const storyboard  = await generateStoryboard({
+    concept, brand, product,
+    layoutInput:  lpInput,
+    sourceMedia:  lpSrcMedia,
+    subject,
+    aspectRatio,
+    operatorPrompt,
+    brandId:   media.brandId,
+    productId: ad.productId || null
+  });
+
   const prompt = buildVeoPrompt({
     concept, brand, product, media,
-    layoutInput:  layoutInput?.input || null,
-    sourceMedia:  layoutInput?.input?.source_media || null,
+    layoutInput:  lpInput,
+    sourceMedia:  lpSrcMedia,
     aspectRatio,
     seedHasText,
     hasProductReference: willSendRefs,
-    operatorPrompt
+    operatorPrompt,
+    storyboard
   });
 
   const t0 = Date.now();
@@ -371,6 +392,7 @@ async function generateForAd({ ad, operatorPrompt = null }) {
     aspectRatio,
     track,
     prompt,
+    storyboard,
     elapsedMs
   };
 }

@@ -145,7 +145,12 @@ async function runVideoFull(adId, prompt) {
   if (veoResult.skipped) throw new Error(`Veo skipped: ${veoResult.reason}`);
   await Ad.updateOne(
     { _id: adId },
-    { $set: { veoVideoUrl: veoResult.videoUrl, veoPrompt: veoResult.prompt || null, updatedAt: new Date() } }
+    { $set: {
+        veoVideoUrl:    veoResult.videoUrl,
+        veoPrompt:      veoResult.prompt || null,
+        veoStoryboard:  veoResult.storyboard || null,
+        updatedAt:      new Date()
+      } }
   );
   await runVideoLight(adId, prompt);
 }
