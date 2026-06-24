@@ -281,6 +281,126 @@ router.get('/ads-summary', async (req, res) => {
   }
 });
 
+// GET /api/campaigns/:id/ads-detail?brandId=X
+// → { products: [{ productId, title, imageUrl, adCount }], ads: [...] }
+//
+// Drives the inline expansion on the redesigned /campaigns page —
+// mirrors /api/catalog/:id/ads-detail (catalog.js) but scoped to a
+// campaign instead of a single product. The ads grid in the expansion
+// can be filtered by product (analogous to filtering by campaign on
+// the product-ads page).
+router.get('/:id/ads-detail', async (req, res) => {
+  try {
+    const brandId = req.query.brandId || req.headers['x-brand-id'];
+    if (!brandId) return res.status(400).json({ error: 'brandId is required' });
+    if (!mongoose.isValidObjectId(brandId)) {
+      return res.status(400).json({ error: 'brandId is not a valid ObjectId' });
+    }
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'campaignId is not a valid ObjectId' });
+    }
+    const brandObjectId    = new mongoose.Types.ObjectId(String(brandId));
+    const campaignObjectId = new mongoose.Types.ObjectId(String(req.params.id));
+
+    // Tenant gate via Campaign (campaign is advertiser-scoped); then
+    // query Ad by (brandId, campaignId) — same pattern catalog.js uses
+    // (Ad is brand-scoped, not advertiser-scoped, so tenantFilter
+    // doesn't fit directly on the Ad query).
+    const campaign = await Campaign.findOne(
+      tenantFilter(req, { _id: campaignObjectId, brandId: brandObjectId })
+    ).select('_id matchedProductIds').lean();
+    if (!campaign) return res.status(404).json({ error: 'campaign not found' });
+
+    const { loadPhotorealUrlMap, loadUseImageRefMap } = require('../services/adDisplayUrlService');
+    const ads = await Ad.find({
+      brandId:    brandObjectId,
+      campaignId: campaignObjectId,
+      status:     { $ne: 'archived' }
+    })
+      .select('_id campaignId template aspectRatio kind status approved approvedAt renderUrl posterUrl ctaText copy generatedAt metaSyncStatus metaAdId metaAdsetId platformFormat aiCanvasArtifactId mediaId productId variantKind paletteSource sourceFileType regenerating regenerationStage regenerationHistory')
+      .sort({ generatedAt: -1 })
+      .limit(120)
+      .lean();
+
+    // Per-product ad-count for the products sidebar (analogous to the
+    // campaigns sidebar in /api/catalog/:id/ads-detail).
+    const productAdCounts = new Map();
+    for (const ad of ads) {
+      if (!ad.productId) continue;
+      const k = String(ad.productId);
+      productAdCounts.set(k, (productAdCounts.get(k) || 0) + 1);
+    }
+    const productIds = new Set([
+      ...productAdCounts.keys(),
+      ...((campaign.matchedProductIds || []).map(p => String(p)))
+    ]);
+    const productDocs = productIds.size
+      ? await CatalogProduct.find({ _id: { $in: [...productIds] } })
+          .select('_id title imageUrl price currency')
+          .lean()
+      : [];
+    const products = productDocs.map(p => ({
+      productId: String(p._id),
+      title:     p.title || '(untitled)',
+      imageUrl:  p.imageUrl || null,
+      price:     p.price ?? null,
+      currency:  p.currency || null,
+      adCount:   productAdCounts.get(String(p._id)) || 0
+    })).sort((a, b) => b.adCount - a.adCount);
+
+    // Photoreal + useImageRef joins — same shape /api/ads returns so the
+    // frontend thumbnail / detail-modal code can be shared.
+    const [photorealMap, useImageRefMap] = await Promise.all([
+      loadPhotorealUrlMap(ads),
+      loadUseImageRefMap(ads)
+    ]);
+
+    const adRows = ads.map(a => ({
+      adId:           String(a._id),
+      campaignId:     a.campaignId ? String(a.campaignId) : null,
+      template:       a.template,
+      aspectRatio:    a.aspectRatio,
+      platformFormat: a.platformFormat || null,
+      kind:           a.kind || 'image',
+      sourceFileType: a.sourceFileType || null,
+      status:         a.status,
+      approved:       !!a.approved,
+      approvedAt:     a.approvedAt ? new Date(a.approvedAt).toISOString() : null,
+      renderUrl:      a.renderUrl || null,
+      photorealUrl:   photorealMap.get(String(a._id)) || null,
+      useImageRefAsProduction: a.campaignId
+        ? !!useImageRefMap.get(String(a.campaignId))
+        : false,
+      posterUrl:      a.posterUrl || null,
+      headline:       a.copy?.headline || null,
+      ctaText:        a.ctaText || null,
+      generatedAt:    a.generatedAt ? new Date(a.generatedAt).toISOString() : null,
+      metaSyncStatus: a.metaSyncStatus || null,
+      metaAdId:       a.metaAdId || null,
+      metaAdsetId:    a.metaAdsetId || null,
+      productId:      a.productId ? String(a.productId) : null,
+      regenerating:   !!a.regenerating,
+      regenerationStage: a.regenerationStage || null,
+      regenerationHistory: Array.isArray(a.regenerationHistory)
+        ? a.regenerationHistory.map(h => ({
+            prompt:      h.prompt,
+            mode:        h.mode,
+            requestedBy: h.requestedBy || null,
+            at:          h.at ? new Date(h.at).toISOString() : null,
+            status:      h.status,
+            error:       h.error || null,
+            durationMs:  h.durationMs || null
+          }))
+        : []
+    }));
+
+    res.json({ products, ads: adRows });
+  } catch (err) {
+    console.error(`❌ GET /api/campaigns/:id/ads-detail: ${err.message}\n${err.stack || ''}`);
+    res.status(500).json({ error: err.message || 'ads detail failed' });
+  }
+});
+
 // GET /api/campaigns/:id — full doc including adSets[] for the
 // Generate Ads wizard step that needs to know which products are in
 // the campaign's product set.
