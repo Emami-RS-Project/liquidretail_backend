@@ -36,7 +36,7 @@ const {
 const MODEL_ID         = process.env.REELS_CHROME_MODEL_ID || 'gpt-4.1';
 const TEMPERATURE      = 0.85;
 const MAX_TOKENS       = 12000;
-const CHROME_VERSION   = '1.3.0';                          // bumped: canvas-aspect frame samples (Veo→canvas crop preview)
+const CHROME_VERSION   = '1.4.0';                          // bumped: 8s duration + multi-state choreography (hook → proof → end card with fade-out transitions)
 const FRAME_SAMPLE_COUNT = parseInt(process.env.REELS_CHROME_FRAME_SAMPLES || '8', 10);
 
 // Veo aspect ratios for the c_fill,ar_<X> Cloudinary transform. The
@@ -417,15 +417,20 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
   }
 
   lines.push(`ANIMATION REQUIREMENTS`);
-  lines.push(`  All animations MUST complete within 5 seconds (match Veo video duration).`);
+  lines.push(`  All animations MUST complete within 8 seconds (match Veo video duration).`);
   lines.push(`  Use CSS @keyframes — no JavaScript.`);
-  lines.push(`  Recommended timing pattern:`);
-  lines.push(`    0.0s–0.5s: eyebrow/headline fade/slide in`);
-  lines.push(`    0.5s–2.0s: hold headline; social proof animates in`);
-  lines.push(`    2.0s–3.5s: proof cycles or holds; subheadline appears`);
-  lines.push(`    3.5s–5.0s: CTA fades/slides in; everything holds on final frame`);
-  lines.push(`  If multiple review quotes: cycle them with fade-in/fade-out @keyframes timed within 5s.`);
+  lines.push(`  Multi-state choreography is encouraged: elements may fade IN, hold, then fade OUT before a new state appears. The final frame should land on a clean END CARD (brand mark + CTA) rather than a stack of every element from earlier states.`);
+  lines.push(`  Recommended timing pattern (story arc → end card):`);
+  lines.push(`    0.0s–1.0s: HOOK state — eyebrow / headline fades in over the seed video. Pure visual hook, minimal chrome.`);
+  lines.push(`    1.0s–5.0s: PROOF state — social proof / quote card / rating fades in, holds, then fades OUT by ~5.0s.`);
+  lines.push(`    5.0s–5.5s: clean handoff — brief moment with no chrome (or only persistent brand mark), letting the base video breathe before the end card.`);
+  lines.push(`    5.5s–8.0s: END CARD state — brand wordmark / logo + CTA fade in and HOLD locked for the final ~2.5s. This is the freeze frame.`);
+  lines.push(`  Each chrome element gets its own @keyframes:`);
+  lines.push(`    • Transient elements (eyebrow, headline, quote card, rating, subheadline): opacity 0 → 1 → 0 with hold in the middle. Use animation-fill-mode: forwards so they stay invisible after fading out.`);
+  lines.push(`    • Persistent elements (brand mark, CTA on the end card): opacity 0 → 1 with animation-fill-mode: forwards so they hold on the final frame.`);
+  lines.push(`  If multiple review quotes: cycle them with fade-in/fade-out @keyframes inside the PROOF window (1.0s–5.0s).`);
   lines.push(`  Animate ONLY individual chrome elements (headline div, quote card, cta). NOT body or wrapper.`);
+  lines.push(`  Final-frame test: at t=8.0s, ONLY the end-card state should be visible (brand mark + CTA + any persistent brand glyph). Eyebrow, headline, quote card, rating, and subheadline must already have faded out.`);
   lines.push(``);
   lines.push(`HTML REQUIREMENTS`);
   lines.push(`  - Single self-contained HTML file. No external resources, no <img> tags, no <script> tags.`);

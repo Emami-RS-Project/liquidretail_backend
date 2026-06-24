@@ -40,7 +40,7 @@ async function downloadToFile(url, destPath) {
 }
 
 const TARGET_FPS   = parseInt(process.env.REELS_CHROME_FPS || '24', 10);
-const DURATION_SEC = parseInt(process.env.REELS_CHROME_DURATION_SEC || '5', 10);
+const DURATION_SEC = parseInt(process.env.REELS_CHROME_DURATION_SEC || '8', 10);
 const TOTAL_FRAMES = TARGET_FPS * DURATION_SEC;
 
 // Encode output dims are scaled DOWN from the canvas to bound libx264 memory
