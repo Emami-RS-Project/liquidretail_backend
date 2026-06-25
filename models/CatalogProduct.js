@@ -157,6 +157,15 @@ const catalogProductSchema = new mongoose.Schema({
   // service produces a breadcrumb.
   categoryRef: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null, index: true },
 
+  // JSON-LD inference — populated by productCategoryInferenceService.
+  // Breadcrumb is the ordered list of names from the brand's own product
+  // page (BreadcrumbList structured data → falls back to Product.category).
+  // categoryRef above is also updated to point at the Category leaf
+  // created from this breadcrumb. inferredCategoryAt is stamped on EVERY
+  // attempt (success or failure) so we don't retry inside the 14-day TTL.
+  inferredBreadcrumb: { type: [String], default: undefined },
+  inferredCategoryAt: { type: Date,     default: null },
+
   // Bidirectional match denormalization — mirror of Media.matchedProducts.
   // Populated by detect after each DetectRun completes the match phase.
   // matchTier:

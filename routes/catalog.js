@@ -353,6 +353,96 @@ async function buildAdStatsByProduct(brandObjectId) {
   return byProduct;
 }
 
+// GET /api/catalog/categories?brandId=X
+// → [{ categoryId, name, breadcrumb, depth, productCount }]
+//
+// Returns every Category row for the brand with a denormalized product
+// count. Powers the Product Ads page category filter. Includes categories
+// with 0 products so newly-created ones don't disappear from the dropdown.
+router.get('/categories', async (req, res) => {
+  try {
+    const brandId = req.query.brandId || req.headers['x-brand-id'];
+    if (!brandId) return res.status(400).json({ error: 'brandId is required' });
+    const brandObjectId = mongoose.isValidObjectId(brandId)
+      ? new mongoose.Types.ObjectId(String(brandId))
+      : null;
+    if (!brandObjectId) return res.status(400).json({ error: 'brandId is not a valid ObjectId' });
+
+    const Category = require('../models/Category');
+    const categories = await Category.find(tenantFilter(req, { brandId: brandObjectId }))
+      .select('_id name breadcrumb depth url')
+      .sort({ breadcrumb: 1 })
+      .lean();
+
+    // Product count per category (single aggregation; cheap).
+    const counts = await CatalogProduct.aggregate([
+      { $match: tenantFilter(req, { brandId: brandObjectId, categoryRef: { $ne: null } }) },
+      { $group: { _id: '$categoryRef', count: { $sum: 1 } } }
+    ]);
+    const countMap = new Map(counts.map(c => [String(c._id), c.count]));
+
+    const rows = categories.map(c => ({
+      categoryId:   String(c._id),
+      name:         c.name,
+      breadcrumb:   c.breadcrumb,
+      depth:        c.depth,
+      url:          c.url || null,
+      productCount: countMap.get(String(c._id)) || 0
+    }));
+
+    res.json(rows);
+  } catch (err) {
+    console.error(`❌ GET /api/catalog/categories: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/catalog/brands/:id/infer-categories?force=true
+// → { ok, total, ok_count, skipped, failed, durationMs }
+//
+// Manually trigger JSON-LD category inference across every product in
+// the brand. By default respects the 14-day TTL; pass force=true to
+// re-scrape everything. Returns synchronously after the batch completes
+// (can take minutes for large catalogs — fronted by a loading state
+// on the integrations page).
+router.post('/brands/:id/infer-categories', async (req, res) => {
+  try {
+    const brandObjectId = mongoose.isValidObjectId(req.params.id)
+      ? new mongoose.Types.ObjectId(String(req.params.id))
+      : null;
+    if (!brandObjectId) return res.status(400).json({ error: 'brandId is not a valid ObjectId' });
+
+    const force = String(req.query.force || '').toLowerCase() === 'true';
+    const inference = require('../services/productCategoryInferenceService');
+
+    const candidates = await CatalogProduct.find(tenantFilter(req, {
+      brandId: brandObjectId,
+      productUrl: { $ne: null, $exists: true, $ne: '' }
+    })).select('_id').lean();
+
+    if (!candidates.length) {
+      return res.json({ ok: true, total: 0, ok_count: 0, skipped: 0, failed: 0, durationMs: 0 });
+    }
+
+    const t0 = Date.now();
+    const result = await inference.inferBatch(
+      candidates.map(c => c._id),
+      { concurrency: 6, force }
+    );
+    res.json({
+      ok:         true,
+      total:      result.total,
+      ok_count:   result.ok,
+      skipped:    result.skipped,
+      failed:     result.failed,
+      durationMs: Date.now() - t0
+    });
+  } catch (err) {
+    console.error(`❌ POST /api/catalog/brands/:id/infer-categories: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/catalog/ads-summary?brandId=X
 // → { summary, products: [{ productId, title, price, currency, imageUrl,
 //      category, adCount, campaignCount, coveragePct, readyToExport,
@@ -370,10 +460,17 @@ router.get('/ads-summary', async (req, res) => {
     // Exclude draft (review-queue) products — they're not ad-targetable yet.
     filter.draft = { $ne: true };
 
+    // Optional category filter (?categoryId=X). Powers the Product Ads
+    // page Category dropdown. Empty string or 'all' = no filter.
+    const categoryId = req.query.categoryId;
+    if (categoryId && categoryId !== 'all' && mongoose.isValidObjectId(categoryId)) {
+      filter.categoryRef = new mongoose.Types.ObjectId(String(categoryId));
+    }
+
     // Pull products + ad aggregation in parallel.
     const [products, adStats] = await Promise.all([
       CatalogProduct.find(filter)
-        .select('_id title price currency imageUrl category brand size createdAt')
+        .select('_id title price currency imageUrl category brand size createdAt categoryRef inferredBreadcrumb')
         .lean(),
       buildAdStatsByProduct(brandObjectId)
     ]);
@@ -390,6 +487,8 @@ router.get('/ads-summary', async (req, res) => {
         currency:       p.currency || null,
         imageUrl:       p.imageUrl || null,
         category:       p.category || null,
+        categoryRef:    p.categoryRef ? String(p.categoryRef) : null,
+        inferredBreadcrumb: Array.isArray(p.inferredBreadcrumb) ? p.inferredBreadcrumb : null,
         brand:          p.brand || null,
         size:           p.size || null,
         adCount,

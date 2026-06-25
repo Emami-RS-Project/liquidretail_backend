@@ -267,6 +267,33 @@ async function syncCatalogForCred(cred) {
       .catch(err => console.warn(`   ⚠️  catalog enrichment enqueue failed: ${err.message}`));
   });
 
+  // JSON-LD category inference. Scrapes each product's productUrl for
+  // BreadcrumbList structured data and builds the Category tree from
+  // the brand's actual site collections — far richer than Meta's coarse
+  // category enum. Fire-and-forget; the inference service throttles
+  // per-domain and respects a 14-day TTL so re-syncs are cheap.
+  setImmediate(() => {
+    (async () => {
+      try {
+        const inference = require('./productCategoryInferenceService');
+        const candidates = await CatalogProduct.find({
+          brandId,
+          productUrl: { $ne: null, $exists: true, $ne: '' },
+          $or: [
+            { inferredCategoryAt: null },
+            { inferredCategoryAt: { $lt: new Date(Date.now() - inference.TTL_DAYS * 24 * 60 * 60 * 1000) } }
+          ]
+        }).select('_id').lean();
+        if (!candidates.length) return;
+        console.log(`🔎 categoryInference: brand=${brandId} scheduling ${candidates.length} product page scrapes`);
+        const result = await inference.inferBatch(candidates.map(c => c._id), { concurrency: 6 });
+        console.log(`🔎 categoryInference: brand=${brandId} done — ok=${result.ok} skipped=${result.skipped} failed=${result.failed}`);
+      } catch (err) {
+        console.warn(`   ⚠️  category inference enqueue failed: ${err.message}`);
+      }
+    })();
+  });
+
   return {
     ok: true,
     fetched,
