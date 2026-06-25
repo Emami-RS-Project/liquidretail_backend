@@ -27,7 +27,7 @@ const Campaign     = require('../models/Campaign');
 const CampaignRun  = require('../models/CampaignRun');
 const { expandWizardJob, selectAdsForRun } = require('../services/campaignAdsGenerationService');
 const { renderCreative }        = require('../services/renderService');
-const { generateForAd: veoGenerateForAd }    = require('../services/aiVideoReferenceService');
+const { generateForAd: veoGenerateForAd }    = require('../services/videoRouter');
 const { generateForAd: chromeGenerateForAd } = require('../services/aiReelsChromeService');
 const { compositeForAd: reelsPuppeteerComposite } = require('../services/aiReelsPuppeteerService');
 const { deleteFromCloudinary } = require('../services/cloudinaryService');
@@ -472,26 +472,40 @@ async function renderOne(run, job, adId, index, renderToken) {
         }
       );
 
-      // Stage 2 — GPT chrome overlay. Re-fetch the Ad so chromeGenerateForAd
-      // sees the freshly-stamped veoVideoUrl (it samples 8 frames from the
-      // Cloudinary video URL and passes them to GPT-4.1 for contrast-aware
-      // text placement). Persists chromeHtml directly; best-effort.
-      const adAfterVeo = await Ad.findById(adId).lean();
-      try {
-        await chromeGenerateForAd({ ad: adAfterVeo });
-      } catch (chromeErr) {
-        console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeErr.message}`);
-      }
-
-      // Stage 3 — Puppeteer animated chrome capture + ffmpeg composite.
-      // Overwrites renderUrl/posterUrl/cloudinaryPublicId on success.
-      const adWithChrome = await Ad.findById(adId).lean();
-      if (adWithChrome?.chromeHtml) {
+      // Stages 2+3 (chrome HTML + Puppeteer composite) are SKIPPED when
+      // the video provider already rendered text natively in-frame.
+      // Grok via Atlas (xai/grok-imagine-video) renders text without
+      // hallucination, so the model output IS the final ad. Veo never
+      // renders text reliably — its videoRouter result always carries
+      // rendersText=false, and the legacy chrome+composite chain runs.
+      //
+      // The router also honors ATLAS_VIDEO_FORCE_CHROME=true as an
+      // override (sets rendersText=false even on Atlas) for A/B
+      // testing Grok-with-chrome against Grok-alone.
+      if (!veoResult.rendersText) {
+        // Stage 2 — GPT chrome overlay. Re-fetch the Ad so chromeGenerateForAd
+        // sees the freshly-stamped veoVideoUrl (it samples 8 frames from the
+        // Cloudinary video URL and passes them to GPT-4.1 for contrast-aware
+        // text placement). Persists chromeHtml directly; best-effort.
+        const adAfterVeo = await Ad.findById(adId).lean();
         try {
-          await reelsPuppeteerComposite({ ad: adWithChrome });
-        } catch (puppeteerErr) {
-          console.warn(`⚠️ reelsPuppeteer[ad=${adId}]: failed (non-fatal) — ${puppeteerErr.message}`);
+          await chromeGenerateForAd({ ad: adAfterVeo });
+        } catch (chromeErr) {
+          console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeErr.message}`);
         }
+
+        // Stage 3 — Puppeteer animated chrome capture + ffmpeg composite.
+        // Overwrites renderUrl/posterUrl/cloudinaryPublicId on success.
+        const adWithChrome = await Ad.findById(adId).lean();
+        if (adWithChrome?.chromeHtml) {
+          try {
+            await reelsPuppeteerComposite({ ad: adWithChrome });
+          } catch (puppeteerErr) {
+            console.warn(`⚠️ reelsPuppeteer[ad=${adId}]: failed (non-fatal) — ${puppeteerErr.message}`);
+          }
+        }
+      } else {
+        console.log(`🎬 [ad=${adId}]: skipping chrome+composite — provider rendersText=true (model=${veoResult.model})`);
       }
 
       await CampaignRun.updateOne({ _id: run._id }, { $inc: { succeeded: 1 } });
