@@ -26,7 +26,37 @@ const ffmpegPath = require('ffmpeg-static');
 
 const Ad = require('../models/Ad');
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
-const { canvasForPlatformFormat }   = require('./platformFormats');
+const { canvasForPlatformFormat, aspectRatioForPlatformFormat } = require('./platformFormats');
+
+// Map a canvas aspect ratio to a Cloudinary ar_ parameter. Matches the
+// table in aiReelsChromeService.arParamForAspect so the chrome's frame
+// samples and the composite's base video use the SAME saliency-anchored
+// crop. Without this match, GPT plans chrome against one crop offset
+// while ffmpeg composites against a center-default crop — the subject
+// drifts under the chrome zones GPT intended to leave clear.
+function arParamForAspect(aspectRatio) {
+  const a = String(aspectRatio || '').trim();
+  if (a === '9:16')   return 'ar_9:16';
+  if (a === '16:9')   return 'ar_16:9';
+  if (a === '4:5')    return 'ar_4:5';
+  if (a === '1.91:1') return 'ar_191:100';
+  return 'ar_1:1';
+}
+
+// Build a Cloudinary-transformed URL that crops the Veo base video to
+// the canvas aspect using saliency-aware g_auto. Returns the original
+// URL untouched when the host isn't Cloudinary (defensive — we always
+// upload to Cloudinary today, but a future Veo source change shouldn't
+// silently break the composite).
+function canvasAspectVideoUrl(veoVideoUrl, platformFormat) {
+  if (!veoVideoUrl || !veoVideoUrl.includes('/video/upload/')) return veoVideoUrl;
+  const aspect = aspectRatioForPlatformFormat(platformFormat) || '9:16';
+  const ar = arParamForAspect(aspect);
+  // c_fill + g_auto = saliency-cropped to the target aspect. Matches
+  // exactly what aiReelsChromeService.deriveFrameUrls uses for the
+  // frame samples GPT plans placement against.
+  return veoVideoUrl.replace('/video/upload/', `/video/upload/c_fill,${ar},g_auto/`);
+}
 
 async function downloadToFile(url, destPath) {
   const res = await axios.get(url, { responseType: 'stream', timeout: 120000 });
@@ -127,8 +157,11 @@ function runFfmpeg(args) {
 }
 
 // Composite the chrome PNG sequence over the Veo video.
-//   - Base video is scaled+cropped to 1000×1778 (force_original_aspect_ratio=increase
-//     + crop fits the Veo output to our canvas without black bars).
+//   - Base video is downloaded ALREADY cropped to canvas aspect via the
+//     Cloudinary c_fill,ar_<canvas>,g_auto transform (saliency-aware,
+//     matching the frame samples GPT planned chrome placement against).
+//     ffmpeg only scales to OUTPUT dims — no crop step needed, and no
+//     center-default mismatch with saliency.
 //   - tpad=stop_mode=clone clones the LAST chrome frame for 10 more seconds so the
 //     chrome stays visible if the base video runs longer than DURATION_SEC.
 //   - overlay eof_action=pass keeps the base video running even after the chrome
@@ -149,8 +182,11 @@ async function compositeWithFfmpeg(veoVideoPath, framePattern, outputPath, outpu
     '-framerate', String(TARGET_FPS),
     '-i', framePattern,
     '-filter_complex',
-      `[0:v]scale=${output.width}:${output.height}:force_original_aspect_ratio=increase,` +
-        `crop=${output.width}:${output.height}[base];` +
+      // Input video is already canvas-aspect (Cloudinary g_auto crop applied
+      // upstream in canvasAspectVideoUrl), so we only scale here — no
+      // separate crop step. setsar=1 normalizes the SAR so overlay aligns
+      // 1:1 with the chrome PNG sequence regardless of source metadata.
+      `[0:v]scale=${output.width}:${output.height}:flags=lanczos,setsar=1[base];` +
       `[1:v]scale=${output.width}:${output.height},tpad=stop_mode=clone:stop_duration=10[chrome];` +
       `[base][chrome]overlay=0:0:format=auto:eof_action=pass[out]`,
     '-map', '[out]',
@@ -192,8 +228,14 @@ async function compositeForAd({ ad }) {
     const framePattern = path.join(tmpDir, 'frame_%04d.png');
     const veoPath      = path.join(tmpDir, 'veo.mp4');
 
-    console.log(`🎬 reelsPuppeteer[ad=${ad._id}]: downloading Veo video...`);
-    await downloadToFile(ad.veoVideoUrl, veoPath);
+    // Apply Cloudinary saliency-anchored crop (c_fill, ar_<canvas>, g_auto)
+    // so the base video matches the canvas-aspect frame samples GPT used
+    // to plan chrome placement. This is the same transform aiReelsChromeService
+    // applies via deriveFrameUrls — keeping the two in sync prevents the
+    // composite from drifting the subject under chrome zones.
+    const veoDownloadUrl = canvasAspectVideoUrl(ad.veoVideoUrl, ad.platformFormat);
+    console.log(`🎬 reelsPuppeteer[ad=${ad._id}]: downloading Veo video (canvas-aspect crop applied)...`);
+    await downloadToFile(veoDownloadUrl, veoPath);
 
     console.log(`🎬 reelsPuppeteer[ad=${ad._id}]: ffmpeg compositing (captured in ${captureMs}ms)...`);
     await compositeWithFfmpeg(veoPath, framePattern, outputPath, output);

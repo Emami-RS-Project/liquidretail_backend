@@ -36,7 +36,7 @@ const {
 const MODEL_ID         = process.env.REELS_CHROME_MODEL_ID || 'gpt-4.1';
 const TEMPERATURE      = 0.85;
 const MAX_TOKENS       = 12000;
-const CHROME_VERSION   = '1.4.0';                          // bumped: 8s duration + multi-state choreography (hook → proof → end card with fade-out transitions)
+const CHROME_VERSION   = '1.5.0';                          // bumped: salience floor — min hold times, transition durations, font sizes
 const FRAME_SAMPLE_COUNT = parseInt(process.env.REELS_CHROME_FRAME_SAMPLES || '8', 10);
 
 // Veo aspect ratios for the c_fill,ar_<X> Cloudinary transform. The
@@ -416,6 +416,26 @@ function buildPrompt({ brand, product, layoutInput, concept, aspectRatio, ad_cta
     lines.push(``);
   }
 
+  lines.push(`SALIENCE FLOOR (HARD CONSTRAINT)`);
+  lines.push(`  Every readable text element MUST satisfy ALL of these. Failing any one of them makes the ad illegible at scroll speed.`);
+  lines.push(`  HOLD TIME — text must be fully visible (opacity 1.0) for a minimum duration before fading out:`);
+  lines.push(`    • Eyebrow / short headline (≤ 30 chars): ≥ 2.0s at full opacity`);
+  lines.push(`    • Subheadline / medium copy (30–80 chars): ≥ 2.5s at full opacity`);
+  lines.push(`    • Quote / body copy (80–150 chars): ≥ 3.0s at full opacity`);
+  lines.push(`    • Long quote (> 150 chars): ≥ 3.5s at full opacity`);
+  lines.push(`    • CTA on the end card: locks for the full 5.5s–8.0s window (≥ 2.5s)`);
+  lines.push(`    Flashes < 1.5s are FORBIDDEN. If a state's window can't accommodate the hold time, shrink the text or shorten the copy — never the hold.`);
+  lines.push(`  TRANSITION DURATIONS — keep fades smooth, not snappy:`);
+  lines.push(`    • fade-in:  0.5–0.8s. Never instant (< 0.3s). Never longer than 1.0s.`);
+  lines.push(`    • fade-out: 0.5–0.8s. Same bounds.`);
+  lines.push(`  MINIMUM FONT SIZES (calibrated to a ~1000×1778 canvas; scale proportionally for other aspects, never below 0.85× of these):`);
+  lines.push(`    • Headline:                  ≥ 64px`);
+  lines.push(`    • Quote / body copy:         ≥ 36px`);
+  lines.push(`    • CTA label:                 ≥ 48px`);
+  lines.push(`    • Eyebrow / attribution:     ≥ 28px`);
+  lines.push(`    • Author name / star rating: ≥ 28px`);
+  lines.push(`  SELF-CHECK before emitting: for each text element, compute (fade-in + hold + fade-out) and confirm the hold satisfies the table above. If a quote runs 100 characters but only holds 1.5s, the ad is unreadable — lengthen the hold, even if it means cutting another element to make room.`);
+  lines.push(``);
   lines.push(`ANIMATION REQUIREMENTS`);
   lines.push(`  All animations MUST complete within 8 seconds (match Veo video duration).`);
   lines.push(`  Use CSS @keyframes — no JavaScript.`);
