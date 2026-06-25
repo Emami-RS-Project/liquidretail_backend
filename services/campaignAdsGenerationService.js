@@ -1353,10 +1353,13 @@ async function runConceptDrivenExpansion({
         return { productId, payloads: [], skipped: 'empty_universe' };
       }
 
-      // 2. Director round (3 concepts)
+      // 2. Director round (3 concepts). campaignId threaded so the
+      // Director can load Campaign.creativeBrief for this specific
+      // campaign and render it as a CAMPAIGN BRIEF block in the prompt
+      // (Phase 2 of the voice/brief cascade).
       const { artifact, concepts, roundIndex, warnings: dirWarnings } =
         await director.directConceptsRound({
-          brandId, productId, platformFormat, campaignKind,
+          brandId, productId, platformFormat, campaignKind, campaignId,
           creativeIntent, seededUniverse: filtered, seedUniverseHash
         });
       if (!concepts.length) {

@@ -806,6 +806,7 @@ async function directConceptsRound({
   productId,
   platformFormat = 'meta_feed_1_1',
   campaignKind   = null,
+  campaignId     = null,    // when set, Campaign.creativeBrief is loaded + threaded into the prompt
   creativeIntent = null,
   seededUniverse,           // [{ mediaId, url, fileType, role, metadata }]
   seedUniverseHash = null,  // from seededUniverseService; persisted on the artifact
@@ -856,6 +857,30 @@ async function directConceptsRound({
   const signals = await assembleSignals({ brandId, productId, campaignKind });
   const inputSummary = { ...signals, platform_format: platformFormat };
 
+  // Phase 2 — load derived brand voice + campaign brief if present.
+  // Voice is global to the brand and threaded whenever it's been
+  // derived; brief is per-campaign and only threaded when campaignId
+  // was supplied (campaign-scoped generation). Both are optional —
+  // Director still works without them, just leans more on signals.
+  let derivedVoice = null;
+  let creativeBrief = null;
+  try {
+    const Brand = require('../models/Brand');
+    const brand = await Brand.findById(brandId).select('derivedVoice').lean();
+    derivedVoice = brand?.derivedVoice || null;
+  } catch (err) {
+    console.warn(`   ⚠️  directorRound: Brand voice load failed (${err.message}) — proceeding without`);
+  }
+  if (campaignId) {
+    try {
+      const Campaign = require('../models/Campaign');
+      const camp = await Campaign.findById(campaignId).select('creativeBrief').lean();
+      creativeBrief = camp?.creativeBrief || null;
+    } catch (err) {
+      console.warn(`   ⚠️  directorRound: Campaign brief load failed (${err.message}) — proceeding without`);
+    }
+  }
+
   // Compress universe URLs for vision-token efficiency. Same helper the
   // V2 generator uses (aiCreativeV2Helpers.compressVisionAttachments).
   const { compressVisionAttachments } = require('./aiCreativeV2Helpers');
@@ -864,7 +889,8 @@ async function directConceptsRound({
   const { system, user, visionImages } = buildPromptRound({
     inputSummary, creativeIntent, platformFormat,
     universe: compressedUniverse,
-    roundIndex, avoidList
+    roundIndex, avoidList,
+    derivedVoice, creativeBrief
   });
   const promptHash = sha256(system + '\n' + user);
   const responseSchema = buildResponseSchemaRound(seededUniverse, platformFormat);
@@ -980,8 +1006,54 @@ async function loadAvoidList(filter, maxRounds) {
   return out;
 }
 
-function buildPromptRound({ inputSummary, creativeIntent, platformFormat, universe, roundIndex, avoidList }) {
+// Renders derivedVoice + creativeBrief as compact prompt blocks. Returns
+// '' when the input is null so prompt callers can splice unconditionally.
+function renderBrandVoiceBlock(voice) {
+  if (!voice) return '';
+  const lines = [];
+  lines.push(`EXISTING BRAND VOICE (derived from ${voice.evidence_count || '?'} live ad creatives${voice.weighted ? ', performance-weighted' : ''}):`);
+  if (Array.isArray(voice.tone) && voice.tone.length)            lines.push(`  Tone: ${voice.tone.join(', ')}`);
+  if (Array.isArray(voice.value_props) && voice.value_props.length) lines.push(`  Recurring value props: ${voice.value_props.join('; ')}`);
+  if (Array.isArray(voice.hooks) && voice.hooks.length)          lines.push(`  Hook patterns the brand uses: ${voice.hooks.join(', ')}`);
+  if (Array.isArray(voice.common_phrases) && voice.common_phrases.length) {
+    lines.push(`  Recurring phrases (use sparingly to echo brand voice): ${voice.common_phrases.map(p => `"${p}"`).join(', ')}`);
+  }
+  if (Array.isArray(voice.cta_patterns) && voice.cta_patterns.length) {
+    const top = voice.cta_patterns.slice(0, 3).map(c => `"${c.text}"${c.frequency != null ? ` (${Math.round(c.frequency * 100)}%)` : ''}`).join(', ');
+    lines.push(`  CTA patterns (dominant): ${top}`);
+  }
+  if (voice.voice_summary) lines.push(`  Summary: ${voice.voice_summary}`);
+  lines.push(`  Use this voice profile to calibrate emotional_hook, copy_picks tone, and CTA wording. Where it conflicts with the operator's tagline, the operator wins; where it conflicts with the campaign brief below, the campaign brief wins.`);
+  return lines.join('\n');
+}
+
+function renderCampaignBriefBlock(brief) {
+  if (!brief) return '';
+  const lines = [];
+  lines.push(`CAMPAIGN BRIEF (the intent of THIS specific campaign — concepts must serve it):`);
+  if (brief.goal)         lines.push(`  Goal: ${brief.goal}`);
+  if (brief.pitch)        lines.push(`  Pitch: ${brief.pitch}`);
+  if (brief.focus)        lines.push(`  Dominant lever: ${brief.focus}`);
+  if (brief.cta_emphasis) lines.push(`  CTA emphasis: ${brief.cta_emphasis}`);
+  if (Array.isArray(brief.tone) && brief.tone.length) lines.push(`  Tone for THIS campaign: ${brief.tone.join(', ')}`);
+  if (brief.audience) {
+    const a = brief.audience;
+    if (a.description) lines.push(`  Audience: ${a.description}`);
+    const fragments = [];
+    if (a.ageRange) fragments.push(`age ${a.ageRange}`);
+    if (Array.isArray(a.geo) && a.geo.length) fragments.push(`geo ${a.geo.slice(0, 8).join('/')}`);
+    if (Array.isArray(a.interests) && a.interests.length) fragments.push(`interests ${a.interests.slice(0, 6).join(', ')}`);
+    if (Array.isArray(a.segments) && a.segments.length) fragments.push(`segments ${a.segments.slice(0, 4).join(', ')}`);
+    if (fragments.length) lines.push(`    (${fragments.join('; ')})`);
+  }
+  lines.push(`  Every concept you emit MUST serve the campaign goal + pitch. If a concept doesn't advance this brief, drop it for one that does.`);
+  return lines.join('\n');
+}
+
+function buildPromptRound({ inputSummary, creativeIntent, platformFormat, universe, roundIndex, avoidList, derivedVoice = null, creativeBrief = null }) {
   const formatConstraints = buildFormatConstraints(platformFormat);
+  const brandVoiceBlock   = renderBrandVoiceBlock(derivedVoice);
+  const campaignBriefBlock = renderCampaignBriefBlock(creativeBrief);
 
   // Build the universe block — the LLM uses these media_id values
   // verbatim in concept.media_picks. Roles surface so the LLM knows
@@ -1033,6 +1105,13 @@ function buildPromptRound({ inputSummary, creativeIntent, platformFormat, univer
     ``,
     formatConstraints,
     ``,
+    // PHASE 2 — voice + brief context. Splices in conditionally; both
+    // are empty strings when absent so the prompt structure stays
+    // stable. Voice → brand-global, brief → this-campaign-specific.
+    // Brief is read AFTER voice intentionally — when they disagree on
+    // tone/cta, the brief wins (it's the more specific context).
+    brandVoiceBlock ? brandVoiceBlock + '\n' : '',
+    campaignBriefBlock ? campaignBriefBlock + '\n' : '',
     avoidBlock,
     ``,
     `SEEDED MEDIA UNIVERSE (use media_id verbatim in media_picks; vision attachments below show the first ${VISION_ATTACHMENT_CAP}):`,
