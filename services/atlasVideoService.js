@@ -137,9 +137,35 @@ function buildReferenceImages({ media, product, aspectRatio, max = 7 }) {
 
 // ── Polling ───────────────────────────────────────────────────────────
 
+// Max consecutive errors (4xx fails immediately; 5xx + network errors
+// count up to this cap). With POLL_INTERVAL=5s, the cap of 6 gives
+// ~30s of "maybe transient" leeway before we give up and surface the
+// underlying Atlas error — which is far more useful to the operator
+// than 120 lines of "retrying" before a generic timeout.
+const MAX_CONSECUTIVE_ERRORS = parseInt(process.env.ATLAS_MAX_CONSECUTIVE_ERRORS, 10) || 6;
+
+function summarizeAxiosError(err) {
+  const status = err.response?.status;
+  // Atlas typically puts diagnostic detail in response.data.error or
+  // response.data.message — strip the noise (HTML pages, huge stack
+  // traces) and surface the load-bearing string. Fall back to err.message
+  // when no body is parseable.
+  const body = err.response?.data;
+  let bodyStr = null;
+  if (body) {
+    if (typeof body === 'string') bodyStr = body.slice(0, 400);
+    else if (body.error)          bodyStr = typeof body.error === 'string' ? body.error : JSON.stringify(body.error).slice(0, 400);
+    else if (body.message)        bodyStr = String(body.message).slice(0, 400);
+    else                          bodyStr = JSON.stringify(body).slice(0, 400);
+  }
+  return { status, body: bodyStr, message: err.message };
+}
+
 async function pollPrediction(predictionId) {
   const t0 = Date.now();
   let pollCount = 0;
+  let consecutiveErrors = 0;
+  let lastError = null;
   while (Date.now() - t0 < MAX_POLL_MS) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL));
     pollCount++;
@@ -149,11 +175,31 @@ async function pollPrediction(predictionId) {
         headers: { Authorization: `Bearer ${apiKey()}` },
         timeout: 30000
       });
+      consecutiveErrors = 0;   // reset on any successful HTTP response
+      lastError = null;
     } catch (err) {
-      // Transient network errors during poll — keep trying within
-      // overall MAX_POLL_MS budget. Hard failures (404 etc.) surface
-      // on the next axios attempt.
-      console.warn(`   ⚠️  atlasVideo: poll #${pollCount} transient (${err.message}) — retrying`);
+      const summary = summarizeAxiosError(err);
+      lastError = summary;
+      const status = summary.status;
+
+      // 4xx is a hard failure — bad predictionId / bad auth / etc.
+      // Retrying won't help, and the body has the real diagnosis.
+      if (status && status >= 400 && status < 500) {
+        throw new Error(`atlasVideo: poll returned ${status} (id=${predictionId}): ${summary.body || summary.message}`);
+      }
+
+      consecutiveErrors++;
+      console.warn(
+        `   ⚠️  atlasVideo: poll #${pollCount} error ${status || 'network'} ` +
+        `(${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS} consecutive): ${summary.body || summary.message}`
+      );
+
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        throw new Error(
+          `atlasVideo: ${MAX_CONSECUTIVE_ERRORS} consecutive poll failures (id=${predictionId}). ` +
+          `Last error: ${status || 'network'} ${summary.body || summary.message}`
+        );
+      }
       continue;
     }
     const data = res.data?.data || {};
@@ -172,7 +218,8 @@ async function pollPrediction(predictionId) {
     const remainingSec = Math.round((MAX_POLL_MS - (Date.now() - t0)) / 1000);
     console.log(`🎬 atlasVideo: polling ${predictionId} — status=${status} (elapsed=${elapsedSec}s, remaining=${remainingSec}s, poll #${pollCount})`);
   }
-  throw new Error(`atlasVideo: prediction timed out after ${MAX_POLL_MS / 1000}s (id=${predictionId})`);
+  const tail = lastError ? ` Last error: ${lastError.status || 'network'} ${lastError.body || lastError.message}` : '';
+  throw new Error(`atlasVideo: prediction timed out after ${MAX_POLL_MS / 1000}s (id=${predictionId}).${tail}`);
 }
 
 // ── Submission ────────────────────────────────────────────────────────
