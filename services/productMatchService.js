@@ -2190,5 +2190,6 @@ module.exports = {
   findProductMatches,         // legacy single-match path (used internally as scene-level fallback)
   findPerProductMatches,      // Phase 1.7 per-refined-product orchestrator
   findCatalogMatchByText,     // Phase 1.7 text-only catalog scorer with category scoping
-  catalogFirstMatchOneRefined // Phase 1.7 per-product catalog-first (text + visual)
+  catalogFirstMatchOneRefined, // Phase 1.7 per-product catalog-first (text + visual)
+  maybeFetchProductReviewsCached // cache-aware Gemini grounded-search reviews fetch; called by catalogProductEnrichmentService on sync
 };
