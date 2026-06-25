@@ -127,6 +127,42 @@ function buildMotionBeat(subject) {
   );
 }
 
+// Convert a text_beat object into a single natural-language sentence.
+// Avoids metadata tokens (role=…, scale=…) that Grok-style image-to-video
+// models could misread as text to render in-frame. Each beat reads as a
+// direction to a video editor: when, what size, where, what to say.
+function textBeatSentence(tb) {
+  const scaleWord = {
+    hero:   'a hero-sized',
+    large:  'a large',
+    medium: 'a medium-sized',
+    small:  'a small'
+  }[tb.scale] || 'a large';
+
+  const positionWord = {
+    upper_third:         'the upper third',
+    lower_third:         'the lower third',
+    center:              'the center',
+    center_lower:        'the lower center',
+    corner_top_left:     'the top-left corner',
+    corner_top_right:    'the top-right corner',
+    corner_bottom_left:  'the bottom-left corner',
+    corner_bottom_right: 'the bottom-right corner'
+  }[tb.position] || 'the lower third';
+
+  const roleWord = {
+    headline:    'headline',
+    subheadline: 'subheadline',
+    eyebrow:     'caption',
+    cta:         'call-to-action',
+    quote:       'quote',
+    attribution: 'attribution line',
+    brand_mark:  'brand wordmark'
+  }[tb.role] || 'overlay';
+
+  return `From ${tb.time}, show ${scaleWord} ${roleWord} in ${positionWord} reading: "${tb.text}".`;
+}
+
 function buildOverlayIntent({ concept, hasHeadline, hasCta }) {
   const proofType = concept?.social_proof_type;
   const overlayElements = [];
@@ -265,34 +301,25 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     // Grok-via-Atlas path — model renders text in-frame natively. Replace
     // the "NO TEXT" guardrail with explicit "RENDER THESE TEXT BEATS"
     // direction citing the storyboard's text_beats[] array.
+    // Single concise opening — Grok responds better to natural prose
+    // than to layered HARD CONSTRAINT blocks. The actual text directives
+    // below carry the operational content.
     lines.push(
-      `THIS VIDEO RENDERS TEXT IN-FRAME. You will overlay typographic copy on the moving footage according to the text_beats below. ` +
-      `Render each text element EXACTLY as written — no paraphrasing, no truncation, no spelling drift, no extra punctuation. ` +
-      `Use clean, legible typography that complements the brand voice. Avoid stock-looking fonts; favor a confident sans for headlines and a refined sans or humanist serif for body. ` +
-      `Place each text at the indicated position so it does NOT overlap the primary subject of the seed image.`
+      `This video renders text overlays in-frame. Render each text element exactly as written between the quote marks. ` +
+      `Position each text so it does not overlap the primary subject of the seed image. ` +
+      `Use clean legible typography — a confident sans-serif for headlines, the same or a refined serif for body. ` +
+      `Show only one main text element on screen at a time (a small eyebrow or attribution may sit alongside a single larger headline). ` +
+      `Leave a brief clean frame between sequential text elements.`
     );
 
-    lines.push(
-      `TEXT SIZE (HARD CONSTRAINT — viewers must read this at scroll speed): ` +
-      `scale=hero renders at ~10–14% of canvas height (single hero statement, often the CTA on the end card). ` +
-      `scale=large at ~7–10% (primary headlines, CTAs). ` +
-      `scale=medium at ~4–7% (subheadlines, body quotes). ` +
-      `scale=small at ~2–4% (eyebrows, attribution, brand_mark ONLY). ` +
-      `Headlines and CTAs MUST be at least "large" — never render primary copy at caption size.`
-    );
-
-    lines.push(
-      `NO OVERLAPPING TEXT (HARD CONSTRAINT): At most ONE primary text element on screen at any moment. ` +
-      `Two headlines on screen together is forbidden. The only allowed pairing is one small eyebrow / attribution / brand_mark accompanying one larger element. ` +
-      `When the text_beats below schedule sequential elements, ensure the prior text has fully cleared before the next appears — leave ~0.3s of clean frame between transitions.`
-    );
-
+    // Prose-style text directives. The dashboard test that produced
+    // clean text was using natural-language prompts, so we mirror that
+    // shape here — one sentence per beat, no metadata tokens (role=…,
+    // scale=…) that Grok could mistake for text to render.
     if (storyboard && Array.isArray(storyboard.text_beats) && storyboard.text_beats.length) {
-      const textBeatLines = storyboard.text_beats.map((tb, i) => {
-        const scaleLabel = tb.scale ? `scale=${tb.scale}` : 'scale=large';
-        return `  [${i + 1}] ${tb.time} · role=${tb.role} · position=${tb.position} · emphasis=${tb.emphasis} · ${scaleLabel} · "${tb.text}"`;
-      }).join('\n');
-      lines.push(`TEXT BEATS (render verbatim at these times + positions + scales):\n${textBeatLines}`);
+      const directives = storyboard.text_beats.map(tb => textBeatSentence(tb));
+      lines.push(`Text overlay schedule (render exactly as quoted, at these times and positions):`);
+      lines.push(directives.join(' '));
     }
 
     // Brand typography + color — Grok will use these to pick a font style
