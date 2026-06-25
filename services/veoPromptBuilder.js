@@ -164,7 +164,13 @@ function buildOverlayIntent({ concept, hasHeadline, hasCta }) {
 // section is rendered from the storyboard instead of the hardcoded
 // 3-beat template, and an explicit AUDIO line is added. When null,
 // behavior is unchanged.
-function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false, hasProductReference = false, operatorPrompt = null, storyboard = null }) {
+//
+// rendersText (default false) — when true, the target model renders text
+// in-frame natively (Grok via Atlas). The "NO TEXT" hard-constraint block
+// is replaced by an explicit "RENDER THESE TEXT BEATS" block citing the
+// storyboard's text_beats[] array. When false (Veo path, default), text
+// is forbidden in-video and the chrome+composite stages handle it.
+function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false, hasProductReference = false, operatorPrompt = null, storyboard = null, rendersText = false }) {
   const lines   = [];
   const subject = resolveSubject({ layoutInput, sourceMedia, media });
 
@@ -241,27 +247,62 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     );
   }
 
-  lines.push(buildOverlayIntent({
-    concept,
-    hasHeadline: !!(product?.title || brand?.tagline),
-    hasCta: true
-  }));
+  if (!rendersText) {
+    // Veo path — no text in-video, chrome composites overlays downstream.
+    lines.push(buildOverlayIntent({
+      concept,
+      hasHeadline: !!(product?.title || brand?.tagline),
+      hasCta: true
+    }));
 
-  lines.push(
-    `CRITICAL: DO NOT render any text, typography, logos, badges, watermarks, captions, or graphic chrome anywhere in the video. ` +
-    `The frame must be visually clean — product and scene only. ` +
-    `All text overlays, animated review quotes, headlines, CTAs, and logos are added in a separate compositing step. ` +
-    `Generating ANY text in the video itself will cause rejection.`
-  );
+    lines.push(
+      `CRITICAL: DO NOT render any text, typography, logos, badges, watermarks, captions, or graphic chrome anywhere in the video. ` +
+      `The frame must be visually clean — product and scene only. ` +
+      `All text overlays, animated review quotes, headlines, CTAs, and logos are added in a separate compositing step. ` +
+      `Generating ANY text in the video itself will cause rejection.`
+    );
+  } else {
+    // Grok-via-Atlas path — model renders text in-frame natively. Replace
+    // the "NO TEXT" guardrail with explicit "RENDER THESE TEXT BEATS"
+    // direction citing the storyboard's text_beats[] array.
+    lines.push(
+      `THIS VIDEO RENDERS TEXT IN-FRAME. You will overlay typographic copy on the moving footage according to the text_beats below. ` +
+      `Render each text element EXACTLY as written — no paraphrasing, no truncation, no spelling drift, no extra punctuation. ` +
+      `Use clean, legible typography that complements the brand voice. Avoid stock-looking fonts; favor a confident sans for headlines and a refined sans or humanist serif for body. ` +
+      `Place each text at the indicated position so it does NOT overlap the primary subject of the seed image.`
+    );
+
+    if (storyboard && Array.isArray(storyboard.text_beats) && storyboard.text_beats.length) {
+      const textBeatLines = storyboard.text_beats.map((tb, i) => {
+        return `  [${i + 1}] ${tb.time} · role=${tb.role} · position=${tb.position} · emphasis=${tb.emphasis} · "${tb.text}"`;
+      }).join('\n');
+      lines.push(`TEXT BEATS (render verbatim at these times + positions):\n${textBeatLines}`);
+    }
+
+    // Brand typography + color — Grok will use these to pick a font style
+    // that doesn't fight the brand.
+    if (brand?.primaryColor || brand?.fontFamily) {
+      const typoBits = [];
+      if (brand.fontFamily)   typoBits.push(`brand fontFamily preference: ${brand.fontFamily}`);
+      if (brand.primaryColor) typoBits.push(`brand primary color (use for accent/CTA only): ${brand.primaryColor}`);
+      lines.push(`BRAND TYPOGRAPHY: ${typoBits.join('; ')}.`);
+    }
+
+    lines.push(
+      `LOGOS / WATERMARKS: do NOT render any logos, badges, watermarks, or trademarks the brand hasn't authored. ` +
+      `If a brand_mark text_beat is provided, render it as a clean wordmark (text only, no fake logo glyphs).`
+    );
+  }
 
   // When the seed image carries burned-in text (caption, sticker, watermark
-  // from a source post), Veo's image-to-video mode will faithfully animate
-  // those overlays into the output — which we then can't remove. Tell Veo
-  // explicitly to ignore them and recompose the scene without the overlays.
+  // from a source post), the video model's image-to-video mode will
+  // faithfully animate those overlays into the output — which fights
+  // our text_beats choreography. Tell the model explicitly to ignore
+  // them and recompose the scene without the burned-in overlays.
   if (seedHasText) {
     lines.push(
       `The reference image contains text overlays / captions / stickers / watermarks burned into the source frame. ` +
-      `IGNORE all visible text on the reference. Recompose the scene as if those overlays weren't there — clean product and subject only, no text artifacts carried through.`
+      `IGNORE all visible text on the reference. Recompose the scene as if those overlays weren't there — only the text_beats above (or none, on the Veo path) should appear.`
     );
   }
 

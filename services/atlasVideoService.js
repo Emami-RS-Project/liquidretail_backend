@@ -246,6 +246,26 @@ async function generateForAd({ ad, operatorPrompt = null }) {
   const lpInput    = layoutInput?.input || null;
   const lpSrcMedia = lpInput?.source_media || null;
   const subject    = resolveSubject({ layoutInput: lpInput, sourceMedia: lpSrcMedia, media });
+
+  // Assemble copy strings the storyboard generator + prompt builder
+  // need to choreograph in-frame text. Priority order:
+  //   1. ad.copy (cached at render time — present on regens)
+  //   2. layoutInput.copy + layoutInput.social_proof (canonical source)
+  //   3. concept.copy_picks (V2 concept-driven path)
+  //   4. brand defaults (tagline, name)
+  const layoutCopy = lpInput?.copy || {};
+  const layoutProof = lpInput?.social_proof || {};
+  const conceptCopy = concept?.copy_picks || {};
+  const adCopy = ad.copy || {};
+  const copy = {
+    headline:    adCopy.headline    || layoutCopy.headline    || layoutCopy.headline_main || conceptCopy.headline    || brand?.tagline || product?.title || null,
+    subheadline: adCopy.subheadline || layoutCopy.subheadline || conceptCopy.subheadline || null,
+    eyebrow:     layoutCopy.eyebrow || layoutCopy.headline_lead || conceptCopy.eyebrow || null,
+    cta_text:    adCopy.cta_text    || ad.ctaText || layoutCopy.cta_text || conceptCopy.cta || 'Shop Now',
+    primary_quote: layoutProof?.primary_quote || null,
+    brand_name:  brand?.name || null
+  };
+
   const storyboard = await generateStoryboard({
     concept, brand, product,
     layoutInput:  lpInput,
@@ -254,15 +274,15 @@ async function generateForAd({ ad, operatorPrompt = null }) {
     aspectRatio,
     operatorPrompt,
     brandId:   media.brandId,
-    productId: ad.productId || null
+    productId: ad.productId || null,
+    rendersText: caps.rendersText,
+    copy
   });
 
-  // Reuse the same prompt builder. The "NO TEXT" guardrail block is
-  // intentionally still present — Grok handles text well, but the
-  // prompt's text-related instructions get reframed by Grok as "don't
-  // overlay logos/badges/watermarks", which is still what we want.
-  // The storyboard, camera, anatomy, and product-fidelity blocks are
-  // the load-bearing pieces and they're all provider-agnostic.
+  // Reuse the same prompt builder. rendersText flips the text-handling
+  // block from "NO TEXT IN VIDEO" (Veo) to "RENDER THESE TEXT BEATS"
+  // (Grok). The storyboard, camera, anatomy, and product-fidelity
+  // blocks are the load-bearing pieces and they're provider-agnostic.
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
   const prompt = buildVeoPrompt({
     concept, brand, product, media,
@@ -272,6 +292,7 @@ async function generateForAd({ ad, operatorPrompt = null }) {
     seedHasText,
     hasProductReference: !!product?.imageUrl,
     operatorPrompt,
+    rendersText: caps.rendersText,
     storyboard
   });
 
