@@ -272,11 +272,27 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
       `Place each text at the indicated position so it does NOT overlap the primary subject of the seed image.`
     );
 
+    lines.push(
+      `TEXT SIZE (HARD CONSTRAINT — viewers must read this at scroll speed): ` +
+      `scale=hero renders at ~10–14% of canvas height (single hero statement, often the CTA on the end card). ` +
+      `scale=large at ~7–10% (primary headlines, CTAs). ` +
+      `scale=medium at ~4–7% (subheadlines, body quotes). ` +
+      `scale=small at ~2–4% (eyebrows, attribution, brand_mark ONLY). ` +
+      `Headlines and CTAs MUST be at least "large" — never render primary copy at caption size.`
+    );
+
+    lines.push(
+      `NO OVERLAPPING TEXT (HARD CONSTRAINT): At most ONE primary text element on screen at any moment. ` +
+      `Two headlines on screen together is forbidden. The only allowed pairing is one small eyebrow / attribution / brand_mark accompanying one larger element. ` +
+      `When the text_beats below schedule sequential elements, ensure the prior text has fully cleared before the next appears — leave ~0.3s of clean frame between transitions.`
+    );
+
     if (storyboard && Array.isArray(storyboard.text_beats) && storyboard.text_beats.length) {
       const textBeatLines = storyboard.text_beats.map((tb, i) => {
-        return `  [${i + 1}] ${tb.time} · role=${tb.role} · position=${tb.position} · emphasis=${tb.emphasis} · "${tb.text}"`;
+        const scaleLabel = tb.scale ? `scale=${tb.scale}` : 'scale=large';
+        return `  [${i + 1}] ${tb.time} · role=${tb.role} · position=${tb.position} · emphasis=${tb.emphasis} · ${scaleLabel} · "${tb.text}"`;
       }).join('\n');
-      lines.push(`TEXT BEATS (render verbatim at these times + positions):\n${textBeatLines}`);
+      lines.push(`TEXT BEATS (render verbatim at these times + positions + scales):\n${textBeatLines}`);
     }
 
     // Brand typography + color — Grok will use these to pick a font style

@@ -101,18 +101,19 @@ const RESPONSE_SCHEMA_WITH_TEXT = {
       text_beats: {
         type:     'array',
         minItems: 1,
-        maxItems: 6,
-        description: 'Choreographed text overlays the video model will RENDER IN-FRAME. Pick from the copy strings supplied in the user prompt (headline, subheadline, eyebrow, CTA, primary quote, attribution). Do NOT invent text — use only the strings provided.',
+        maxItems: 4,
+        description: 'Choreographed text overlays the video model will RENDER IN-FRAME. Pick from the copy strings supplied in the user prompt (headline, subheadline, eyebrow, CTA, primary quote, attribution). Do NOT invent text — use only the strings provided. Cap at 4 beats: density beyond that turns every ad into a poster wall. Pick the strongest 2–3 text moments and let them breathe.',
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['time', 'role', 'text', 'position', 'emphasis'],
+          required: ['time', 'role', 'text', 'position', 'emphasis', 'scale'],
           properties: {
             time:     { type: 'string', description: 'Time range "0:00–0:03". Must fall within 0:00–0:08.' },
             role:     { type: 'string', enum: ['headline', 'subheadline', 'eyebrow', 'cta', 'quote', 'attribution', 'brand_mark'] },
             text:     { type: 'string', description: 'The exact copy to render. Must match a string from the supplied copy_picks verbatim — no paraphrasing, no truncation.' },
             position: { type: 'string', enum: ['lower_third', 'upper_third', 'center', 'center_lower', 'corner_top_left', 'corner_top_right', 'corner_bottom_left', 'corner_bottom_right'] },
-            emphasis: { type: 'string', enum: ['primary', 'secondary', 'caption'] }
+            emphasis: { type: 'string', enum: ['primary', 'secondary', 'caption'] },
+            scale:    { type: 'string', enum: ['hero', 'large', 'medium', 'small'], description: 'On-screen size. hero ≈ 10–14% of canvas height (single statement CTA / headline anchor). large ≈ 7–10% (primary headlines, CTAs). medium ≈ 4–7% (subheadlines, body quotes). small ≈ 2–4% (eyebrows, attribution, brand_mark).' }
           }
         }
       }
@@ -138,9 +139,25 @@ function buildSystemPrompt({ rendersText = false } = {}) {
       '- Use ONLY the copy strings supplied in the user prompt — headline, subheadline, eyebrow, CTA, primary quote, attribution. Do NOT invent text. Do NOT paraphrase. Do NOT truncate.',
       '- Pick the strings that match the concept\'s emphasis. Social-proof concepts lead with the quote + attribution. Urgency concepts lead with the CTA. Brand-led concepts lead with headline + brand mark.',
       '- Lay out a story arc across the 8 seconds — typical pattern: HOOK (eyebrow or headline early), VALUE (subheadline or quote in the middle), CTA (call-to-action lands in the last 2–3 seconds and holds to the end). Adapt to the concept; don\'t force the template.',
-      '- Each text_beat declares: time range, role, exact text, on-screen position, emphasis. Pick positions that don\'t collide with the primary subject in the seed image — lean on lower_third / upper_third / corners for body copy; reserve center for big hero moments only.',
-      '- Hold time per text: short copy (≤ 30 chars) needs ≥ 2.0s on screen; medium (30–80 chars) needs ≥ 2.5s; long quotes (80–150 chars) need ≥ 3.0s. Don\'t flash text faster than viewers can read.',
+      '- Each text_beat declares: time range, role, exact text, on-screen position, emphasis, scale.',
+      '- Pick positions that don\'t collide with the primary subject in the seed image — lean on lower_third / upper_third / corners for body copy; reserve center for big hero moments only.',
+      '',
+      'NO OVERLAPPING TEXT (HARD RULE):',
+      '- At most ONE primary text element on screen at any given moment. The ONLY allowed simultaneous combo is an eyebrow (small) PAIRED with one headline OR subheadline directly above/below it. Anything else must be sequential — one text fades, then the next appears.',
+      '- Never schedule two text_beats with overlapping time ranges UNLESS one is an eyebrow/attribution/brand_mark (scale=small) accompanying a single larger element. Two headlines on screen together = automatic rejection.',
+      '- Do not repeat the same text twice across multiple beats — pick where the line lands once and let it breathe.',
+      '',
+      'TEXT SIZE (HARD RULE — viewers need to actually READ this):',
+      '- scale=hero    → ~10–14% of canvas height. Use for the single most important statement (CTA on the end card, or one headline anchor).',
+      '- scale=large   → ~7–10%. Primary headlines, CTAs that aren\'t the hero anchor.',
+      '- scale=medium  → ~4–7%. Subheadlines, body-length quotes.',
+      '- scale=small   → ~2–4%. Eyebrows, attribution, brand_mark only.',
+      '- NEVER size a headline or CTA below "large". Caption-scale primary text is unreadable at scroll speed.',
+      '',
+      'TIMING (HARD RULE):',
+      '- Hold time per text: short copy (≤ 30 chars) needs ≥ 2.0s on screen; medium (30–80 chars) needs ≥ 2.5s; long quotes (80–150 chars) needs ≥ 3.0s. Don\'t flash text faster than viewers can read.',
       '- The CTA text_beat MUST end at 0:08 (or as close as possible) so the final frame holds the CTA — that\'s the clickthrough anchor.',
+      '- Allow ~0.3s gap between sequential text_beats so the prior text clearly clears before the next appears.',
       '',
       'OUTPUT a JSON object matching the provided schema.'
     ].join('\n');
