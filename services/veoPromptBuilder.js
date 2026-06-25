@@ -301,12 +301,29 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     // Grok-via-Atlas path — model renders text in-frame natively. Replace
     // the "NO TEXT" guardrail with explicit "RENDER THESE TEXT BEATS"
     // direction citing the storyboard's text_beats[] array.
-    // Single concise opening — Grok responds better to natural prose
-    // than to layered HARD CONSTRAINT blocks. The actual text directives
-    // below carry the operational content.
+    // Two distinct rendering tasks: (1) overlay typographic text on the
+    // moving footage, exactly as quoted; (2) keep the product, its label,
+    // and the scene composition untouched. Operators have reported text
+    // garbling — letters substituted, missing, or duplicated — when the
+    // verbatim instruction wasn't strong enough.
     lines.push(
-      `This video renders text overlays in-frame. Render each text element exactly as written between the quote marks. ` +
-      `Position each text so it does not overlap the primary subject of the seed image. ` +
+      `TEXT RENDERING RULE — render every overlay string EXACTLY as quoted, character-for-character. ` +
+      `Copy each letter, space, apostrophe, and punctuation mark precisely as it appears between the quotes. ` +
+      `Do not add letters, do not drop letters, do not substitute characters, do not stylize letterforms in ways that distort spelling. ` +
+      `English ASCII letters and standard punctuation only. ` +
+      `If you cannot render a string accurately, OMIT it rather than approximate.`
+    );
+
+    lines.push(
+      `PRODUCT + LABEL PRESERVATION — the product in the seed and catalog reference images is the actual catalog SKU. ` +
+      `Do NOT modify the product's packaging, label, color, shape, or proportions. ` +
+      `Do NOT redesign the label text already printed on the product. ` +
+      `Do NOT add new text, logos, badges, or graphics onto the product itself. ` +
+      `The overlay text below is rendered OVER the moving footage as a separate layer, not on the product label.`
+    );
+
+    lines.push(
+      `Position each overlay so it does not overlap the product or the primary subject in the seed. ` +
       `Use clean legible typography — a confident sans-serif for headlines, the same or a refined serif for body. ` +
       `Show only one main text element on screen at a time (a small eyebrow or attribution may sit alongside a single larger headline). ` +
       `Leave a brief clean frame between sequential text elements.`
@@ -318,7 +335,7 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     // scale=…) that Grok could mistake for text to render.
     if (storyboard && Array.isArray(storyboard.text_beats) && storyboard.text_beats.length) {
       const directives = storyboard.text_beats.map(tb => textBeatSentence(tb));
-      lines.push(`Text overlay schedule (render exactly as quoted, at these times and positions):`);
+      lines.push(`Text overlay schedule (render each string EXACTLY as quoted, character-for-character):`);
       lines.push(directives.join(' '));
     }
 
@@ -361,8 +378,8 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
   if (rendersText) {
     lines.push(`PHYSICAL ACCURACY: render people, hands, and faces anatomically correct — 5 fingers per hand, 2 symmetric eyes, natural proportions. Preserve the seed person's identity (face, hair, skin tone) across the full shot.`);
     lines.push(hasProductReference
-      ? `PRODUCT FIDELITY: a catalog reference image is attached. Match its shape, color, label text, and packaging exactly throughout the 8 seconds — no variants, no relabeling, no color drift.`
-      : `PRODUCT FIDELITY: preserve the product in the seed image exactly — shape, color, label text, packaging — across the full 8 seconds. No variants, no relabeling, no color drift.`);
+      ? `PRODUCT FIDELITY (CRITICAL): the catalog reference image is the ground truth for this product. Match its shape, color, label text, and packaging EXACTLY across every frame. Do NOT redraw or stylize the label. Do NOT change the product name or any printed text on the packaging. Do NOT shift colors, swap variants, or substitute a similar-looking product. The product on screen at 0:08 must be visually identical to the product on screen at 0:00.`
+      : `PRODUCT FIDELITY (CRITICAL): preserve the product in the seed image exactly — shape, color, label text, packaging — across every frame. Do NOT redraw or stylize the label. Do NOT change the product name or any printed text on the packaging. Do NOT shift colors, swap variants, or substitute a similar-looking product. The product on screen at 0:08 must be visually identical to the product on screen at 0:00.`);
   } else {
     lines.push(
       `PHYSICAL ACCURACY: Every person, hand, or face rendered MUST be anatomically correct. ` +
