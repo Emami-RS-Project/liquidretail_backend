@@ -127,10 +127,22 @@ function buildMotionBeat(subject) {
   );
 }
 
-// Convert a text_beat object into a single natural-language sentence.
-// Avoids metadata tokens (role=…, scale=…) that Grok-style image-to-video
-// models could misread as text to render in-frame. Each beat reads as a
-// direction to a video editor: when, what size, where, what to say.
+// Parse a storyboard time range string ("0:00–0:03" or "0:00-0:03") into
+// integer second boundaries. Returns null on unparseable input so the
+// merge loop can fall through to a default placement.
+function parseTimeRangeSecs(time) {
+  const m = String(time || '').match(/(\d+):(\d+)\s*[–-]\s*(\d+):(\d+)/);
+  if (!m) return null;
+  return {
+    start: parseInt(m[1], 10) * 60 + parseInt(m[2], 10),
+    end:   parseInt(m[3], 10) * 60 + parseInt(m[4], 10)
+  };
+}
+
+// Convert a text_beat object into a single in-script directive sentence —
+// embedded inside a per-state script paragraph, not a standalone bullet.
+// This avoids the metadata-bullet format (role=…, scale=…) that Grok
+// could misread as text to render in-frame.
 function textBeatSentence(tb) {
   const scaleWord = {
     hero:   'a hero-sized',
@@ -160,7 +172,46 @@ function textBeatSentence(tb) {
     brand_mark:  'brand wordmark'
   }[tb.role] || 'overlay';
 
-  return `From ${tb.time}, show ${scaleWord} ${roleWord} in ${positionWord} reading: "${tb.text}".`;
+  return `${scaleWord} ${roleWord} in ${positionWord} reading: "${tb.text}"`;
+}
+
+// Build a per-state script paragraph: walk the motion beats as the
+// timeline skeleton, and for each motion beat find any text_beats whose
+// time range overlaps. Compose a brief-style paragraph integrating
+// visual/motion + on-screen text + audio per state.
+//
+// Mirrors the structure of the Camelback DR brief that produced
+// acceptable Grok output — Grok handles continuous narrative far
+// better than metadata-bullet formats.
+function buildScriptNarrative(storyboard) {
+  if (!storyboard || !Array.isArray(storyboard.beats) || !storyboard.beats.length) return '';
+  const motionBeats = storyboard.beats;
+  const textBeats   = Array.isArray(storyboard.text_beats) ? storyboard.text_beats : [];
+
+  const lines = ['THE 8-SECOND SCRIPT (per-state choreography — visual, on-screen text, and audio are interleaved by time):'];
+  motionBeats.forEach((beat) => {
+    const range = parseTimeRangeSecs(beat.time);
+    const overlapping = textBeats.filter(tb => {
+      if (!range) return false;
+      const tbRange = parseTimeRangeSecs(tb.time);
+      return tbRange && tbRange.start < range.end && tbRange.end > range.start;
+    });
+
+    lines.push('');
+    lines.push(`${beat.time}`);
+    lines.push(`Visual / Motion: ${beat.description}`);
+    if (overlapping.length) {
+      const textParts = overlapping.map(tb => {
+        const tbRange = parseTimeRangeSecs(tb.time);
+        const window = tbRange ? ` (visible ${tb.time})` : '';
+        return `${textBeatSentence(tb)}${window}`;
+      });
+      lines.push(`On-screen text: ${textParts.join('; then ')}. Render each quoted string EXACTLY as written, character-for-character.`);
+    } else {
+      lines.push('On-screen text: none in this state — let the visual carry it.');
+    }
+  });
+  return lines.join('\n');
 }
 
 function buildOverlayIntent({ concept, hasHeadline, hasCta }) {
@@ -301,43 +352,30 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     // Grok-via-Atlas path — model renders text in-frame natively. Replace
     // the "NO TEXT" guardrail with explicit "RENDER THESE TEXT BEATS"
     // direction citing the storyboard's text_beats[] array.
-    // Two distinct rendering tasks: (1) overlay typographic text on the
-    // moving footage, exactly as quoted; (2) keep the product, its label,
-    // and the scene composition untouched. Operators have reported text
-    // garbling — letters substituted, missing, or duplicated — when the
-    // verbatim instruction wasn't strong enough.
-    lines.push(
-      `TEXT RENDERING RULE — render every overlay string EXACTLY as quoted, character-for-character. ` +
-      `Copy each letter, space, apostrophe, and punctuation mark precisely as it appears between the quotes. ` +
-      `Do not add letters, do not drop letters, do not substitute characters, do not stylize letterforms in ways that distort spelling. ` +
-      `English ASCII letters and standard punctuation only. ` +
-      `If you cannot render a string accurately, OMIT it rather than approximate.`
-    );
-
-    lines.push(
-      `PRODUCT + LABEL PRESERVATION — the product in the seed and catalog reference images is the actual catalog SKU. ` +
-      `Do NOT modify the product's packaging, label, color, shape, or proportions. ` +
-      `Do NOT redesign the label text already printed on the product. ` +
-      `Do NOT add new text, logos, badges, or graphics onto the product itself. ` +
-      `The overlay text below is rendered OVER the moving footage as a separate layer, not on the product label.`
-    );
-
-    lines.push(
-      `Position each overlay so it does not overlap the product or the primary subject in the seed. ` +
-      `Use clean legible typography — a confident sans-serif for headlines, the same or a refined serif for body. ` +
-      `Show only one main text element on screen at a time (a small eyebrow or attribution may sit alongside a single larger headline). ` +
-      `Leave a brief clean frame between sequential text elements.`
-    );
-
-    // Prose-style text directives. The dashboard test that produced
-    // clean text was using natural-language prompts, so we mirror that
-    // shape here — one sentence per beat, no metadata tokens (role=…,
-    // scale=…) that Grok could mistake for text to render.
-    if (storyboard && Array.isArray(storyboard.text_beats) && storyboard.text_beats.length) {
-      const directives = storyboard.text_beats.map(tb => textBeatSentence(tb));
-      lines.push(`Text overlay schedule (render each string EXACTLY as quoted, character-for-character):`);
-      lines.push(directives.join(' '));
+    // Per-state script narrative — mirrors the structure of the
+    // Camelback DR brief that produced acceptable Grok output. Each
+    // state paragraph integrates Visual / Motion + On-screen text +
+    // (later) Audio in continuous prose. Grok reads this like a
+    // director would; the metadata-bullet formats we tried earlier
+    // ("role=cta · scale=hero · position=lower_third") made Grok
+    // mangle text because the labels competed with the actual copy.
+    if (storyboard) {
+      const scriptNarrative = buildScriptNarrative(storyboard);
+      if (scriptNarrative) lines.push(scriptNarrative);
     }
+
+    // Concise reminders after the script. Three sentences, not three
+    // hard-constraint blocks — keeps the prompt narrative-shaped end-
+    // to-end.
+    lines.push(
+      `Render every quoted overlay string EXACTLY character-for-character — no substitutions, no dropped letters, no stylized letterforms that distort spelling. ASCII letters and standard punctuation only; if you cannot render a string accurately, OMIT it.`
+    );
+    lines.push(
+      `Keep the product itself untouched — same shape, color, label text, packaging across all 8 seconds. Do NOT redesign printed packaging text or add graphics onto the product. Overlay text is a separate visual layer rendered over the moving footage.`
+    );
+    lines.push(
+      `Use clean legible typography — a confident sans-serif for headlines, the same or a refined humanist serif for body copy. Position every overlay so it does not collide with the primary subject.`
+    );
 
     // Brand typography + color — Grok will use these to pick a font style
     // that doesn't fight the brand.

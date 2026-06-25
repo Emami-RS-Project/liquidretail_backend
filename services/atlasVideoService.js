@@ -48,22 +48,20 @@ function enabled() {
 //                       atlas output IS the final ad
 //   maxReferenceImages → caps how many image_urls we pack into the request
 //   paramShape         → which body fields Atlas expects for this provider
-// rendersText is FALSE for Grok because empirically the text renders
-// are mangled — letters substituted, characters dropped, label text on
-// the product itself rewritten. The Camelback DR brief that produced
-// acceptable output explicitly composites text in post; we follow the
-// same pattern: Grok generates motion + audio only, chrome HTML +
-// Puppeteer + ffmpeg composite the overlay text on top. This reuses
-// the same multi-state HOOK → PROOF → END CARD choreography we already
-// built for Veo. If a future text-capable image-to-video model lands
-// (Sora, future Grok versions), flip the caps + the text_beats infra
-// is still in place — no code changes needed beyond this table.
+// rendersText: true for Grok — but ONLY works when the prompt is a
+// coherent narrative script (HOOK → PROOF → END CARD choreography
+// with copy + camera + audio inline), not a metadata-bulleted config.
+// Grok reads natural prose like a director's brief and renders text
+// reliably when the instructions are continuous narrative. Earlier
+// attempts at structured/labeled formats (role=cta · position=… ·
+// scale=…) made Grok mangle the text because the metadata tokens
+// competed with the actual copy strings.
 const MODEL_CAPS = {
   'xai/grok-imagine-video/reference-to-video': {
     minDuration: 1, maxDuration: 10,
     resolutions: ['480p', '720p'],
     maxReferenceImages: 7,
-    rendersText: false,
+    rendersText: true,
     paramShape: 'grok'
   },
   'google/veo3.1/image-to-video': {
