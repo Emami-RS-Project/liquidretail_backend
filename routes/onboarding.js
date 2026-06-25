@@ -199,15 +199,29 @@ router.post('/dispatch-syncs', requireAuth, express.json(), async (req, res) => 
     // a sync against a pending cred is a harmless no-op rather than
     // a dropped intent.
     const [igCred, metaCred, googleCred] = await Promise.all([
-      IntegrationCredential.findOne({ brandId, type: 'instagram',  status: { $in: ['active', 'pending'] } }).select('_id status').lean(),
+      IntegrationCredential.findOne({ brandId, type: 'instagram',  status: { $in: ['active', 'pending'] } }).select('_id status lastCatalogSyncAt lastPostsSyncAt').lean(),
       IntegrationCredential.findOne({ brandId, type: 'meta-ads',   status: { $in: ['active', 'pending'] } }).select('_id status').lean(),
       IntegrationCredential.findOne({ brandId, type: 'google-ads', status: { $in: ['active', 'pending'] } }).select('_id status').lean()
     ]);
     console.log(`🚦 dispatch-syncs creds: ig=${igCred ? igCred.status : 'none'} meta=${metaCred ? metaCred.status : 'none'} google=${googleCred ? googleCred.status : 'none'}`);
 
+    // Debounce: integrations.js IG picker `selection` already auto-fires
+    // syncCatalog + syncPosts via setImmediate. When the operator
+    // advances through onboarding right after the picker, dispatch-syncs
+    // fires the same syncs again seconds later — which doubles SerpAPI
+    // + Gemini spend on catalog enrichment for no benefit. Skip if a
+    // sync of the same kind has run within the last 5 minutes.
+    const RECENT_SYNC_WINDOW_MS = 5 * 60 * 1000;
+    function isFresh(timestamp) {
+      if (!timestamp) return false;
+      return (Date.now() - new Date(timestamp).getTime()) < RECENT_SYNC_WINDOW_MS;
+    }
+    const catalogFresh = isFresh(igCred?.lastCatalogSyncAt);
+    const postsFresh   = isFresh(igCred?.lastPostsSyncAt);
+
     const dispatched = [];
-    if (igCred) {
-      dispatched.push('catalog', 'posts');
+    if (igCred && !catalogFresh) {
+      dispatched.push('catalog');
       setImmediate(async () => {
         try {
           const { syncCatalog } = require('../services/catalogSyncService');
@@ -223,6 +237,11 @@ router.post('/dispatch-syncs', requireAuth, express.json(), async (req, res) => 
           await rematchAfterCatalogDetect({ brandId: String(brandId) });
         } catch (err) { console.warn(`⚠️  rematch-after-catalog failed: ${err.message}`); }
       });
+    } else if (igCred && catalogFresh) {
+      console.log(`🚦 dispatch-syncs: catalog skipped — last sync ${Math.round((Date.now() - new Date(igCred.lastCatalogSyncAt).getTime()) / 1000)}s ago (debounced)`);
+    }
+    if (igCred && !postsFresh) {
+      dispatched.push('posts');
       setImmediate(async () => {
         try {
           const { syncPosts } = require('../services/postSyncService');
@@ -230,6 +249,8 @@ router.post('/dispatch-syncs', requireAuth, express.json(), async (req, res) => 
           console.log(`📸 dispatched post sync: ok=${r.ok} ingested=${r.ingested || 0}`);
         } catch (err) { console.warn(`⚠️  dispatched post sync failed: ${err.message}`); }
       });
+    } else if (igCred && postsFresh) {
+      console.log(`🚦 dispatch-syncs: posts skipped — last sync ${Math.round((Date.now() - new Date(igCred.lastPostsSyncAt).getTime()) / 1000)}s ago (debounced)`);
     }
     if (metaCred) {
       dispatched.push('meta-campaigns');
