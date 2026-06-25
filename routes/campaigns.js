@@ -949,6 +949,34 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// PATCH /api/campaigns/:id/brief
+// Body: { brief: { ...overrides } | null }
+// → { ok, brief }
+//
+// Operator override of the derived creative brief. Set to null to clear
+// (re-derive on next sync); set to an object to override the AI-derived
+// values. Stamps briefDerivedAt to now so the auto-refresh on sync
+// treats the override as fresh.
+router.patch('/:id/brief', express.json(), async (req, res) => {
+  try {
+    const campaign = await Campaign.findOne(tenantFilter(req, { _id: req.params.id }))
+      .select('_id creativeBrief briefDerivedAt');
+    if (!campaign) return res.status(404).json({ error: 'campaign not found' });
+
+    const incoming = req.body?.brief;
+    if (incoming !== null && (typeof incoming !== 'object' || Array.isArray(incoming))) {
+      return res.status(400).json({ error: 'brief must be an object or null' });
+    }
+    campaign.creativeBrief  = incoming;
+    campaign.briefDerivedAt = incoming === null ? null : new Date();
+    await campaign.save();
+    res.json({ ok: true, brief: campaign.creativeBrief, briefDerivedAt: campaign.briefDerivedAt });
+  } catch (err) {
+    console.error(`❌ PATCH /api/campaigns/:id/brief: ${err.message}\n${err.stack || ''}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/campaigns/:id/derive-brief?force=true
 // → { ok, brief, elapsedMs } | { skipped, reason }
 //

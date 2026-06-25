@@ -232,6 +232,32 @@ router.post('/:id/refresh-enrichment', async (req, res) => {
   }
 });
 
+// PATCH /api/brand/:id/voice
+// Body: { voice: { ...overrides } }
+// → { ok, voice }
+//
+// Operator override of the derived voice profile. Replaces Brand.derivedVoice
+// with the provided object and stamps a fresh derivedVoiceAt so the
+// auto-refresh sweep treats it as recent. Use null to clear and re-derive.
+router.patch('/:id/voice', express.json(), async (req, res) => {
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).select('_id derivedVoice');
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+
+    const incoming = req.body?.voice;
+    if (incoming !== null && (typeof incoming !== 'object' || Array.isArray(incoming))) {
+      return res.status(400).json({ error: 'voice must be an object or null' });
+    }
+    brand.derivedVoice   = incoming;
+    brand.derivedVoiceAt = incoming === null ? null : new Date();
+    await brand.save();
+    res.json({ ok: true, voice: brand.derivedVoice, derivedVoiceAt: brand.derivedVoiceAt });
+  } catch (err) {
+    console.error(`❌ PATCH /api/brand/:id/voice: ${err.message}\n${err.stack || ''}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/brand/:id/derive-voice?force=true
 // → { ok, voice, evidenceCount, elapsedMs } | { skipped, reason }
 //
