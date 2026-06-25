@@ -310,54 +310,92 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     );
   }
 
-  // When the seed image carries burned-in text (caption, sticker, watermark
-  // from a source post), the video model's image-to-video mode will
-  // faithfully animate those overlays into the output — which fights
-  // our text_beats choreography. Tell the model explicitly to ignore
-  // them and recompose the scene without the burned-in overlays.
+  // Seed-burned-text guard. Veo (rendersText=false) needs the full
+  // explanation because compositing happens downstream and any baked-in
+  // text would conflict with the chrome layer. Grok (rendersText=true)
+  // just needs a one-liner — we're already explicitly telling it what
+  // text to render via text_beats, so "ignore burn-ins" is enough.
   if (seedHasText) {
-    lines.push(
-      `The reference image contains text overlays / captions / stickers / watermarks burned into the source frame. ` +
-      `IGNORE all visible text on the reference. Recompose the scene as if those overlays weren't there — only the text_beats above (or none, on the Veo path) should appear.`
-    );
+    if (rendersText) {
+      lines.push(`Ignore any text/captions/watermarks baked into the reference image — render only the TEXT BEATS listed above.`);
+    } else {
+      lines.push(
+        `The reference image contains text overlays / captions / stickers / watermarks burned into the source frame. ` +
+        `IGNORE all visible text on the reference. Recompose the scene as if those overlays weren't there — only the text_beats above (or none, on the Veo path) should appear.`
+      );
+    }
   }
 
-  // Physical accuracy — Veo will silently produce malformed hands, extra
-  // fingers, asymmetric eyes, and warped faces unless explicitly steered.
-  // Especially critical for image-to-video Track 2 where the seed already
-  // shows a person/hand and we want their natural anatomy preserved.
-  lines.push(
-    `PHYSICAL ACCURACY: Every person, hand, or face rendered MUST be anatomically correct. ` +
-    `Hands have exactly 5 fingers with natural length and joint placement (no extra digits, no fused fingers, no impossible bends). ` +
-    `Faces have 2 symmetric eyes with matching color and size, natural skin texture, normal tooth count, no warped features. ` +
-    `Body proportions follow real human anatomy — no extra limbs, no impossible angles. ` +
-    `If the reference image shows a person, preserve THEIR face, hair, skin tone, and identity throughout — do not morph them into a different person mid-shot.`
-  );
-
-  // Product fidelity — image-to-video should preserve the seed product
-  // exactly, but Veo occasionally "reinterprets" labels or packaging on
-  // the way to motion. When a separate product reference image is
-  // attached (referenceImages array), point Veo to it explicitly as
-  // the ground-truth for the product's appearance.
-  if (hasProductReference) {
-    lines.push(
-      `PRODUCT FIDELITY: A separate REFERENCE IMAGE of the actual catalog product is attached. ` +
-      `Treat that reference as the ABSOLUTE source of truth for the product's shape, color, label text, ` +
-      `packaging, and proportions — every frame of the video must show a product matching that reference exactly. ` +
-      `If the primary scene image and the reference image disagree on any product detail (label position, ` +
-      `color shade, bottle shape, etc.), the REFERENCE image wins. Do NOT reinterpret, do NOT shift colors, ` +
-      `do NOT generate a similar-but-different product variant — render exactly what the reference shows.`
-    );
+  // Physical accuracy + product fidelity. Compressed on the rendersText
+  // path because (a) Grok respects anatomy without the long lecture
+  // Veo needs, (b) product fidelity is enforced via the catalog reference
+  // image in image_urls[], not via the prompt text, and (c) Grok has a
+  // 4096-char prompt cap — we can't afford the full Veo-flavored block.
+  if (rendersText) {
+    lines.push(`PHYSICAL ACCURACY: render people, hands, and faces anatomically correct — 5 fingers per hand, 2 symmetric eyes, natural proportions. Preserve the seed person's identity (face, hair, skin tone) across the full shot.`);
+    lines.push(hasProductReference
+      ? `PRODUCT FIDELITY: a catalog reference image is attached. Match its shape, color, label text, and packaging exactly throughout the 8 seconds — no variants, no relabeling, no color drift.`
+      : `PRODUCT FIDELITY: preserve the product in the seed image exactly — shape, color, label text, packaging — across the full 8 seconds. No variants, no relabeling, no color drift.`);
   } else {
     lines.push(
-      `PRODUCT FIDELITY: The product in the reference image is the actual catalog product. ` +
-      `Preserve its exact shape, color, label text, packaging, and proportions throughout the entire 8 seconds. ` +
-      `Do NOT reinterpret the label, do NOT shift colors, do NOT generate a similar-but-different product variant. ` +
-      `The product is the source of truth.`
+      `PHYSICAL ACCURACY: Every person, hand, or face rendered MUST be anatomically correct. ` +
+      `Hands have exactly 5 fingers with natural length and joint placement (no extra digits, no fused fingers, no impossible bends). ` +
+      `Faces have 2 symmetric eyes with matching color and size, natural skin texture, normal tooth count, no warped features. ` +
+      `Body proportions follow real human anatomy — no extra limbs, no impossible angles. ` +
+      `If the reference image shows a person, preserve THEIR face, hair, skin tone, and identity throughout — do not morph them into a different person mid-shot.`
     );
+    if (hasProductReference) {
+      lines.push(
+        `PRODUCT FIDELITY: A separate REFERENCE IMAGE of the actual catalog product is attached. ` +
+        `Treat that reference as the ABSOLUTE source of truth for the product's shape, color, label text, ` +
+        `packaging, and proportions — every frame of the video must show a product matching that reference exactly. ` +
+        `If the primary scene image and the reference image disagree on any product detail (label position, ` +
+        `color shade, bottle shape, etc.), the REFERENCE image wins. Do NOT reinterpret, do NOT shift colors, ` +
+        `do NOT generate a similar-but-different product variant — render exactly what the reference shows.`
+      );
+    } else {
+      lines.push(
+        `PRODUCT FIDELITY: The product in the reference image is the actual catalog product. ` +
+        `Preserve its exact shape, color, label text, packaging, and proportions throughout the entire 8 seconds. ` +
+        `Do NOT reinterpret the label, do NOT shift colors, do NOT generate a similar-but-different product variant. ` +
+        `The product is the source of truth.`
+      );
+    }
   }
 
-  return lines.join(' ');
+  let prompt = lines.join(' ');
+
+  // Grok via Atlas enforces a 4096-char prompt cap. If we're still over
+  // budget, drop the least-load-bearing lines in reverse priority. The
+  // text_beats listing and the "RENDER TEXT IN-FRAME" instructions are
+  // sacred — they're what makes the ad work. Defensive guardrails go
+  // first.
+  if (rendersText && prompt.length > 4000) {
+    const droppable = [
+      /^PHYSICAL ACCURACY/i,
+      /^Ignore any text\/captions\/watermarks/i,
+      /^LOGOS \/ WATERMARKS/i,
+      /^BRAND TYPOGRAPHY/i
+    ];
+    for (const pattern of droppable) {
+      if (prompt.length <= 4000) break;
+      const idx = lines.findIndex(l => pattern.test(l));
+      if (idx !== -1) {
+        const dropped = lines[idx];
+        lines.splice(idx, 1);
+        prompt = lines.join(' ');
+        console.warn(`   ⚠️  veoPrompt: trimmed "${dropped.slice(0, 60)}…" to fit Grok 4096 cap (now ${prompt.length} chars)`);
+      }
+    }
+    // Last resort — hard truncate. Always loses some content; we want
+    // to know if this fires so we can hand-tune the prompt structure.
+    if (prompt.length > 4096) {
+      console.warn(`   ⚠️  veoPrompt: still ${prompt.length} chars after dropping defensive blocks — hard-truncating to 4096`);
+      prompt = prompt.slice(0, 4096);
+    }
+  }
+
+  return prompt;
 }
 
 module.exports = {
