@@ -258,6 +258,27 @@ const campaignSchema = new mongoose.Schema({
   // (image-ref runs as a shadow after the Puppeteer render).
   useImageRefAsProduction: { type: Boolean, default: false },
 
+  // Derived creative brief — extracted by campaignBriefDerivationService
+  // from this campaign's targeting + objective + matched products + ad
+  // creatives. Threaded into aiCreativeDirectorService as CAMPAIGN BRIEF
+  // context when generation is campaign-scoped. Independent of brand
+  // voice (which is global to the brand); this is the per-campaign
+  // intent layer that sits between brand voice and product specifics.
+  //
+  // Shape (Mixed so we can evolve without migrations):
+  //   { goal:            String,          // 'drive sales of SKU X', 'launch new collection', ...
+  //     pitch:           String,          // the value/argument the campaign makes
+  //     focus:           String,          // what we lean on hardest — price, scarcity, lifestyle, social proof, ...
+  //     audience:        { description, segments: [String], geo: [String], ageRange, interests: [String] },
+  //     tone:            [String],
+  //     cta_emphasis:    String,          // 'urgent', 'aspirational', 'low-friction', ...
+  //     evidence:        { adCount: Number, topPerformerCreativeIds: [String], productCount: Number, hasInsights: Boolean },
+  //     derivedFrom:     'ingest' | 'manual',
+  //     model:           String,
+  //     promptVersion:   String }
+  creativeBrief: { type: mongoose.Schema.Types.Mixed, default: null },
+  briefDerivedAt: { type: Date, default: null },
+
   // Full raw payload from the platform — capped to ~16KB worth of
   // JSON. Useful for debugging and for fields we haven't mapped yet.
   rawData:       mongoose.Schema.Types.Mixed,

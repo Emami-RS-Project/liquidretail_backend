@@ -207,6 +207,29 @@ const brandSchema = new mongoose.Schema({
     autoCreateFromDetect: { type: Boolean, default: false }
   },
 
+  // Derived voice — structured profile extracted by
+  // brandVoiceDerivationService from the brand's existing Meta/Google
+  // ad creatives, performance-weighted by Campaign.insights so winners
+  // dominate the signal. Threaded into aiCreativeDirectorService as
+  // EXISTING BRAND VOICE context so new ads mirror what's already
+  // working. Refreshed manually via POST /api/brands/:id/derive-voice
+  // and on a nightly cron when older than the TTL.
+  //
+  // Shape (Mixed so we can evolve without migrations):
+  //   { tone:           [String],
+  //     value_props:    [String],
+  //     hooks:          [String],            // 'problem-solution', 'social-proof', 'urgency', ...
+  //     cta_patterns:   [{ text, frequency }],
+  //     common_phrases: [String],
+  //     audience_pitch: [{ segment, pitch_style }],
+  //     voice_summary:  String,
+  //     evidence_count: Number,              // ads analyzed
+  //     weighted:       Boolean,             // whether insights were used to weight the corpus
+  //     model:          String,
+  //     promptVersion:  String }
+  derivedVoice:   { type: mongoose.Schema.Types.Mixed, default: null },
+  derivedVoiceAt: { type: Date, default: null },
+
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });

@@ -949,4 +949,27 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// POST /api/campaigns/:id/derive-brief?force=true
+// → { ok, brief, elapsedMs } | { skipped, reason }
+//
+// Runs campaignBriefDerivationService against the campaign's targeting,
+// objective, matched products, and ad creatives. Returns the structured
+// brief and stamps Campaign.creativeBrief + Campaign.briefDerivedAt.
+// Respects 7-day TTL by default; pass force=true to re-derive.
+router.post('/:id/derive-brief', async (req, res) => {
+  try {
+    const campaign = await Campaign.findOne(tenantFilter(req, { _id: req.params.id }))
+      .select('_id').lean();
+    if (!campaign) return res.status(404).json({ error: 'campaign not found' });
+
+    const force = String(req.query.force || '').toLowerCase() === 'true';
+    const { deriveCampaignBrief } = require('../services/campaignBriefDerivationService');
+    const result = await deriveCampaignBrief(campaign._id, { force, derivedFrom: 'manual' });
+    res.json(result);
+  } catch (err) {
+    console.error(`❌ POST /api/campaigns/:id/derive-brief: ${err.message}\n${err.stack || ''}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

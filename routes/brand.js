@@ -232,6 +232,28 @@ router.post('/:id/refresh-enrichment', async (req, res) => {
   }
 });
 
+// POST /api/brand/:id/derive-voice?force=true
+// → { ok, voice, evidenceCount, elapsedMs } | { skipped, reason }
+//
+// Runs brandVoiceDerivationService against the brand's existing Meta /
+// Google ad campaigns. Returns the structured voice profile and stamps
+// Brand.derivedVoice + Brand.derivedVoiceAt. Respects 7-day TTL by
+// default; pass force=true to re-derive immediately.
+router.post('/:id/derive-voice', async (req, res) => {
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).select('_id').lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+
+    const force = String(req.query.force || '').toLowerCase() === 'true';
+    const { deriveBrandVoice } = require('../services/brandVoiceDerivationService');
+    const result = await deriveBrandVoice(brand._id, { force });
+    res.json(result);
+  } catch (err) {
+    console.error(`❌ POST /api/brand/:id/derive-voice: ${err.message}\n${err.stack || ''}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/brand/:id — full cascade. Body must include
 // { confirmName: <exact brand name> } as a type-to-confirm safety
 // gate against accidental deletion.
