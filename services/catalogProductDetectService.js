@@ -120,13 +120,17 @@ async function enqueueBrandProductDetects(brandId) {
   // $lookup on non-primary cards).
   const groups = groupProductsForDetect(products);
   const primaries        = [];
+  const nonPrimaries     = [];          // collected for logging / return; mirrors variantsByPrimary's flat set
   const variantsByPrimary = new Map();   // primary._id (string) → [variant._id, ...]
   for (const group of groups.values()) {
     const primary = pickPrimary(group);
     primaries.push(primary);
     const variantIds = [];
     for (const p of group) {
-      if (String(p._id) !== String(primary._id)) variantIds.push(p._id);
+      if (String(p._id) !== String(primary._id)) {
+        variantIds.push(p._id);
+        nonPrimaries.push(p);
+      }
     }
     if (variantIds.length) variantsByPrimary.set(String(primary._id), variantIds);
   }
