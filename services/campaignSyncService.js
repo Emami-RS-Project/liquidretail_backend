@@ -90,7 +90,70 @@ async function syncCampaigns({ brandId, platform, credentialId }) {
 
   summary.durationMs = Date.now() - t0;
   console.log(`📣 campaign sync (${platform}): brand=${brandId} upserted=${summary.totalUpserted} errors=${summary.totalErrors} in ${summary.durationMs}ms`);
+
+  // Phase 3 — auto-fire voice + brief derivation after campaign sync.
+  // Both run fire-and-forget so the HTTP response doesn't wait on
+  // GPT calls. Both respect their own TTLs (7 days), so frequent
+  // syncs don't burn LLM credits. Skipped entirely when no campaigns
+  // were upserted in this run.
+  if (summary.totalUpserted > 0) {
+    setImmediate(() => {
+      enqueueDerivations({ brandId, platform }).catch(err => {
+        console.warn(`   ⚠️  voice/brief derivations enqueue failed for brand=${brandId}: ${err.message}`);
+      });
+    });
+  }
+
   return summary;
+}
+
+// Fire-and-forget orchestrator. Walks campaigns whose brief is stale
+// (or missing) and derives one per campaign; then refreshes brand voice
+// once. Both services already enforce a TTL, so this is idempotent on
+// re-runs within the TTL window.
+async function enqueueDerivations({ brandId, platform }) {
+  const { deriveCampaignBrief, TTL_DAYS: BRIEF_TTL_DAYS } = require('./campaignBriefDerivationService');
+  const { deriveBrandVoice }                              = require('./brandVoiceDerivationService');
+
+  // Brief — per campaign on this brand/platform whose brief is stale.
+  const briefStaleCutoff = new Date(Date.now() - BRIEF_TTL_DAYS * 24 * 60 * 60 * 1000);
+  const stale = await Campaign.find({
+    brandId, platform,
+    $or: [
+      { briefDerivedAt: null },
+      { briefDerivedAt: { $lt: briefStaleCutoff } }
+    ]
+  }).select('_id').lean();
+
+  if (stale.length) {
+    console.log(`📋 campaignBrief: enqueueing ${stale.length} stale brief(s) for brand=${brandId}`);
+    // Concurrency-limited rolling batch — derivation hits OpenAI per
+    // campaign, so we cap to 3 in-flight to avoid stampeding.
+    const queue = stale.map(c => c._id);
+    const CONCURRENCY = 3;
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+      while (cursor < queue.length) {
+        const id = queue[cursor++];
+        try {
+          await deriveCampaignBrief(id, { derivedFrom: 'ingest' });
+        } catch (err) {
+          console.warn(`   ⚠️  brief derivation failed for campaign=${id}: ${err.message}`);
+        }
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  // Brand voice — single shot, TTL-guarded by the service itself.
+  try {
+    const r = await deriveBrandVoice(brandId);
+    if (r.skipped) {
+      console.log(`🗣️  brandVoice: brand=${brandId} skipped (${r.reason})`);
+    }
+  } catch (err) {
+    console.warn(`   ⚠️  brand voice derivation failed for brand=${brandId}: ${err.message}`);
+  }
 }
 
 // Idempotent upsert keyed on (brandId, platform, externalId).
