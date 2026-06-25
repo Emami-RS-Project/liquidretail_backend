@@ -467,13 +467,43 @@ router.get('/ads-summary', async (req, res) => {
       filter.categoryRef = new mongoose.Types.ObjectId(String(categoryId));
     }
 
-    // Pull products + ad aggregation in parallel.
-    const [products, adStats] = await Promise.all([
+    // Pull products + ad aggregation + per-product campaign chips in
+    // parallel. The chips show every campaign whose matchedProductIds
+    // includes a given product, so operators can see at-a-glance which
+    // campaigns each product belongs to (and click through to a campaign).
+    const Campaign = require('../models/Campaign');
+    const [products, adStats, campaignsForBrand] = await Promise.all([
       CatalogProduct.find(filter)
         .select('_id title price currency imageUrl category brand size createdAt categoryRef inferredBreadcrumb')
         .lean(),
-      buildAdStatsByProduct(brandObjectId)
+      buildAdStatsByProduct(brandObjectId),
+      Campaign.find(tenantFilter(req, { brandId: brandObjectId }))
+        .select('_id name kind status matchedProductIds')
+        .lean()
     ]);
+
+    // Build productId → [{ id, name, kind }] map. Each product can be
+    // in multiple campaigns (M:N relationship); we surface up to 8
+    // chips per product so the UI doesn't wrap forever on a high-volume
+    // SKU. Sorted by name for stable ordering.
+    const chipsByProduct = new Map();
+    for (const camp of campaignsForBrand) {
+      for (const pid of (camp.matchedProductIds || [])) {
+        const key = String(pid);
+        const list = chipsByProduct.get(key) || [];
+        list.push({
+          id:     String(camp._id),
+          name:   camp.name || '(unnamed)',
+          kind:   camp.kind || null,
+          status: camp.status || null
+        });
+        chipsByProduct.set(key, list);
+      }
+    }
+    for (const [, list] of chipsByProduct) {
+      list.sort((a, b) => a.name.localeCompare(b.name));
+      if (list.length > 8) list.length = 8;
+    }
 
     const productsOut = products.map(p => {
       const stats = adStats.get(String(p._id)) || {};
@@ -493,6 +523,7 @@ router.get('/ads-summary', async (req, res) => {
         size:           p.size || null,
         adCount,
         campaignCount,
+        campaignChips:  chipsByProduct.get(String(p._id)) || [],
         readyToExport:  stats.readyToExport  || 0,
         draftCount:     stats.draftCount     || 0,
         liveCount:      stats.liveCount      || 0,
