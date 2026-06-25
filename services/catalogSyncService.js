@@ -287,7 +287,7 @@ async function syncCatalogForCred(cred) {
         if (!candidates.length) return;
         console.log(`🔎 categoryInference: brand=${brandId} scheduling ${candidates.length} product page scrapes`);
         const result = await inference.inferBatch(candidates.map(c => c._id), { concurrency: 6 });
-        console.log(`🔎 categoryInference: brand=${brandId} done — ok=${result.ok} skipped=${result.skipped} failed=${result.failed}`);
+        console.log(`🔎 categoryInference: brand=${brandId} done — ok=${result.ok} cfChallenged=${result.challenged || 0} skipped=${result.skipped} failed=${result.failed}`);
       } catch (err) {
         console.warn(`   ⚠️  category inference enqueue failed: ${err.message}`);
       }
