@@ -486,6 +486,7 @@ async function renderOne(run, job, adId, index, renderToken) {
             status:             'draft',
             kind:               'video',
             veoVideoUrl:        veoResult.videoUrl,
+            veoAspectRatio:     veoResult.aspectRatio || null,
             veoPrompt:          veoResult.prompt || null,
             veoStoryboard:      veoResult.storyboard || storyboard || null,
             renderUrl:          veoResult.videoUrl,

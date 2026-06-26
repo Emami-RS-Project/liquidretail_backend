@@ -171,6 +171,7 @@ async function runVideoFull(adId, prompt) {
   await Ad.updateOne({ _id: adId }, {
     $set: {
       veoVideoUrl:    veoResult.videoUrl,
+      veoAspectRatio: veoResult.aspectRatio || null,
       veoPrompt:      veoResult.prompt || null,
       veoStoryboard:  veoResult.storyboard || storyboard || null,
       updatedAt:      new Date()

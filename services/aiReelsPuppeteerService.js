@@ -43,18 +43,40 @@ function arParamForAspect(aspectRatio) {
   return 'ar_1:1';
 }
 
+// Numeric aspect comparison — "16:9" vs "1.78:1" vs the canvas aspect.
+// Used to skip the Cloudinary transform when the source video is
+// already at the target aspect (common case: pmax_16_9 + Grok 16:9,
+// meta_reels_9_16 + Grok 9:16). The transform IS needed only when the
+// Grok aspect was remapped because the model didn't support the canvas
+// aspect natively (e.g. meta_feed_4_5 → Grok 3:4 → crop back to 4:5).
+function aspectsApproxEqual(a, b) {
+  const parse = (s) => {
+    const m = String(s || '').match(/^([\d.]+)\s*:\s*([\d.]+)$/);
+    if (!m) return null;
+    const w = parseFloat(m[1]); const h = parseFloat(m[2]);
+    return (w > 0 && h > 0) ? w / h : null;
+  };
+  const na = parse(a); const nb = parse(b);
+  if (na == null || nb == null) return false;
+  return Math.abs(na - nb) < 0.01;
+}
+
 // Build a Cloudinary-transformed URL that crops the Veo base video to
-// the canvas aspect using saliency-aware g_auto. Returns the original
-// URL untouched when the host isn't Cloudinary (defensive — we always
-// upload to Cloudinary today, but a future Veo source change shouldn't
-// silently break the composite).
-function canvasAspectVideoUrl(veoVideoUrl, platformFormat) {
+// the canvas aspect using saliency-aware g_auto — but ONLY when the
+// source video isn't already at the canvas aspect. When it is, we
+// return the original URL untouched, avoiding a pointless transcode
+// (the transcode is what produces the 423 Locked stall right after
+// upload). ffmpeg handles the eventual scaling to output dims either way.
+function canvasAspectVideoUrl(veoVideoUrl, platformFormat, sourceAspectRatio = null) {
   if (!veoVideoUrl || !veoVideoUrl.includes('/video/upload/')) return veoVideoUrl;
-  const aspect = aspectRatioForPlatformFormat(platformFormat) || '9:16';
-  const ar = arParamForAspect(aspect);
-  // c_fill + g_auto = saliency-cropped to the target aspect. Matches
-  // exactly what aiReelsChromeService.deriveFrameUrls uses for the
-  // frame samples GPT plans placement against.
+  const canvasAspect = aspectRatioForPlatformFormat(platformFormat) || '9:16';
+  // No source aspect known → preserve legacy behavior (always transform).
+  // When the caller passes the Grok-rendered aspect AND it matches the
+  // canvas, we skip the transform entirely — no derivative, no 423.
+  if (sourceAspectRatio && aspectsApproxEqual(sourceAspectRatio, canvasAspect)) {
+    return veoVideoUrl;
+  }
+  const ar = arParamForAspect(canvasAspect);
   return veoVideoUrl.replace('/video/upload/', `/video/upload/c_fill,${ar},g_auto/`);
 }
 
@@ -263,13 +285,15 @@ async function compositeForAd({ ad }) {
     const framePattern = path.join(tmpDir, 'frame_%04d.png');
     const veoPath      = path.join(tmpDir, 'veo.mp4');
 
-    // Apply Cloudinary saliency-anchored crop (c_fill, ar_<canvas>, g_auto)
-    // so the base video matches the canvas-aspect frame samples GPT used
-    // to plan chrome placement. This is the same transform aiReelsChromeService
-    // applies via deriveFrameUrls — keeping the two in sync prevents the
-    // composite from drifting the subject under chrome zones.
-    const veoDownloadUrl = canvasAspectVideoUrl(ad.veoVideoUrl, ad.platformFormat);
-    console.log(`🎬 reelsPuppeteer[ad=${ad._id}]: downloading Veo video (canvas-aspect crop applied)...`);
+    // Apply Cloudinary saliency-anchored crop only when the source isn't
+    // already at the canvas aspect. ad.veoAspectRatio captures what
+    // Grok actually rendered (possibly remapped from the canvas aspect
+    // when the model didn't support it natively). When they match, the
+    // transform is skipped — we download the master directly, no 423,
+    // no pointless transcode.
+    const veoDownloadUrl = canvasAspectVideoUrl(ad.veoVideoUrl, ad.platformFormat, ad.veoAspectRatio);
+    const transformApplied = veoDownloadUrl !== ad.veoVideoUrl;
+    console.log(`🎬 reelsPuppeteer[ad=${ad._id}]: downloading Veo video (${transformApplied ? 'canvas-aspect crop applied' : 'master, no transform — aspects match'})...`);
     await downloadToFile(veoDownloadUrl, veoPath);
 
     console.log(`🎬 reelsPuppeteer[ad=${ad._id}]: ffmpeg compositing (captured in ${captureMs}ms)...`);

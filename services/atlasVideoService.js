@@ -476,21 +476,30 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
 
   const remoteVideoUrl = await pollPrediction(predictionId);
 
-  // Mirror to Cloudinary so the chrome+composite path and
-  // adDisplayUrlService work against a stable URL we control. The
-  // eager transform kicks off the canvas-aspect saliency-crop derivative
-  // at upload time — without this hint, Cloudinary generates the
-  // c_fill,ar_<canvas>,g_auto derivative lazily on first request and
-  // the composite stage hits 423 Locked for ~60-90s while the transcode
-  // runs. Eager_async=true (default for video) is fine; we don't need
-  // to block the upload response, we just need Cloudinary to start.
-  const eagerCanvasTransform = `c_fill,${arParamForAspect(platformAspect)},g_auto`;
-  const uploaded = await uploadBufferToCloudinary(videoBuffer, {
+  // Mirror to Cloudinary. The eager transform pre-generates the
+  // canvas-aspect saliency-crop derivative at upload time — but ONLY
+  // when Grok's rendered aspect differs from the canvas (i.e. we had to
+  // remap because the model didn't support the canvas aspect natively).
+  // When they match (e.g. pmax_16_9 + Grok 16:9), the composite skips
+  // the transform entirely, so pre-generating it would be pointless work
+  // that triggers a transcode 423 race for no reason.
+  const aspectsMatch = (() => {
+    const parse = (s) => {
+      const m = String(s || '').match(/^([\d.]+)\s*:\s*([\d.]+)$/);
+      return m ? parseFloat(m[1]) / parseFloat(m[2]) : null;
+    };
+    const a = parse(aspectRatio); const b = parse(platformAspect);
+    return a != null && b != null && Math.abs(a - b) < 0.01;
+  })();
+  const uploadOpts = {
     folder:       `liquidretail/atlas_renders/${model.replace(/\//g, '_')}`,
     resourceType: 'video',
-    format:       'mp4',
-    eager:        [{ raw_transformation: eagerCanvasTransform }]
-  });
+    format:       'mp4'
+  };
+  if (!aspectsMatch) {
+    uploadOpts.eager = [{ raw_transformation: `c_fill,${arParamForAspect(platformAspect)},g_auto` }];
+  }
+  const uploaded = await uploadBufferToCloudinary(videoBuffer, uploadOpts);
 
   const elapsedMs = Date.now() - t0;
   console.log(

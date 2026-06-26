@@ -221,6 +221,11 @@ const adSchema = new mongoose.Schema({
   // forever.
   sourceFileType:     { type: String, enum: ['image', 'video', null], default: null },
   veoVideoUrl:        { type: String, default: null },  // raw Veo base video (before chrome + Puppeteer)
+  // Aspect ratio Grok actually rendered (may differ from ad.aspectRatio
+  // when the model didn't support the canvas aspect natively and we had
+  // to remap). Composite skips its saliency-crop transform when this
+  // matches the canvas aspect — same source, no transcode, no 423 race.
+  veoAspectRatio:     { type: String, default: null },
   veoPrompt:          { type: String, default: null },  // storyboard prompt sent to Veo — preserved for debugging + reproduction
   // GPT-composed structured storyboard. Null when VEO_USE_GPT_STORYBOARD
   // is off or the GPT call failed (Veo prompt then carries the legacy
