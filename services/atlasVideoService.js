@@ -294,7 +294,7 @@ async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps })
 
   console.log(
     `🎬 atlasVideo.submit: model=${model} aspect=${aspectRatio} refs=${imageUrls.length} ` +
-    `paramShape=${caps.paramShape} promptBytes=${prompt.length}`
+    `paramShape=${caps.paramShape} promptChars=${prompt.length} promptBytes=${Buffer.byteLength(prompt, 'utf8')}`
   );
 
   const res = await axios.post(

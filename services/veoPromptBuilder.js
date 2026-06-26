@@ -523,42 +523,65 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
 
   let prompt = lines.join(' ');
 
-  // Grok via Atlas enforces a 4096-char prompt cap. If we're still over
-  // budget, drop the least-load-bearing lines in reverse priority. The
-  // text_beats listing and the "RENDER TEXT IN-FRAME" instructions are
-  // sacred — they're what makes the ad work. Defensive guardrails go
-  // first.
-  if (rendersText && prompt.length > 4000) {
-    // Drop order: framing first (nice-to-have), then defensive guards,
-    // never the script narrative or the verbatim-text rule. CAMPAIGN
-    // BRIEF + BRAND VOICE are the newest additions — they sharpen
-    // Grok's read but the per-beat descriptors carry the load.
-    const droppable = [
-      /^CAMPAIGN BRIEF:/i,
-      /^BRAND VOICE:/i,
-      /^STRATEGY:/i,
-      /^PHYSICAL ACCURACY/i,
-      /^Ignore any text\/captions\/watermarks/i
-    ];
-    for (const pattern of droppable) {
-      if (prompt.length <= 4000) break;
-      const idx = lines.findIndex(l => pattern.test(l));
-      if (idx !== -1) {
-        const dropped = lines[idx];
-        lines.splice(idx, 1);
-        prompt = lines.join(' ');
-        console.warn(`   ⚠️  veoPrompt: trimmed "${dropped.slice(0, 60)}…" to fit Grok 4096 cap (now ${prompt.length} chars)`);
+  // Grok via Atlas enforces a 4096-BYTE prompt cap (not char count).
+  // Our prompt is full of em-dashes (—, 3 bytes), curly quotes
+  // ("", 3 bytes), ≈, ★, etc. — easily 200+ bytes that .length wouldn't
+  // see. Strip multi-byte punctuation to ASCII first so we're not paying
+  // the byte tax, THEN measure with Buffer.byteLength.
+  if (rendersText) {
+    prompt = asciifyPrompt(prompt);
+    lines.forEach((l, i) => { lines[i] = asciifyPrompt(l); });
+
+    if (Buffer.byteLength(prompt, 'utf8') > 3900) {
+      // Drop order: framing first (nice-to-have), then defensive guards,
+      // never the script narrative or the verbatim-text rule. CAMPAIGN
+      // BRIEF + BRAND VOICE are the newest additions — they sharpen
+      // Grok's read but the per-beat descriptors carry the load.
+      const droppable = [
+        /^CAMPAIGN BRIEF:/i,
+        /^BRAND VOICE:/i,
+        /^STRATEGY:/i,
+        /^PHYSICAL ACCURACY/i,
+        /^Ignore any text\/captions\/watermarks/i
+      ];
+      for (const pattern of droppable) {
+        if (Buffer.byteLength(prompt, 'utf8') <= 3900) break;
+        const idx = lines.findIndex(l => pattern.test(l));
+        if (idx !== -1) {
+          const dropped = lines[idx];
+          lines.splice(idx, 1);
+          prompt = lines.join(' ');
+          console.warn(`   ⚠️  veoPrompt: trimmed "${dropped.slice(0, 60)}..." to fit Grok 4096-byte cap (now ${Buffer.byteLength(prompt, 'utf8')} bytes)`);
+        }
       }
-    }
-    // Last resort — hard truncate. Always loses some content; we want
-    // to know if this fires so we can hand-tune the prompt structure.
-    if (prompt.length > 4096) {
-      console.warn(`   ⚠️  veoPrompt: still ${prompt.length} chars after dropping defensive blocks — hard-truncating to 4096`);
-      prompt = prompt.slice(0, 4096);
+      // Last resort — hard truncate by bytes (not chars). Slice on the
+      // byte buffer to avoid splitting a multi-byte sequence mid-character.
+      if (Buffer.byteLength(prompt, 'utf8') > 4096) {
+        console.warn(`   ⚠️  veoPrompt: still ${Buffer.byteLength(prompt, 'utf8')} bytes after dropping framing blocks — hard-truncating to 4096`);
+        const buf = Buffer.from(prompt, 'utf8').slice(0, 4096);
+        prompt = buf.toString('utf8');
+      }
     }
   }
 
   return prompt;
+}
+
+// Replace common multi-byte punctuation with ASCII equivalents. Keeps
+// the prompt human-readable for logs while staying under Atlas's
+// byte-counted cap. We do this only on the rendersText (Grok) path —
+// Veo handles unicode fine and the chars don't affect rendering.
+function asciifyPrompt(s) {
+  return s
+    .replace(/[—–]/g, '-')
+    .replace(/[""]/g, '"')
+    .replace(/['']/g, "'")
+    .replace(/…/g, '...')
+    .replace(/≈/g, '~')
+    .replace(/★/g, '*')
+    .replace(/·/g, '-')
+    .replace(/×/g, 'x')
+    .replace(/→/g, '->');
 }
 
 module.exports = {
