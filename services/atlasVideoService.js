@@ -63,22 +63,54 @@ const MODEL_CAPS = {
     resolutions: ['480p', '720p'],
     maxReferenceImages: 7,
     rendersText: true,
-    paramShape: 'grok'
+    paramShape: 'grok',
+    supportedAspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3']
   },
   'google/veo3.1/image-to-video': {
     minDuration: 5, maxDuration: 8,
     resolutions: ['720p', '1080p'],
     maxReferenceImages: 1,
     rendersText: false,
-    paramShape: 'veo'
+    paramShape: 'veo',
+    supportedAspectRatios: ['9:16', '16:9', '1:1']
   }
 };
 
 function capsFor(model) {
   return MODEL_CAPS[model] || {
     minDuration: 5, maxDuration: 8, resolutions: ['720p'],
-    maxReferenceImages: 1, rendersText: false, paramShape: 'generic'
+    maxReferenceImages: 1, rendersText: false, paramShape: 'generic',
+    supportedAspectRatios: ['1:1', '16:9', '9:16']
   };
+}
+
+// Atlas/Grok rejects unsupported aspect_ratio variants outright (422),
+// so we need to map any platform-format aspect we use (4:5, 5:4, 1.91:1)
+// to the closest supported one for the model. We also pre-crop the
+// reference images at the resolved aspect so the seed composition and
+// the model output are consistent — preventing the "seed framed for 4:5,
+// output rendered at 3:4" mismatch that would otherwise crop content.
+function aspectToNumeric(ar) {
+  const m = String(ar || '').match(/^([\d.]+)\s*:\s*([\d.]+)$/);
+  if (!m) return null;
+  const w = parseFloat(m[1]);
+  const h = parseFloat(m[2]);
+  if (!w || !h) return null;
+  return w / h;
+}
+
+function resolveAspectRatioForModel(requested, caps) {
+  const supported = caps.supportedAspectRatios || [];
+  if (!supported.length || supported.includes(requested)) return requested;
+  const target = aspectToNumeric(requested);
+  if (target == null) return supported[0];
+  let best = supported[0];
+  let bestDelta = Math.abs(aspectToNumeric(best) - target);
+  for (const ar of supported.slice(1)) {
+    const delta = Math.abs(aspectToNumeric(ar) - target);
+    if (delta < bestDelta) { best = ar; bestDelta = delta; }
+  }
+  return best;
 }
 
 // ── Cloudinary aspect cropping ────────────────────────────────────────
@@ -95,6 +127,10 @@ function imageDimsForAspect(aspectRatio) {
     case '16:9':   return { w: 1280, h: 720  };
     case '4:5':    return { w: 720,  h: 900  };
     case '5:4':    return { w: 900,  h: 720  };
+    case '4:3':    return { w: 960,  h: 720  };
+    case '3:4':    return { w: 720,  h: 960  };
+    case '3:2':    return { w: 1080, h: 720  };
+    case '2:3':    return { w: 720,  h: 1080 };
     case '1:1':    return { w: 720,  h: 720  };
     case '1.91:1': return { w: 1280, h: 670  };
     default:       return { w: 720,  h: 720  };
@@ -282,9 +318,16 @@ async function generateForAd({ ad, operatorPrompt = null }) {
   const media = await Media.findById(ad.mediaId).lean();
   if (!media) throw new Error(`Media ${ad.mediaId} not found`);
 
-  const aspectRatio = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
+  const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
   const model = DEFAULT_MODEL;
   const caps  = capsFor(model);
+  const aspectRatio = resolveAspectRatioForModel(platformAspect, caps);
+  if (aspectRatio !== platformAspect) {
+    console.log(
+      `🎬 atlasVideo[ad=${ad._id}]: remapped aspect ${platformAspect} → ${aspectRatio} ` +
+      `(unsupported by ${model}; closest of ${caps.supportedAspectRatios.join(', ')})`
+    );
+  }
 
   const [brand, product, layoutInput, campaign] = await Promise.all([
     Brand.findById(media.brandId).lean(),
