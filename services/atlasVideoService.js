@@ -23,6 +23,7 @@ const axios = require('axios');
 
 const Media                     = require('../models/Media');
 const Brand                     = require('../models/Brand');
+const Campaign                  = require('../models/Campaign');
 const CatalogProduct            = require('../models/CatalogProduct');
 const LayoutInputArtifact       = require('../models/LayoutInputArtifact');
 const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact');
@@ -285,12 +286,14 @@ async function generateForAd({ ad, operatorPrompt = null }) {
   const model = DEFAULT_MODEL;
   const caps  = capsFor(model);
 
-  const [brand, product, layoutInput] = await Promise.all([
+  const [brand, product, layoutInput, campaign] = await Promise.all([
     Brand.findById(media.brandId).lean(),
     ad.productId ? CatalogProduct.findById(ad.productId).lean() : null,
     LayoutInputArtifact.findOne({ mediaId: media._id, productId: ad.productId || null })
-      .sort({ createdAt: -1 }).lean()
+      .sort({ createdAt: -1 }).lean(),
+    ad.campaignId ? Campaign.findById(ad.campaignId).select('creativeBrief').lean() : null
   ]);
+  const brief = campaign?.creativeBrief || null;
 
   let concept = null;
   if (ad.conceptId && ad.conceptArtifactId) {
@@ -331,7 +334,8 @@ async function generateForAd({ ad, operatorPrompt = null }) {
     brandId:   media.brandId,
     productId: ad.productId || null,
     rendersText: caps.rendersText,
-    copy
+    copy,
+    brief
   });
 
   // Reuse the same prompt builder. rendersText flips the text-handling
@@ -348,7 +352,8 @@ async function generateForAd({ ad, operatorPrompt = null }) {
     hasProductReference: !!product?.imageUrl,
     operatorPrompt,
     rendersText: caps.rendersText,
-    storyboard
+    storyboard,
+    brief
   });
 
   const imageUrls = buildReferenceImages({ media, product, aspectRatio, max: caps.maxReferenceImages });

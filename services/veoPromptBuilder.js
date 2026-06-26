@@ -143,7 +143,13 @@ function parseTimeRangeSecs(time) {
 // embedded inside a per-state script paragraph, not a standalone bullet.
 // This avoids the metadata-bullet format (role=…, scale=…) that Grok
 // could misread as text to render in-frame.
-function textBeatSentence(tb) {
+//
+// Each beat carries explicit picks for typography (font_style), color
+// (color_hint), entry motion (motion), and legibility device
+// (background_treatment). The storyboard composer (GPT-4o-mini) chooses
+// these per beat — we render them inline as natural prose so Grok sees
+// concrete instructions instead of guessing.
+function textBeatSentence(tb, brand = null) {
   const scaleWord = {
     hero:   'a hero-sized',
     large:  'a large',
@@ -172,7 +178,66 @@ function textBeatSentence(tb) {
     brand_mark:  'brand wordmark'
   }[tb.role] || 'overlay';
 
-  return `${scaleWord} ${roleWord} in ${positionWord} reading: "${tb.text}"`;
+  // Build the descriptor tail. Each chosen field becomes plain English
+  // appended after the core "show X in Y reading: ..." sentence so the
+  // full prose reads naturally to Grok.
+  const descriptors = [];
+
+  if (tb.motion && tb.motion !== 'static') {
+    const motionPhrase = {
+      fade:           'fading up softly over ~10 frames',
+      slide_up:       'sliding up from below',
+      slide_in_left:  'sliding in from the left',
+      slide_in_right: 'sliding in from the right',
+      scale_in:       'scaling in gently',
+      pulse:          'with a single subtle pulse on entry'
+    }[tb.motion];
+    if (motionPhrase) descriptors.push(motionPhrase);
+  } else if (tb.motion === 'static') {
+    descriptors.push('appearing static, locked in place');
+  }
+
+  if (tb.font_style) {
+    const brandFont = brand?.fontFamily;
+    const fontPhrase = {
+      brand:          brandFont ? `set in ${brandFont} or visually similar` : 'set in the brand wordmark style',
+      confident_sans: 'set in a confident clean sans-serif',
+      refined_serif:  'set in a refined humanist serif',
+      humanist_sans:  'set in a warm humanist sans-serif',
+      display:        'set in a strong display typeface',
+      monospace:      'set in a clean monospaced typeface'
+    }[tb.font_style];
+    if (fontPhrase) descriptors.push(fontPhrase);
+  }
+
+  if (tb.color_hint) {
+    const primaryHex   = brand?.primaryColor;
+    const secondaryHex = brand?.secondaryColor;
+    const accentHex    = brand?.accentColor;
+    const colorPhrase = {
+      brand_primary:   primaryHex   ? `in the brand primary color ${primaryHex}`   : 'in the brand primary color',
+      brand_secondary: secondaryHex ? `in the brand secondary color ${secondaryHex}` : 'in the brand secondary color',
+      brand_accent:    accentHex    ? `in the brand accent color ${accentHex}`     : 'in the brand accent color',
+      warm_gold:       'in warm gold (≈#D4AF37)',
+      neutral_white:   'in clean white',
+      neutral_black:   'in deep neutral black'
+    }[tb.color_hint];
+    if (colorPhrase) descriptors.push(colorPhrase);
+  }
+
+  if (tb.background_treatment && tb.background_treatment !== 'none') {
+    const bgPhrase = {
+      scrim:         'on a subtle bottom-up gradient scrim (≈30–40% black) for legibility over the moving footage',
+      solid_card:    'on a solid card-style background that anchors the text',
+      wash:          'on a soft light wash behind the text for the end-card freeze',
+      frosted_blur:  'on a frosted-blur backdrop with translucent glass effect'
+    }[tb.background_treatment];
+    if (bgPhrase) descriptors.push(bgPhrase);
+  }
+
+  const base = `${scaleWord} ${roleWord} in ${positionWord} reading: "${tb.text}"`;
+  const tail = descriptors.length ? ` — ${descriptors.join(', ')}` : '';
+  return `${base}${tail}`;
 }
 
 // Build a per-state script paragraph: walk the motion beats as the
@@ -183,7 +248,7 @@ function textBeatSentence(tb) {
 // Mirrors the structure of the Camelback DR brief that produced
 // acceptable Grok output — Grok handles continuous narrative far
 // better than metadata-bullet formats.
-function buildScriptNarrative(storyboard) {
+function buildScriptNarrative(storyboard, brand = null) {
   if (!storyboard || !Array.isArray(storyboard.beats) || !storyboard.beats.length) return '';
   const motionBeats = storyboard.beats;
   const textBeats   = Array.isArray(storyboard.text_beats) ? storyboard.text_beats : [];
@@ -197,14 +262,15 @@ function buildScriptNarrative(storyboard) {
       return tbRange && tbRange.start < range.end && tbRange.end > range.start;
     });
 
+    const label = beat.state_label ? ` — ${beat.state_label}` : '';
     lines.push('');
-    lines.push(`${beat.time}`);
+    lines.push(`${beat.time}${label}`);
     lines.push(`Visual / Motion: ${beat.description}`);
     if (overlapping.length) {
       const textParts = overlapping.map(tb => {
         const tbRange = parseTimeRangeSecs(tb.time);
         const window = tbRange ? ` (visible ${tb.time})` : '';
-        return `${textBeatSentence(tb)}${window}`;
+        return `${textBeatSentence(tb, brand)}${window}`;
       });
       lines.push(`On-screen text: ${textParts.join('; then ')}. Render each quoted string EXACTLY as written, character-for-character.`);
     } else {
@@ -257,7 +323,7 @@ function buildOverlayIntent({ concept, hasHeadline, hasCta }) {
 // is replaced by an explicit "RENDER THESE TEXT BEATS" block citing the
 // storyboard's text_beats[] array. When false (Veo path, default), text
 // is forbidden in-video and the chrome+composite stages handle it.
-function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false, hasProductReference = false, operatorPrompt = null, storyboard = null, rendersText = false }) {
+function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, sourceMedia = null, aspectRatio = '1:1', seedHasText = false, hasProductReference = false, operatorPrompt = null, storyboard = null, rendersText = false, brief = null }) {
   const lines   = [];
   const subject = resolveSubject({ layoutInput, sourceMedia, media });
 
@@ -352,6 +418,29 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     // Grok-via-Atlas path — model renders text in-frame natively. Replace
     // the "NO TEXT" guardrail with explicit "RENDER THESE TEXT BEATS"
     // direction citing the storyboard's text_beats[] array.
+
+    // Strategy arc — one-line DR framing GPT writes per ad. Sits above
+    // the script so Grok has the "why" before the beat-by-beat "how".
+    if (storyboard?.strategy_arc) {
+      lines.push(`STRATEGY: ${storyboard.strategy_arc}`);
+    }
+
+    // Brand voice notes — derivedVoice extracted from live campaigns
+    // (voice cascade Phase 2). Grok uses this as tonal direction, not
+    // as copy to render; copy strings are still locked to text_beats.
+    if (brand?.derivedVoice?.voice_summary) {
+      lines.push(`BRAND VOICE: ${brand.derivedVoice.voice_summary}`);
+    }
+
+    // Campaign brief — when the ad inherits from an ingested campaign,
+    // pitch + cta_emphasis sharpen Grok's reading of the end-card mood.
+    if (brief?.pitch || brief?.cta_emphasis) {
+      const briefBits = [];
+      if (brief.pitch)        briefBits.push(`pitch — ${brief.pitch}`);
+      if (brief.cta_emphasis) briefBits.push(`CTA emphasis — ${brief.cta_emphasis}`);
+      lines.push(`CAMPAIGN BRIEF: ${briefBits.join('; ')}.`);
+    }
+
     // Per-state script narrative — mirrors the structure of the
     // Camelback DR brief that produced acceptable Grok output. Each
     // state paragraph integrates Visual / Motion + On-screen text +
@@ -360,7 +449,7 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
     // ("role=cta · scale=hero · position=lower_third") made Grok
     // mangle text because the labels competed with the actual copy.
     if (storyboard) {
-      const scriptNarrative = buildScriptNarrative(storyboard);
+      const scriptNarrative = buildScriptNarrative(storyboard, brand);
       if (scriptNarrative) lines.push(scriptNarrative);
     }
 
