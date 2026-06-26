@@ -475,6 +475,7 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   console.log(`🎬 atlasVideo[ad=${ad._id}]: prediction=${predictionId} polling...`);
 
   const remoteVideoUrl = await pollPrediction(predictionId);
+  const videoBuffer = await downloadToBuffer(remoteVideoUrl);
 
   // Mirror to Cloudinary. The eager transform pre-generates the
   // canvas-aspect saliency-crop derivative at upload time — but ONLY
