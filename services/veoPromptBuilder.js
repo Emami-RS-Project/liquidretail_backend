@@ -185,27 +185,27 @@ function textBeatSentence(tb, brand = null) {
 
   if (tb.motion && tb.motion !== 'static') {
     const motionPhrase = {
-      fade:           'fading up softly over ~10 frames',
+      fade:           'fading up softly',
       slide_up:       'sliding up from below',
       slide_in_left:  'sliding in from the left',
       slide_in_right: 'sliding in from the right',
       scale_in:       'scaling in gently',
-      pulse:          'with a single subtle pulse on entry'
+      pulse:          'with a single subtle pulse'
     }[tb.motion];
     if (motionPhrase) descriptors.push(motionPhrase);
   } else if (tb.motion === 'static') {
-    descriptors.push('appearing static, locked in place');
+    descriptors.push('static, locked in place');
   }
 
   if (tb.font_style) {
     const brandFont = brand?.fontFamily;
     const fontPhrase = {
-      brand:          brandFont ? `set in ${brandFont} or visually similar` : 'set in the brand wordmark style',
-      confident_sans: 'set in a confident clean sans-serif',
-      refined_serif:  'set in a refined humanist serif',
-      humanist_sans:  'set in a warm humanist sans-serif',
-      display:        'set in a strong display typeface',
-      monospace:      'set in a clean monospaced typeface'
+      brand:          brandFont ? `set in ${brandFont}` : 'set in the brand wordmark',
+      confident_sans: 'in a clean sans-serif',
+      refined_serif:  'in a humanist serif',
+      humanist_sans:  'in a warm humanist sans',
+      display:        'in a strong display face',
+      monospace:      'in a clean monospace'
     }[tb.font_style];
     if (fontPhrase) descriptors.push(fontPhrase);
   }
@@ -215,22 +215,22 @@ function textBeatSentence(tb, brand = null) {
     const secondaryHex = brand?.secondaryColor;
     const accentHex    = brand?.accentColor;
     const colorPhrase = {
-      brand_primary:   primaryHex   ? `in the brand primary color ${primaryHex}`   : 'in the brand primary color',
-      brand_secondary: secondaryHex ? `in the brand secondary color ${secondaryHex}` : 'in the brand secondary color',
-      brand_accent:    accentHex    ? `in the brand accent color ${accentHex}`     : 'in the brand accent color',
-      warm_gold:       'in warm gold (≈#D4AF37)',
+      brand_primary:   primaryHex   ? `in brand primary ${primaryHex}`   : 'in brand primary',
+      brand_secondary: secondaryHex ? `in brand secondary ${secondaryHex}` : 'in brand secondary',
+      brand_accent:    accentHex    ? `in brand accent ${accentHex}`     : 'in brand accent',
+      warm_gold:       'in warm gold (#D4AF37)',
       neutral_white:   'in clean white',
-      neutral_black:   'in deep neutral black'
+      neutral_black:   'in deep black'
     }[tb.color_hint];
     if (colorPhrase) descriptors.push(colorPhrase);
   }
 
   if (tb.background_treatment && tb.background_treatment !== 'none') {
     const bgPhrase = {
-      scrim:         'on a subtle bottom-up gradient scrim (≈30–40% black) for legibility over the moving footage',
-      solid_card:    'on a solid card-style background that anchors the text',
-      wash:          'on a soft light wash behind the text for the end-card freeze',
-      frosted_blur:  'on a frosted-blur backdrop with translucent glass effect'
+      scrim:         'on a subtle bottom scrim for legibility',
+      solid_card:    'on a solid card background',
+      wash:          'on a soft light wash',
+      frosted_blur:  'on a frosted-blur backdrop'
     }[tb.background_treatment];
     if (bgPhrase) descriptors.push(bgPhrase);
   }
@@ -453,31 +453,18 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
       if (scriptNarrative) lines.push(scriptNarrative);
     }
 
-    // Concise reminders after the script. Three sentences, not three
-    // hard-constraint blocks — keeps the prompt narrative-shaped end-
-    // to-end.
+    // Concise reminders after the script. Each text_beat now carries
+    // its own typography/color/motion/background descriptors inline, so
+    // there's no separate BRAND TYPOGRAPHY block — these reminders cover
+    // the hard rules that aren't per-beat.
     lines.push(
-      `Render every quoted overlay string EXACTLY character-for-character — no substitutions, no dropped letters, no stylized letterforms that distort spelling. ASCII letters and standard punctuation only; if you cannot render a string accurately, OMIT it.`
+      `Render every quoted overlay EXACTLY character-for-character — no substitutions, no dropped letters. ASCII only; if you cannot render a string accurately, OMIT it.`
     );
     lines.push(
-      `Keep the product itself untouched — same shape, color, label text, packaging across all 8 seconds. Do NOT redesign printed packaging text or add graphics onto the product. Overlay text is a separate visual layer rendered over the moving footage.`
+      `Keep the product untouched — same shape, color, label, packaging across all 8 seconds. Do NOT redesign printed packaging text. Overlay text is a separate visual layer over the footage.`
     );
     lines.push(
-      `Use clean legible typography — a confident sans-serif for headlines, the same or a refined humanist serif for body copy. Position every overlay so it does not collide with the primary subject.`
-    );
-
-    // Brand typography + color — Grok will use these to pick a font style
-    // that doesn't fight the brand.
-    if (brand?.primaryColor || brand?.fontFamily) {
-      const typoBits = [];
-      if (brand.fontFamily)   typoBits.push(`brand fontFamily preference: ${brand.fontFamily}`);
-      if (brand.primaryColor) typoBits.push(`brand primary color (use for accent/CTA only): ${brand.primaryColor}`);
-      lines.push(`BRAND TYPOGRAPHY: ${typoBits.join('; ')}.`);
-    }
-
-    lines.push(
-      `LOGOS / WATERMARKS: do NOT render any logos, badges, watermarks, or trademarks the brand hasn't authored. ` +
-      `If a brand_mark text_beat is provided, render it as a clean wordmark (text only, no fake logo glyphs).`
+      `Position every overlay so it does not collide with the primary subject. Do NOT render any logos, badges, or watermarks the brand hasn't authored.`
     );
   }
 
@@ -542,11 +529,16 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
   // sacred — they're what makes the ad work. Defensive guardrails go
   // first.
   if (rendersText && prompt.length > 4000) {
+    // Drop order: framing first (nice-to-have), then defensive guards,
+    // never the script narrative or the verbatim-text rule. CAMPAIGN
+    // BRIEF + BRAND VOICE are the newest additions — they sharpen
+    // Grok's read but the per-beat descriptors carry the load.
     const droppable = [
+      /^CAMPAIGN BRIEF:/i,
+      /^BRAND VOICE:/i,
+      /^STRATEGY:/i,
       /^PHYSICAL ACCURACY/i,
-      /^Ignore any text\/captions\/watermarks/i,
-      /^LOGOS \/ WATERMARKS/i,
-      /^BRAND TYPOGRAPHY/i
+      /^Ignore any text\/captions\/watermarks/i
     ];
     for (const pattern of droppable) {
       if (prompt.length <= 4000) break;
