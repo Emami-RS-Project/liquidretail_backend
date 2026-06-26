@@ -139,42 +139,53 @@ async function regenerateAd({ ad, prompt, mode, requestedBy }) {
 // ── Per-mode workers ──────────────────────────────────────────────────
 
 async function runVideoFull(adId, prompt) {
+  // Stage 1 — storyboard. Single creative director for both Grok motion
+  // and chrome text overlays. Generated once, then passed to both
+  // parallel renderers below.
   await setStage(adId, 'veo');
   const ad1 = await Ad.findById(adId).lean();
-  const veoResult = await veoService.generateForAd({ ad: ad1, operatorPrompt: prompt });
+  const { storyboard } = await veoService.prepareStoryboard({ ad: ad1, operatorPrompt: prompt });
+
+  if (storyboard) {
+    await Ad.updateOne({ _id: adId }, { $set: { veoStoryboard: storyboard, updatedAt: new Date() } });
+  }
+
+  // Stage 2 — fire Grok motion + chrome HTML in parallel. Both consume
+  // the storyboard. Chrome doesn't need the Grok output.
+  const adForChrome = await Ad.findById(adId).lean();
+  const [veoSettled, chromeSettled] = await Promise.allSettled([
+    veoService.generateForAd({ ad: ad1, operatorPrompt: prompt, storyboard }),
+    chromeService.generateForAd({ ad: adForChrome, operatorPrompt: prompt, storyboard })
+  ]);
+
+  if (veoSettled.status === 'rejected') throw veoSettled.reason;
+  const veoResult = veoSettled.value;
   if (veoResult.skipped) throw new Error(`Veo skipped: ${veoResult.reason}`);
 
-  // Stamp the raw render. For providers that render text natively
-  // (Grok via Atlas, rendersText=true), this IS the final ad — we
-  // overwrite renderUrl + posterUrl directly and skip chrome+composite.
-  // For Veo (rendersText=false), only the veo* fields are stamped here
-  // and runVideoLight runs chrome+composite to produce the final ad.
-  const updates = {
-    veoVideoUrl:    veoResult.videoUrl,
-    veoPrompt:      veoResult.prompt || null,
-    veoStoryboard:  veoResult.storyboard || null,
-    updatedAt:      new Date()
-  };
-  if (veoResult.rendersText) {
-    const posterUrl = veoResult.videoUrl?.includes('/video/upload/')
-      ? veoResult.videoUrl
-          .replace('/video/upload/', '/video/upload/so_0,f_jpg,q_auto:good/')
-          .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2')
-      : veoResult.videoUrl;
-    updates.renderUrl          = veoResult.videoUrl;
-    updates.posterUrl          = posterUrl;
-    updates.cloudinaryPublicId = veoResult.cloudinaryPublicId;
+  if (chromeSettled.status === 'rejected') {
+    console.warn(`🔁 regenerate[ad=${adId}]: chrome failed (non-fatal) — ${chromeSettled.reason?.message || chromeSettled.reason}`);
   }
-  await Ad.updateOne({ _id: adId }, { $set: updates });
 
-  // Chrome + composite only when the provider didn't render text itself.
-  if (!veoResult.rendersText) {
-    await runVideoLight(adId, prompt);
-  } else {
-    console.log(`🔁 regenerate[ad=${adId}]: skipping chrome+composite — provider rendersText=true (model=${veoResult.model})`);
-  }
+  // Stamp the raw render before composite so a composite failure leaves
+  // a viewable fallback (the bare Grok video).
+  await Ad.updateOne({ _id: adId }, {
+    $set: {
+      veoVideoUrl:    veoResult.videoUrl,
+      veoPrompt:      veoResult.prompt || null,
+      veoStoryboard:  veoResult.storyboard || storyboard || null,
+      updatedAt:      new Date()
+    }
+  });
+
+  // Stage 3 — Puppeteer composite over the Grok base.
+  await setStage(adId, 'composite');
+  const adWithChrome = await Ad.findById(adId).lean();
+  if (!adWithChrome?.chromeHtml) throw new Error('chromeHtml missing after chrome regeneration');
+  await puppeteerComposite.compositeForAd({ ad: adWithChrome });
 }
 
+// LIGHT regen — Grok video is reused, only chrome + composite re-runs.
+// Chrome reads the existing storyboard from the Ad doc.
 async function runVideoLight(adId, prompt) {
   await setStage(adId, 'chrome');
   const ad = await Ad.findById(adId).lean();

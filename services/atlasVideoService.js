@@ -2,17 +2,15 @@
 //
 // Primary use case (today): Grok's reference-to-video model
 // (xai/grok-imagine-video/reference-to-video). Grok accepts 1–7
-// reference images, renders text in-video without hallucination, and
-// costs ~$0.50/sec. Because Grok handles text natively, the chrome
-// HTML overlay + Puppeteer composite stages can be SKIPPED for Grok
-// renders — the model's output IS the final ad.
+// reference images and costs ~$0.50/sec. The model produces a motion-
+// only base video; all text overlays (headline, CTA, quote, brand mark)
+// are composited downstream by the chrome HTML + Puppeteer + ffmpeg
+// pipeline driven by the same storyboard's text_beats[].
 //
 // Reuses the existing prompt + storyboard pipeline (veoPromptBuilder +
-// veoStoryboardService). Those builders are provider-agnostic — they
-// direct motion, camera, audio, and scene without baking Veo-specific
-// assumptions into the prompt. The chrome guardrails (NO TEXT, etc.)
-// are preserved when chrome+composite remain on (defensive flag), but
-// the Grok-friendly path runs without them.
+// veoStoryboardService). Storyboard is the single source of truth: this
+// service consumes beats[]/camera/audio for the Grok prompt; the chrome
+// service consumes text_beats[] in parallel.
 //
 // Atlas API: 3-step async flow
 //   1. POST /model/generateVideo → { data: { id } }
@@ -44,25 +42,18 @@ function enabled() {
 
 // ── Per-model capability table ────────────────────────────────────────
 //
-// Drives request shape + downstream branching:
-//   rendersText=true  → chrome HTML + Puppeteer composite SKIPPED;
-//                       atlas output IS the final ad
+// Drives request shape:
 //   maxReferenceImages → caps how many image_urls we pack into the request
 //   paramShape         → which body fields Atlas expects for this provider
-// rendersText: true for Grok — but ONLY works when the prompt is a
-// coherent narrative script (HOOK → PROOF → END CARD choreography
-// with copy + camera + audio inline), not a metadata-bulleted config.
-// Grok reads natural prose like a director's brief and renders text
-// reliably when the instructions are continuous narrative. Earlier
-// attempts at structured/labeled formats (role=cta · position=… ·
-// scale=…) made Grok mangle the text because the metadata tokens
-// competed with the actual copy strings.
+//
+// Every model emits motion-only video. Text is composited downstream
+// by the chrome pipeline. The storyboard's text_beats[] feed chrome;
+// the storyboard's beats/camera/audio feed the prompt builder here.
 const MODEL_CAPS = {
   'xai/grok-imagine-video/reference-to-video': {
     minDuration: 1, maxDuration: 10,
     resolutions: ['480p', '720p'],
     maxReferenceImages: 7,
-    rendersText: true,
     paramShape: 'grok',
     supportedAspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3']
   },
@@ -70,7 +61,6 @@ const MODEL_CAPS = {
     minDuration: 5, maxDuration: 8,
     resolutions: ['720p', '1080p'],
     maxReferenceImages: 1,
-    rendersText: false,
     paramShape: 'veo',
     supportedAspectRatios: ['9:16', '16:9', '1:1']
   }
@@ -79,7 +69,7 @@ const MODEL_CAPS = {
 function capsFor(model) {
   return MODEL_CAPS[model] || {
     minDuration: 5, maxDuration: 8, resolutions: ['720p'],
-    maxReferenceImages: 1, rendersText: false, paramShape: 'generic',
+    maxReferenceImages: 1, paramShape: 'generic',
     supportedAspectRatios: ['1:1', '16:9', '9:16']
   };
 }
@@ -312,7 +302,69 @@ async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps })
 
 // ── Public API ────────────────────────────────────────────────────────
 
-async function generateForAd({ ad, operatorPrompt = null }) {
+// Prepare the storyboard for an ad — context load + GPT storyboard
+// generation, no video generation. Used by the orchestrator to produce
+// the storyboard once before dispatching Grok and chrome in parallel.
+// Returns { storyboard, aspectRatio } so the caller can stamp it on
+// the Ad doc and pass it to both renderers.
+async function prepareStoryboard({ ad, operatorPrompt = null }) {
+  const media = await Media.findById(ad.mediaId).lean();
+  if (!media) throw new Error(`Media ${ad.mediaId} not found`);
+
+  const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
+  const model = DEFAULT_MODEL;
+  const caps  = capsFor(model);
+  const aspectRatio = resolveAspectRatioForModel(platformAspect, caps);
+
+  const [brand, product, layoutInput, campaign] = await Promise.all([
+    Brand.findById(media.brandId).lean(),
+    ad.productId ? CatalogProduct.findById(ad.productId).lean() : null,
+    LayoutInputArtifact.findOne({ mediaId: media._id, productId: ad.productId || null })
+      .sort({ createdAt: -1 }).lean(),
+    ad.campaignId ? Campaign.findById(ad.campaignId).select('creativeBrief').lean() : null
+  ]);
+  const brief = campaign?.creativeBrief || null;
+
+  let concept = null;
+  if (ad.conceptId && ad.conceptArtifactId) {
+    const direction = await CreativeDirectionArtifact.findById(ad.conceptArtifactId).lean();
+    concept = direction?.concepts?.find(c => c.concept_id === ad.conceptId) || null;
+  }
+
+  const lpInput    = layoutInput?.input || null;
+  const lpSrcMedia = lpInput?.source_media || null;
+  const subject    = resolveSubject({ layoutInput: lpInput, sourceMedia: lpSrcMedia, media });
+
+  const layoutCopy  = lpInput?.copy || {};
+  const layoutProof = lpInput?.social_proof || {};
+  const conceptCopy = concept?.copy_picks || {};
+  const adCopy      = ad.copy || {};
+  const copy = {
+    headline:    adCopy.headline    || layoutCopy.headline    || layoutCopy.headline_main || conceptCopy.headline    || brand?.tagline || product?.title || null,
+    subheadline: adCopy.subheadline || layoutCopy.subheadline || conceptCopy.subheadline || null,
+    eyebrow:     layoutCopy.eyebrow || layoutCopy.headline_lead || conceptCopy.eyebrow || null,
+    cta_text:    adCopy.cta_text    || ad.ctaText || layoutCopy.cta_text || conceptCopy.cta || 'Shop Now',
+    primary_quote: layoutProof?.primary_quote || null,
+    brand_name:  brand?.name || null
+  };
+
+  const storyboard = await generateStoryboard({
+    concept, brand, product,
+    layoutInput:  lpInput,
+    sourceMedia:  lpSrcMedia,
+    subject,
+    aspectRatio,
+    operatorPrompt,
+    brandId:   media.brandId,
+    productId: ad.productId || null,
+    copy,
+    brief
+  });
+
+  return { storyboard, aspectRatio };
+}
+
+async function generateForAd({ ad, operatorPrompt = null, storyboard: precomputedStoryboard = null }) {
   if (!enabled()) return { skipped: true, reason: 'VIDEO_PROVIDER != atlas or ATLAS_API_KEY missing' };
 
   const media = await Media.findById(ad.mediaId).lean();
@@ -367,7 +419,10 @@ async function generateForAd({ ad, operatorPrompt = null }) {
     brand_name:  brand?.name || null
   };
 
-  const storyboard = await generateStoryboard({
+  // Storyboard may be supplied by the caller (orchestrator generated it
+  // once so it can be shared with the parallel chrome generator). Falls
+  // back to generating locally for legacy callers.
+  const storyboard = precomputedStoryboard || await generateStoryboard({
     concept, brand, product,
     layoutInput:  lpInput,
     sourceMedia:  lpSrcMedia,
@@ -376,15 +431,12 @@ async function generateForAd({ ad, operatorPrompt = null }) {
     operatorPrompt,
     brandId:   media.brandId,
     productId: ad.productId || null,
-    rendersText: caps.rendersText,
     copy,
     brief
   });
 
-  // Reuse the same prompt builder. rendersText flips the text-handling
-  // block from "NO TEXT IN VIDEO" (Veo) to "RENDER THESE TEXT BEATS"
-  // (Grok). The storyboard, camera, anatomy, and product-fidelity
-  // blocks are the load-bearing pieces and they're provider-agnostic.
+  // Motion-only prompt — text choreography is composited downstream by
+  // the chrome service consuming the same storyboard's text_beats[].
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
   const prompt = buildVeoPrompt({
     concept, brand, product, media,
@@ -394,9 +446,7 @@ async function generateForAd({ ad, operatorPrompt = null }) {
     seedHasText,
     hasProductReference: !!product?.imageUrl,
     operatorPrompt,
-    rendersText: caps.rendersText,
-    storyboard,
-    brief
+    storyboard
   });
 
   const imageUrls = buildReferenceImages({ media, product, aspectRatio, max: caps.maxReferenceImages });
@@ -413,9 +463,8 @@ async function generateForAd({ ad, operatorPrompt = null }) {
 
   const remoteVideoUrl = await pollPrediction(predictionId);
 
-  // Mirror to Cloudinary so the chrome+composite path (if forced on
-  // via ATLAS_VIDEO_FORCE_CHROME) and adDisplayUrlService keep working
-  // against a stable URL we control.
+  // Mirror to Cloudinary so the chrome+composite path and
+  // adDisplayUrlService work against a stable URL we control.
   const videoBuffer = await downloadToBuffer(remoteVideoUrl);
   const uploaded = await uploadBufferToCloudinary(videoBuffer, {
     folder:       `liquidretail/atlas_renders/${model.replace(/\//g, '_')}`,
@@ -426,7 +475,7 @@ async function generateForAd({ ad, operatorPrompt = null }) {
   const elapsedMs = Date.now() - t0;
   console.log(
     `🎬 atlasVideo[ad=${ad._id}]: done — model=${model} aspect=${aspectRatio} ` +
-    `rendersText=${caps.rendersText} took=${Math.round(elapsedMs / 1000)}s`
+    `took=${Math.round(elapsedMs / 1000)}s`
   );
 
   return {
@@ -438,7 +487,6 @@ async function generateForAd({ ad, operatorPrompt = null }) {
     prompt,
     storyboard,
     elapsedMs,
-    rendersText:        caps.rendersText,
     model
   };
 }
@@ -454,6 +502,7 @@ async function downloadToBuffer(url) {
 
 module.exports = {
   generateForAd,
+  prepareStoryboard,
   enabled,
   MODEL_CAPS,
   capsFor,

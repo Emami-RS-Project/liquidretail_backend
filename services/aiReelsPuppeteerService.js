@@ -58,15 +58,45 @@ function canvasAspectVideoUrl(veoVideoUrl, platformFormat) {
   return veoVideoUrl.replace('/video/upload/', `/video/upload/c_fill,${ar},g_auto/`);
 }
 
+// Cloudinary returns 423 Locked when an asset is still being transcoded
+// after upload — the secure_url resolves but a derived transform URL
+// (c_fill, ar_*, g_auto) isn't yet servable. Common race: we upload the
+// Grok mp4, immediately apply a saliency-crop transform for the
+// composite, hit Cloudinary before the underlying transcode publishes.
+// Retry with exponential backoff up to ~31s before giving up.
+const RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000, 16000];
+
 async function downloadToFile(url, destPath) {
-  const res = await axios.get(url, { responseType: 'stream', timeout: 120000 });
-  await new Promise((resolve, reject) => {
-    const out = fs.createWriteStream(destPath);
-    res.data.pipe(out);
-    out.on('finish', resolve);
-    out.on('error', reject);
-    res.data.on('error', reject);
-  });
+  const maxAttempts = RETRY_DELAYS_MS.length + 1;
+  let lastErr = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const res = await axios.get(url, { responseType: 'stream', timeout: 120000 });
+      await new Promise((resolve, reject) => {
+        const out = fs.createWriteStream(destPath);
+        res.data.pipe(out);
+        out.on('finish', resolve);
+        out.on('error', reject);
+        res.data.on('error', reject);
+      });
+      return;
+    } catch (err) {
+      const status = err.response?.status;
+      lastErr = err;
+      // Retry on 423 (Locked — Cloudinary still transcoding) and
+      // transient 5xx. Anything else is a hard failure.
+      const retriable = status === 423 || (status >= 500 && status < 600);
+      const haveMoreAttempts = attempt < RETRY_DELAYS_MS.length;
+      if (!retriable || !haveMoreAttempts) throw err;
+      const delayMs = RETRY_DELAYS_MS[attempt];
+      console.warn(
+        `   ⚠️  downloadToFile: ${status} on attempt ${attempt + 1}/${maxAttempts} — ` +
+        `retrying in ${delayMs}ms (Cloudinary likely transcoding)`
+      );
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
 }
 
 const TARGET_FPS   = parseInt(process.env.REELS_CHROME_FPS || '24', 10);

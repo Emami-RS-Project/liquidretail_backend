@@ -27,7 +27,7 @@ const Campaign     = require('../models/Campaign');
 const CampaignRun  = require('../models/CampaignRun');
 const { expandWizardJob, selectAdsForRun } = require('../services/campaignAdsGenerationService');
 const { renderCreative }        = require('../services/renderService');
-const { generateForAd: veoGenerateForAd }    = require('../services/videoRouter');
+const { generateForAd: veoGenerateForAd, prepareStoryboard: veoPrepareStoryboard } = require('../services/videoRouter');
 const { generateForAd: chromeGenerateForAd } = require('../services/aiReelsChromeService');
 const { compositeForAd: reelsPuppeteerComposite } = require('../services/aiReelsPuppeteerService');
 const { deleteFromCloudinary } = require('../services/cloudinaryService');
@@ -436,7 +436,29 @@ async function renderOne(run, job, adId, index, renderToken) {
   // ── Veo render path ────────────────────────────────────────────────
   if (ad.renderRoute === 'veo') {
     try {
-      const veoResult = await veoGenerateForAd({ ad });
+      // Stage 1 — generate the storyboard ONCE. It's the single source of
+      // truth: beats/camera/audio feed the Grok prompt; text_beats feed
+      // chrome. Both renderers then run in parallel against the same script.
+      const { storyboard } = await veoPrepareStoryboard({ ad });
+
+      // Stamp the storyboard early so chrome can read it from ad.veoStoryboard
+      // if the in-memory pass somehow drops, and downstream debug tools see it.
+      if (storyboard) {
+        await Ad.updateOne({ _id: adId }, { $set: { veoStoryboard: storyboard, updatedAt: new Date() } });
+      }
+
+      // Stage 2 — fire Grok + chrome in parallel. Chrome doesn't need the
+      // Grok output; it works from the storyboard + the seed image's
+      // subject bboxes. Composite still has to wait for Grok (it needs the
+      // base video), but chrome HTML is ready by then.
+      const adForChrome = await Ad.findById(adId).lean();
+      const [veoResultSettled, chromeSettled] = await Promise.allSettled([
+        veoGenerateForAd({ ad, storyboard }),
+        chromeGenerateForAd({ ad: adForChrome, storyboard })
+      ]);
+
+      if (veoResultSettled.status === 'rejected') throw veoResultSettled.reason;
+      const veoResult = veoResultSettled.value;
       if (veoResult.skipped) {
         await CampaignRun.updateOne({ _id: run._id }, { $inc: { skipped: 1 } });
         await Ad.updateOne(
@@ -445,8 +467,12 @@ async function renderOne(run, job, adId, index, renderToken) {
         );
         return;
       }
-      // Veo-fallback Ad state. Done BEFORE Stage 2/3 so a Stage 3 failure
-      // still leaves a viewable ad (raw Veo video). Stage 3 overwrites
+      if (chromeSettled.status === 'rejected') {
+        console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeSettled.reason?.message || chromeSettled.reason}`);
+      }
+
+      // Veo-fallback Ad state. Done BEFORE composite so a composite failure
+      // still leaves a viewable ad (raw Veo video). Composite overwrites
       // renderUrl/posterUrl/cloudinaryPublicId on success.
       const fallbackPosterUrl = veoResult.videoUrl?.includes('/video/upload/')
         ? veoResult.videoUrl
@@ -461,7 +487,7 @@ async function renderOne(run, job, adId, index, renderToken) {
             kind:               'video',
             veoVideoUrl:        veoResult.videoUrl,
             veoPrompt:          veoResult.prompt || null,
-            veoStoryboard:      veoResult.storyboard || null,
+            veoStoryboard:      veoResult.storyboard || storyboard || null,
             renderUrl:          veoResult.videoUrl,
             posterUrl:          fallbackPosterUrl || veoResult.videoUrl,
             cloudinaryPublicId: veoResult.cloudinaryPublicId,
@@ -472,40 +498,16 @@ async function renderOne(run, job, adId, index, renderToken) {
         }
       );
 
-      // Stages 2+3 (chrome HTML + Puppeteer composite) are SKIPPED when
-      // the video provider already rendered text natively in-frame.
-      // Grok via Atlas (xai/grok-imagine-video) renders text without
-      // hallucination, so the model output IS the final ad. Veo never
-      // renders text reliably — its videoRouter result always carries
-      // rendersText=false, and the legacy chrome+composite chain runs.
-      //
-      // The router also honors ATLAS_VIDEO_FORCE_CHROME=true as an
-      // override (sets rendersText=false even on Atlas) for A/B
-      // testing Grok-with-chrome against Grok-alone.
-      if (!veoResult.rendersText) {
-        // Stage 2 — GPT chrome overlay. Re-fetch the Ad so chromeGenerateForAd
-        // sees the freshly-stamped veoVideoUrl (it samples 8 frames from the
-        // Cloudinary video URL and passes them to GPT-4.1 for contrast-aware
-        // text placement). Persists chromeHtml directly; best-effort.
-        const adAfterVeo = await Ad.findById(adId).lean();
+      // Stage 3 — Puppeteer animated chrome capture + ffmpeg composite.
+      // Runs only when chrome HTML is present. Overwrites
+      // renderUrl/posterUrl/cloudinaryPublicId on success.
+      const adWithChrome = await Ad.findById(adId).lean();
+      if (adWithChrome?.chromeHtml) {
         try {
-          await chromeGenerateForAd({ ad: adAfterVeo });
-        } catch (chromeErr) {
-          console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeErr.message}`);
+          await reelsPuppeteerComposite({ ad: adWithChrome });
+        } catch (puppeteerErr) {
+          console.warn(`⚠️ reelsPuppeteer[ad=${adId}]: failed (non-fatal) — ${puppeteerErr.message}`);
         }
-
-        // Stage 3 — Puppeteer animated chrome capture + ffmpeg composite.
-        // Overwrites renderUrl/posterUrl/cloudinaryPublicId on success.
-        const adWithChrome = await Ad.findById(adId).lean();
-        if (adWithChrome?.chromeHtml) {
-          try {
-            await reelsPuppeteerComposite({ ad: adWithChrome });
-          } catch (puppeteerErr) {
-            console.warn(`⚠️ reelsPuppeteer[ad=${adId}]: failed (non-fatal) — ${puppeteerErr.message}`);
-          }
-        }
-      } else {
-        console.log(`🎬 [ad=${adId}]: skipping chrome+composite — provider rendersText=true (model=${veoResult.model})`);
       }
 
       await CampaignRun.updateOne({ _id: run._id }, { $inc: { succeeded: 1 } });
