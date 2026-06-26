@@ -360,7 +360,11 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
   if (Array.isArray(brand?.tone) && brand.tone.length) {
     lines.push(`Brand voice: ${brand.tone.slice(0, 4).join(', ')}.`);
   }
-  if (brand?.tagline) {
+  // Brand essence (tagline) is redundant with the BRAND VOICE block
+  // on the rendersText path AND with the text_beats themselves, which
+  // typically lift the tagline into the headline. Skip it on rendersText
+  // to free ~150-200 bytes; Veo path still gets it.
+  if (brand?.tagline && !rendersText) {
     lines.push(`Brand essence: "${brand.tagline}".`);
   }
 
@@ -374,14 +378,25 @@ function buildVeoPrompt({ concept, brand, product, media, layoutInput = null, so
   if (storyboard && Array.isArray(storyboard.beats) && storyboard.beats.length > 0) {
     // GPT-composed storyboard. Camera + beats + audio are all directed
     // per-ad rather than locked to the legacy 3-beat template.
-    const beatLines = storyboard.beats
-      .map(b => `${b.time}: ${b.description}`)
-      .join(' ');
-    lines.push(`8-second storyboard: ${beatLines}`);
-    lines.push(
-      `Camera: ${storyboard.camera}. ` +
-      `High-end lifestyle commercial color grading, photorealistic, 8K resolution.`
-    );
+    //
+    // On rendersText (Grok) path: the per-state script narrative below
+    // contains the same beat descriptions, so we skip the "8-second
+    // storyboard: <beats>" line to avoid duplicating ~600 bytes. Same
+    // for "Camera: <storyboard.camera>" — the storyboard composer often
+    // echoes the first beat description there, making it doubly
+    // redundant.
+    if (!rendersText) {
+      const beatLines = storyboard.beats
+        .map(b => `${b.time}: ${b.description}`)
+        .join(' ');
+      lines.push(`8-second storyboard: ${beatLines}`);
+      lines.push(
+        `Camera: ${storyboard.camera}. ` +
+        `High-end lifestyle commercial color grading, photorealistic, 8K resolution.`
+      );
+    } else {
+      lines.push(`Visual style: high-end lifestyle commercial color grading, photorealistic, 8K resolution.`);
+    }
     if (storyboard.vibe) lines.push(`Vibe: ${storyboard.vibe}.`);
     if (storyboard.audio) lines.push(`AUDIO: ${storyboard.audio}.`);
   } else {
