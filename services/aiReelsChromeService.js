@@ -206,8 +206,10 @@ function buildPrompt({ brand, storyboard, aspectRatio, platformFormat, subjects 
   lines.push(`    The storyboard sometimes picks a light color_hint AND a light background_treatment (or dark + dark). Light text on a light wash is invisible; dark text on a dark scrim is invisible. When you detect this mismatch, IGNORE the enum literally and pick the opposite-luminance hex:`);
   lines.push(`      background_treatment = "wash" or "solid_card" with light fill + color_hint asks for light → use a DARK hex (#1A1A1A or a deep brand color) instead`);
   lines.push(`      background_treatment = "scrim" (dark) + color_hint asks for dark → use a LIGHT hex (#FFFFFF or a bright brand color) instead`);
-  lines.push(`    The storyboard's color_hint is a TASTE direction; legibility wins when they conflict. If you applied this override, comment <!-- contrast_override --> at the top of the affected element's style block so the operator can audit.`);
+  lines.push(`    The storyboard's color_hint is a TASTE direction; legibility wins when they conflict.`);
   lines.push(`    Apply CSS @media (prefers-color-scheme) only if it makes sense for the chosen palette; the video is the dominant visual, your text just needs to read.`);
+  lines.push(`  - CSS SYNTAX (HARD RULE — non-compliance breaks the page layout entirely):`);
+  lines.push(`    ONLY use /* ... */ for comments inside <style> blocks. NEVER use <!-- ... --> inside CSS — those are HTML comment delimiters that the CSS parser treats as CDO/CDC tokens, corrupting the next selector. HTML comments are allowed in HTML markup, NEVER inside <style>.`);
   lines.push(`  - Translate "motion" to entry @keyframes:`);
   lines.push(`      fade           → opacity 0 → 1 over 0.6s (default for editorial)`);
   lines.push(`      slide_up       → translateY(40px) opacity 0 → translateY(0) opacity 1 over 0.6s`);
