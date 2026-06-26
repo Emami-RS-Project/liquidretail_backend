@@ -159,12 +159,18 @@ async function captureChromeFrames(chromeHtml, tmpDir, canvas) {
     });
     const page = await browser.newPage();
     await page.setViewport({ width: canvas.width, height: canvas.height, deviceScaleFactor: 1 });
-    await page.setContent(chromeHtml, { waitUntil: 'domcontentloaded' });
+    await page.setContent(chromeHtml, { waitUntil: 'networkidle0' });
 
-    // Wait for fonts so the first frame doesn't FOUT.
+    // Wait for fonts so the first frame doesn't FOUT. networkidle0 above
+    // ensures the @import CSS and the font woff2 files have all settled
+    // before we even hit fonts.ready — preventing the case where a
+    // late-loading latin-ext subset (curly quotes, em-dashes, stars)
+    // arrives after we've already started screenshotting.
     await page.waitForFunction('document.fonts.ready');
-    // Small settle to let GPU compositor pick up the layout.
-    await new Promise(r => setTimeout(r, 100));
+    // Settle to let GPU compositor pick up the layout. Bumped from 100ms
+    // to 500ms — the extra headroom catches subset woff2 files that
+    // download just after fonts.ready resolves.
+    await new Promise(r => setTimeout(r, 500));
 
     // Pause every animation so we control timing manually.
     await page.evaluate(() => {

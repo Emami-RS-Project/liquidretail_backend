@@ -81,8 +81,16 @@ function naturalizeLabel(label) {
   return m ? m[1].toLowerCase() : label.toLowerCase();
 }
 
-// Resolves subject identity and frame position from detect pipeline or
-// layoutInput.product.description. Returns null when no subject data exists.
+// Resolves subject identity, frame position, and vertical bounds from
+// the detect pipeline or layoutInput.product.description. Returns null
+// when no subject data exists.
+//
+// vSpan is the load-bearing field for storyboard text positioning —
+// it captures what fraction of the vertical canvas the subject occupies.
+// Without it, storyboard picks position enums blindly (e.g. lower_third)
+// even when the subject fills the whole vertical canvas, forcing chrome
+// to override every position downstream. vSpan lets the storyboard
+// choose positions that don't collide with the subject in the first place.
 function resolveSubject({ layoutInput, sourceMedia, media }) {
   const subjects   = sourceMedia?.subjects || [];
   const detectLabel = subjects[0]?.label
@@ -92,14 +100,39 @@ function resolveSubject({ layoutInput, sourceMedia, media }) {
   const label      = detectLabel || (richDesc ? 'subject' : null);
   if (!label) return null;
 
-  const bbox = subjects[0]?.bbox_pct || null;
+  // Prefer detect-pipeline bboxes (richer schema with x1/y1/x2/y2 OR
+  // bbox_pct). Fall back to media.subjects when sourceMedia is absent
+  // — same shape on the Media doc with x1/y1/x2/y2.
+  let bbox = subjects[0]?.bbox_pct || null;
+  let yTop = null, yBottom = null;
+  if (bbox) {
+    yTop = bbox.y;
+    yBottom = bbox.y + bbox.h;
+  } else if (subjects[0] && Number.isFinite(subjects[0].y1) && Number.isFinite(subjects[0].y2)) {
+    yTop = subjects[0].y1;
+    yBottom = subjects[0].y2;
+  } else {
+    const m = (media?.subjects || []).find(s => s?.role === 'primary' || !s?.role);
+    if (m && Number.isFinite(m.y1) && Number.isFinite(m.y2)) {
+      yTop = m.y1;
+      yBottom = m.y2;
+    }
+  }
+
   let hPos = null;
   if (bbox) {
     const cx = bbox.x + bbox.w / 2;
     hPos = cx < 0.35 ? 'left' : cx > 0.65 ? 'right' : 'center';
+  } else if (subjects[0] && Number.isFinite(subjects[0].x1) && Number.isFinite(subjects[0].x2)) {
+    const cx = (subjects[0].x1 + subjects[0].x2) / 2;
+    hPos = cx < 0.35 ? 'left' : cx > 0.65 ? 'right' : 'center';
   }
 
-  return { label: naturalizeLabel(label), richDesc, hPos };
+  const vSpan = (yTop != null && yBottom != null)
+    ? { top: yTop, bottom: yBottom }
+    : null;
+
+  return { label: naturalizeLabel(label), richDesc, hPos, vSpan };
 }
 
 function buildSubjectFramingInstruction(subject) {

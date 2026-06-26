@@ -21,9 +21,15 @@ const { archetypeDescription } = require('./veoPromptBuilder');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const MODEL_ID    = 'gpt-4o-mini';
+// Storyboard is the load-bearing creative call — concept comprehension,
+// DR-arc compliance, position/font/color taste picks. 4.1 is worth the
+// cost vs 4o-mini: schema compliance (END_CARD, brand_mark, HOOK rules)
+// improves measurably, and the storyboard is one call per ad anyway.
+// Chrome's mechanical CSS translation could later move down to a cheaper
+// model now that the heavy creative work landed here.
+const MODEL_ID    = process.env.VEO_STORYBOARD_MODEL_ID || 'gpt-4.1';
 const TEMPERATURE = 0.85;   // creative variance is the whole point of this service
-const MAX_TOKENS  = 800;
+const MAX_TOKENS  = 1500;   // bumped: 4.1 emits longer beat descriptions and full text_beats
 
 function enabled() {
   return String(process.env.VEO_USE_GPT_STORYBOARD || '').toLowerCase() === 'true';
@@ -229,6 +235,24 @@ function buildUserPrompt({ concept, brand, product, scene, lighting, mood, subje
   if (subject?.label) {
     const posText = subject.hPos ? ` framed on the ${subject.hPos} side` : '';
     lines.push(`Primary subject: ${subject.label}${posText}`);
+    if (subject.vSpan) {
+      const topPct    = Math.round(subject.vSpan.top * 100);
+      const bottomPct = Math.round(subject.vSpan.bottom * 100);
+      const span      = bottomPct - topPct;
+      lines.push(`Subject occupies vertical y:${topPct}%–${bottomPct}% of the canvas (${span}% tall).`);
+      // Translate to safe text zones. Storyboard MUST pick text positions
+      // outside these bounds or chrome will reflow them downstream.
+      const safeZones = [];
+      if (topPct > 12) safeZones.push(`above the subject: positions upper_third / corner_top_* (canvas y:0%–${Math.max(topPct - 2, 5)}%)`);
+      if (bottomPct < 88) safeZones.push(`below the subject: positions lower_third / center_lower / corner_bottom_* (canvas y:${Math.min(bottomPct + 2, 95)}%–100%)`);
+      if (safeZones.length === 0) {
+        lines.push(`Subject fills the canvas — text MUST sit at the very top (upper_third) or be small/lightweight at the corners. center / lower_third positions are FORBIDDEN.`);
+      } else {
+        lines.push(`Safe zones for text overlays — pick positions from these:`);
+        safeZones.forEach(z => lines.push(`  - ${z}`));
+        lines.push(`Do NOT use a "center" or "center_lower" position when the subject covers center.`);
+      }
+    }
   }
 
   lines.push(`Aspect ratio: ${aspectRatio}`);
