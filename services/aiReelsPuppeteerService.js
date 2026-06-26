@@ -63,8 +63,13 @@ function canvasAspectVideoUrl(veoVideoUrl, platformFormat) {
 // (c_fill, ar_*, g_auto) isn't yet servable. Common race: we upload the
 // Grok mp4, immediately apply a saliency-crop transform for the
 // composite, hit Cloudinary before the underlying transcode publishes.
-// Retry with exponential backoff up to ~31s before giving up.
-const RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000, 16000];
+//
+// atlasVideoService passes an `eager` hint to the upload so Cloudinary
+// starts pre-generating the canvas-aspect derivative the moment the
+// upload lands. That gives the transcode a head start. This retry
+// budget (~127s total across 8 attempts) covers the worst-case window
+// even when the eager transcode is slow.
+const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 32000, 32000, 32000];
 
 async function downloadToFile(url, destPath) {
   const maxAttempts = RETRY_DELAYS_MS.length + 1;

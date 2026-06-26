@@ -25,7 +25,18 @@ function uploadBufferToCloudinary(buffer, opts = {}) {
       // (queue-time unique index) usually short-circuits before we get here.
       overwrite: opts.overwrite ?? false,
       resource_type: opts.resourceType || 'image',
-      ...(opts.publicId ? { public_id: opts.publicId } : {})
+      ...(opts.publicId ? { public_id: opts.publicId } : {}),
+      // Eager transformations — Cloudinary starts pre-generating these
+      // derivatives the moment the upload lands instead of lazily on first
+      // request. Critical for the composite path: the chrome compositor
+      // hits a c_fill,ar_<canvas>,g_auto transform URL immediately after
+      // upload, and without an eager hint the lazy transcode is still
+      // running, returning 423 Locked. Eager + eager_async (default true
+      // for video) gives the transcode a head start without blocking the
+      // upload response.
+      ...(Array.isArray(opts.eager) && opts.eager.length
+        ? { eager: opts.eager, eager_async: opts.eagerAsync !== false }
+        : {})
     };
     const stream = cloudinary.uploader.upload_stream(uploadOpts, (err, result) => {
       if (err) return reject(err);

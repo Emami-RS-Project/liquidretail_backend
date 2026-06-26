@@ -80,6 +80,19 @@ function capsFor(model) {
 // reference images at the resolved aspect so the seed composition and
 // the model output are consistent — preventing the "seed framed for 4:5,
 // output rendered at 3:4" mismatch that would otherwise crop content.
+// Cloudinary ar_ param mapping for the eager transform on upload.
+// Must match aiReelsPuppeteerService.arParamForAspect — these are the
+// same derivative URL the composite stage will request, and we want
+// Cloudinary to start pre-generating it the moment we upload.
+function arParamForAspect(aspectRatio) {
+  const a = String(aspectRatio || '').trim();
+  if (a === '9:16')   return 'ar_9:16';
+  if (a === '16:9')   return 'ar_16:9';
+  if (a === '4:5')    return 'ar_4:5';
+  if (a === '1.91:1') return 'ar_191:100';
+  return 'ar_1:1';
+}
+
 function aspectToNumeric(ar) {
   const m = String(ar || '').match(/^([\d.]+)\s*:\s*([\d.]+)$/);
   if (!m) return null;
@@ -464,12 +477,19 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   const remoteVideoUrl = await pollPrediction(predictionId);
 
   // Mirror to Cloudinary so the chrome+composite path and
-  // adDisplayUrlService work against a stable URL we control.
-  const videoBuffer = await downloadToBuffer(remoteVideoUrl);
+  // adDisplayUrlService work against a stable URL we control. The
+  // eager transform kicks off the canvas-aspect saliency-crop derivative
+  // at upload time — without this hint, Cloudinary generates the
+  // c_fill,ar_<canvas>,g_auto derivative lazily on first request and
+  // the composite stage hits 423 Locked for ~60-90s while the transcode
+  // runs. Eager_async=true (default for video) is fine; we don't need
+  // to block the upload response, we just need Cloudinary to start.
+  const eagerCanvasTransform = `c_fill,${arParamForAspect(platformAspect)},g_auto`;
   const uploaded = await uploadBufferToCloudinary(videoBuffer, {
     folder:       `liquidretail/atlas_renders/${model.replace(/\//g, '_')}`,
     resourceType: 'video',
-    format:       'mp4'
+    format:       'mp4',
+    eager:        [{ raw_transformation: eagerCanvasTransform }]
   });
 
   const elapsedMs = Date.now() - t0;
