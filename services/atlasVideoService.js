@@ -80,6 +80,75 @@ function capsFor(model) {
 // reference images at the resolved aspect so the seed composition and
 // the model output are consistent — preventing the "seed framed for 4:5,
 // output rendered at 3:4" mismatch that would otherwise crop content.
+// ── Copy-bundle formatters ────────────────────────────────────────────
+//
+// Convert raw product/proof data into ready-to-render strings the
+// storyboard can pick verbatim for text_beats[]. Centralized here so
+// the rating glyph format, price currency rules, and badge dedup logic
+// stay consistent across runs.
+
+// Format a numeric rating (0–5) as a display string the storyboard can
+// render verbatim. Returns null when no rating data is available.
+// Examples:
+//   buildRatingString(4.5, null, null)   → "★★★★★ 4.5"
+//   buildRatingString(null, 4.2, 1234)   → "★★★★★ 4.2 (1,234 reviews)"
+//   buildRatingString(null, null, null)  → null
+function buildRatingString(layoutRating, productRating, reviewCount) {
+  const value = layoutRating ?? productRating;
+  if (value == null || isNaN(value)) return null;
+  const rounded = Math.round(value * 10) / 10;
+  // 5 filled stars regardless of fractional value — the numeric digit
+  // does the precision. Visually cleaner than half-star glyphs which
+  // many fonts handle poorly.
+  const stars = '★★★★★';
+  if (reviewCount && reviewCount > 0) {
+    const formattedCount = reviewCount >= 1000
+      ? `${Math.round(reviewCount / 100) / 10}k`
+      : String(reviewCount);
+    return `${stars} ${rounded} (${formattedCount} reviews)`;
+  }
+  return `${stars} ${rounded}`;
+}
+
+// Format a price as a display string. Prefers layoutInput.product.price
+// (LLM-derived, may include sale formatting) over CatalogProduct.price
+// (raw). Returns null when no price is available.
+function buildPriceString(layoutPrice, layoutCurrency, productPrice) {
+  // layoutInput sometimes pre-formats the price as a string ("$60 / $80")
+  // — pass through if so.
+  if (typeof layoutPrice === 'string' && layoutPrice.trim()) return layoutPrice.trim();
+  const price = layoutPrice ?? productPrice;
+  if (price == null || isNaN(price)) return null;
+  const currency = (layoutCurrency || 'USD').toUpperCase();
+  const symbol = ({ USD: '$', GBP: '£', EUR: '€', CAD: 'C$', AUD: 'A$' })[currency] || '';
+  // Whole numbers render without decimals; fractional render with cents.
+  const formatted = Number.isInteger(price)
+    ? `${price}`
+    : price.toFixed(2);
+  return symbol ? `${symbol}${formatted}` : `${formatted} ${currency}`;
+}
+
+// Deduplicate + lowercase-trim badges from social_proof.proof_badges
+// (trust signals: "Best Seller", "Award Winner") and product.badges
+// (catalog-side: "New", "Sale"). Cap at 4 — more than that is poster wall.
+function buildBadgeList(proofBadges, productBadges) {
+  const seen = new Set();
+  const out = [];
+  for (const arr of [proofBadges, productBadges]) {
+    if (!Array.isArray(arr)) continue;
+    for (const raw of arr) {
+      if (!raw) continue;
+      const text = String(raw).trim();
+      const key  = text.toLowerCase();
+      if (!text || seen.has(key)) continue;
+      seen.add(key);
+      out.push(text);
+      if (out.length >= 4) return out;
+    }
+  }
+  return out;
+}
+
 // Cloudinary ar_ param mapping for the eager transform on upload.
 // Must match aiReelsPuppeteerService.arParamForAspect — these are the
 // same derivative URL the composite stage will request, and we want
@@ -350,15 +419,35 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
 
   const layoutCopy  = lpInput?.copy || {};
   const layoutProof = lpInput?.social_proof || {};
+  const layoutProd  = lpInput?.product || {};
   const conceptCopy = concept?.copy_picks || {};
   const adCopy      = ad.copy || {};
+
+  // Compose ready-to-render content strings for the storyboard. Every
+  // string here is a candidate the storyboard's text_beats[] can pick
+  // verbatim. Sources, in priority order:
+  //   1. Ad-level cached copy (rerolls)
+  //   2. layoutInput.copy / .social_proof / .product (LLM-derived)
+  //   3. concept.copy_picks (V2 director output)
+  //   4. CatalogProduct + Brand (raw catalog data)
+  //
+  // New as of this commit: rating, price, benefits, badges, highlight,
+  // secondary_quote_* — unlock social-proof-led and promotional concepts
+  // to actually look different from editorial.
   const copy = {
     headline:    adCopy.headline    || layoutCopy.headline    || layoutCopy.headline_main || conceptCopy.headline    || brand?.tagline || product?.title || null,
     subheadline: adCopy.subheadline || layoutCopy.subheadline || conceptCopy.subheadline || null,
     eyebrow:     layoutCopy.eyebrow || layoutCopy.headline_lead || conceptCopy.eyebrow || null,
     cta_text:    adCopy.cta_text    || ad.ctaText || layoutCopy.cta_text || conceptCopy.cta || 'Shop Now',
     primary_quote: layoutProof?.primary_quote || null,
-    brand_name:  brand?.name || null
+    brand_name:  brand?.name || null,
+    product_name: layoutProd?.name || product?.title || null,
+    highlight:   layoutCopy.highlight_text || null,
+    rating:      buildRatingString(layoutProof?.rating_value, product?.rating, product?.reviewCount),
+    price:       buildPriceString(layoutProd?.price, layoutProd?.currency, product?.price),
+    benefits:    Array.isArray(layoutProd?.short_benefits) ? layoutProd.short_benefits.slice(0, 3) : [],
+    badges:      buildBadgeList(layoutProof?.proof_badges, layoutProd?.badges),
+    secondary_quotes: Array.isArray(layoutProof?.secondary_quotes) ? layoutProof.secondary_quotes.slice(0, 2) : []
   };
 
   const storyboard = await generateStoryboard({

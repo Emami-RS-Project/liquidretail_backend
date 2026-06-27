@@ -88,7 +88,7 @@ const RESPONSE_SCHEMA = {
           required: ['time', 'role', 'text', 'position', 'emphasis', 'scale', 'font_style', 'color_hint', 'motion', 'background_treatment'],
           properties: {
             time:     { type: 'string', description: 'Time range "0:00–0:03". Must fall within 0:00–0:08. Minimum duration per beat: 1.5s (zero-duration or sub-second beats are forbidden — the viewer cannot read them).' },
-            role:     { type: 'string', enum: ['headline', 'subheadline', 'eyebrow', 'cta', 'quote', 'attribution', 'brand_mark'] },
+            role:     { type: 'string', enum: ['headline', 'subheadline', 'eyebrow', 'cta', 'quote', 'attribution', 'brand_mark', 'rating', 'price', 'benefit', 'badge', 'highlight'], description: 'Semantic role. headline/subheadline/eyebrow/cta/quote/attribution/brand_mark are the classic copy elements. rating renders the star-and-number block ("★★★★★ 4.4"). price renders the price point ("$128"). benefit renders a single short product benefit. badge renders a trust signal ("Best Seller", "Award Winner"). highlight is a secondary callout — promotional emphasis text.' },
             text:     { type: 'string', description: 'The exact copy to render. Must match a string from the supplied copy_picks verbatim — no paraphrasing, no truncation.' },
             position: { type: 'string', enum: ['lower_third', 'upper_third', 'center', 'center_lower', 'corner_top_left', 'corner_top_right', 'corner_bottom_left', 'corner_bottom_right'] },
             emphasis: { type: 'string', enum: ['primary', 'secondary', 'caption'] },
@@ -129,10 +129,21 @@ function buildSystemPrompt() {
     '',
     'TEXT CHOREOGRAPHY (text_beats[]):',
     '- Use ONLY the copy strings supplied in the user prompt. Do NOT invent text. Do NOT paraphrase. Do NOT truncate.',
-    '- Pick the strings that match the concept\'s emphasis. Social-proof concepts lead with the quote + attribution. Urgency leads with the CTA. Brand-led leads with the headline + brand mark.',
-    '- If the concept is NOT social-proof-led, you may skip the quote even when one is supplied. Density beats relevance every time.',
+    '- Pick the strings that match the concept\'s emphasis:',
+    '    Social-proof-led concept → quote + attribution + rating (the rating string already includes ★★★★★ and the number; pair with warm_gold color_hint)',
+    '    Promotional / urgency concept → price + cta + highlight (lean into the savings/deadline)',
+    '    Brand-led concept → headline + brand_mark (low density, refined)',
+    '    Editorial concept → benefit OR quote + brand_mark; single-beat-per-state',
+    '    Ingredient/authority concept → benefit + headline + cta; substance over urgency',
+    '- If a copy string is not supplied (e.g. no rating, no quote), the corresponding beat is simply skipped. Do NOT substitute another string into that role.',
+    '- Density rule: 2–4 text_beats per ad. Quality beats quantity. Skip beats whose role doesn\'t serve the concept.',
     '- Pick positions that don\'t collide with the primary subject in the seed (subject position will be supplied in the user prompt when known).',
     '- For EVERY text_beat you produce, pick concrete values for ALL of: time, role, text, position, emphasis, scale, font_style, color_hint, motion, background_treatment. The chrome renderer is deterministic — it honors what you specify exactly, so undecided fields degrade the output.',
+    '- For role=rating: scale=small or medium, color_hint=warm_gold, position works well at corner_top_* or paired with a quote in solid_card.',
+    '- For role=price: scale=large or hero (price wants attention), color_hint depending on backdrop; if the copy includes a sale dash ($60 / $80), the chrome will render it verbatim.',
+    '- For role=benefit: scale=medium typically; benefits are subheadline-weight. Pick the strongest single benefit; don\'t stack multiple benefit beats.',
+    '- For role=badge: scale=small with solid_card background_treatment — badges read as authority pills.',
+    '- For role=highlight: scale=medium with scrim or solid_card; a callout but not the primary CTA.',
     '',
     'CHOOSING font_style (per beat):',
     '- These are typography CATEGORIES, not specific fonts. The chrome renderer picks the actual face.',
@@ -264,15 +275,36 @@ function buildUserPrompt({ concept, brand, product, scene, lighting, mood, subje
     if (copy.headline)     lines.push(`  headline:     "${copy.headline}"`);
     if (copy.subheadline)  lines.push(`  subheadline:  "${copy.subheadline}"`);
     if (copy.cta_text)     lines.push(`  cta:          "${copy.cta_text}"`);
+    if (copy.product_name) lines.push(`  product_name: "${copy.product_name}"  (use only when ad needs to anchor on product identity)`);
     if (copy.primary_quote?.text) {
       lines.push(`  quote:        "${copy.primary_quote.text}"`);
       if (copy.primary_quote.author_name) {
         lines.push(`  attribution:  "— ${copy.primary_quote.author_name}${copy.primary_quote.stars ? ` ★${copy.primary_quote.stars}` : ''}"`);
       }
     }
+    if (Array.isArray(copy.secondary_quotes)) {
+      copy.secondary_quotes.forEach((q, i) => {
+        if (q?.text) lines.push(`  secondary_quote_${i + 1}: "${q.text}"${q.author_name ? `  (— ${q.author_name})` : ''}`);
+      });
+    }
     if (copy.brand_name)   lines.push(`  brand_mark:   "${copy.brand_name}"`);
+    if (copy.rating)       lines.push(`  rating:       "${copy.rating}"  (role: rating, use warm_gold color_hint)`);
+    if (copy.price)        lines.push(`  price:        "${copy.price}"  (role: price)`);
+    if (copy.highlight)    lines.push(`  highlight:    "${copy.highlight}"`);
+    if (Array.isArray(copy.benefits) && copy.benefits.length) {
+      copy.benefits.forEach((b, i) => lines.push(`  benefit_${i + 1}:    "${b}"  (role: benefit, scale=small/medium)`));
+    }
+    if (Array.isArray(copy.badges) && copy.badges.length) {
+      copy.badges.forEach((b, i) => lines.push(`  badge_${i + 1}:      "${b}"  (role: badge, often warm_gold or brand color)`));
+    }
     lines.push('');
     lines.push('Pick the subset that best serves the concept. You do not have to use every string — but never invent new ones.');
+    lines.push('Concept-driven role selection:');
+    lines.push('  - social_proof_led concept → rating + quote + attribution dominate; headline secondary');
+    lines.push('  - promotional concept → price + cta + highlight dominate; create urgency');
+    lines.push('  - brand_led concept → headline + brand_mark dominate; minimal density');
+    lines.push('  - editorial concept → quote OR benefit + brand_mark; refined, single-beat-per-state');
+    lines.push('  - ugc_led concept → quote + attribution + (if creator) creator handle');
   }
 
   if (operatorPrompt && String(operatorPrompt).trim()) {
