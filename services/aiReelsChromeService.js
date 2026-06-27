@@ -288,6 +288,51 @@ function buildPrompt({ brand, storyboard, aspectRatio, platformFormat, subjects 
 
 // ── Public API ─────────────────────────────────────────────────────────
 
+// Light background_treatments — text on these must be dark to read.
+// Dark background_treatments — text on these must be light to read.
+// "none" is special: no backdrop means the text rides directly on the
+// video, which can be any luminance. We don't override "none" here;
+// the storyboard's color_hint stands.
+const LIGHT_BG_TREATMENTS = new Set(['wash', 'frosted_blur', 'solid_card']);
+const DARK_BG_TREATMENTS  = new Set(['scrim']);
+const LIGHT_COLOR_HINTS = new Set(['neutral_white', 'high_contrast_light']);
+const DARK_COLOR_HINTS  = new Set(['neutral_black', 'high_contrast_dark']);
+
+// Deterministic contrast normalization. Storyboard sometimes picks
+// color_hint + background_treatment combinations that render as
+// light-on-light or dark-on-dark — invisible against the video. The
+// prompt-level guard in chrome catches some cases but not all. Doing
+// the fix in code (BEFORE chrome's GPT call sees the script) makes the
+// chrome prompt's input always coherent — no contradiction for GPT to
+// resolve, no missed-edge cases.
+//
+// Mutates a shallow copy of the storyboard's text_beats; returns the
+// adjusted storyboard. Logs each override so traces show what changed.
+function normalizeContrast(storyboard, adId) {
+  if (!storyboard?.text_beats?.length) return storyboard;
+  const fixed = { ...storyboard, text_beats: storyboard.text_beats.map(tb => ({ ...tb })) };
+  const overrides = [];
+  for (const tb of fixed.text_beats) {
+    const isLightBg = LIGHT_BG_TREATMENTS.has(tb.background_treatment);
+    const isDarkBg  = DARK_BG_TREATMENTS.has(tb.background_treatment);
+    const isLightColor = LIGHT_COLOR_HINTS.has(tb.color_hint);
+    const isDarkColor  = DARK_COLOR_HINTS.has(tb.color_hint);
+    if (isLightBg && isLightColor) {
+      const oldColor = tb.color_hint;
+      tb.color_hint = 'high_contrast_dark';
+      overrides.push(`${tb.role}@${tb.time}: ${oldColor}+${tb.background_treatment} → high_contrast_dark`);
+    } else if (isDarkBg && isDarkColor) {
+      const oldColor = tb.color_hint;
+      tb.color_hint = 'high_contrast_light';
+      overrides.push(`${tb.role}@${tb.time}: ${oldColor}+${tb.background_treatment} → high_contrast_light`);
+    }
+  }
+  if (overrides.length) {
+    console.log(`🎨 reelsChrome[ad=${adId}]: contrast normalization (${overrides.length} override${overrides.length > 1 ? 's' : ''}): ${overrides.join('; ')}`);
+  }
+  return fixed;
+}
+
 // Accepts an explicit storyboard from the caller (parallel-execution
 // path). Falls back to ad.veoStoryboard when storyboard is not supplied
 // (legacy / re-render path where storyboard is already persisted).
@@ -296,10 +341,14 @@ async function generateForAd({ ad, storyboard = null, operatorPrompt = null }) {
   if (!enabledFor(platformFormat))  return { skipped: true, reason: `Veo flag off for ${platformFormat}` };
   if (!process.env.OPENAI_API_KEY)  return { skipped: true, reason: 'OPENAI_API_KEY not set' };
 
-  const sb = storyboard || ad.veoStoryboard || null;
-  if (!sb || !Array.isArray(sb.text_beats) || sb.text_beats.length === 0) {
+  const rawSb = storyboard || ad.veoStoryboard || null;
+  if (!rawSb || !Array.isArray(rawSb.text_beats) || rawSb.text_beats.length === 0) {
     return { skipped: true, reason: 'no storyboard.text_beats — nothing to render' };
   }
+  // Normalize contrast BEFORE the chrome prompt is built. The chrome
+  // prompt then receives a coherent script with no light-on-light or
+  // dark-on-dark contradictions for GPT to resolve.
+  const sb = normalizeContrast(rawSb, ad._id);
 
   const { media, brand } = await loadContext(ad);
   const aspectRatio = aspectRatioForPlatformFormat(platformFormat) || '9:16';
