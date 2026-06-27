@@ -250,8 +250,14 @@ function buildKeyframes(motion, beatIndex, durationMs, holdToEnd) {
   const lines = [`@keyframes ${name} {`];
 
   if (motion === 'static') {
-    // Instant appear at 0%, hold (or fade-out at the end).
-    lines.push(kf(0, 1, null));
+    // 0% MUST start at opacity:0 — with animation-fill-mode: both,
+    // the 0% keyframe value applies BEFORE the animation-delay. If
+    // 0% were opacity:1, the element would be visible from t=0
+    // (same bug class as the CTA-visible-entire-video issue we fixed
+    // by leaving the GPT-CSS path). Instant appear is achieved by
+    // jumping from opacity:0 → 1 at 0.01% (effectively instant).
+    lines.push(kf(0, 0, null));
+    lines.push(kf(0.01, 1, null));
     if (holdToEnd) {
       lines.push(kf(100, 1, null));
     } else {
