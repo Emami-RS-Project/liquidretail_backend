@@ -28,6 +28,22 @@ const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact')
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
 const { buildVeoPrompt, resolveSubject, aspectRatioForPlatformFormat } = require('./veoPromptBuilder');
 const { generateStoryboard } = require('./veoStoryboardService');
+const { buildLayoutInput }   = require('./layoutInputService');
+
+// Maps the concept's creative_style enum to an AI template id for
+// layoutInput derivation. Mirrors the table in campaignAdsGenerationService
+// but kept inline here to avoid a circular import. All AI templates
+// share the same derivationTemplate ('ugc_split_screen') so the
+// derived input is structurally identical across styles — picking the
+// concept-aligned template just preserves any style-specific derivation
+// hints baked into the registry.
+const CREATIVE_STYLE_TO_TEMPLATE = {
+  brand_led:        'ai_brand_led',
+  ugc_led:          'ai_ugc_led',
+  social_proof_led: 'ai_social_proof_led',
+  editorial:        'ai_editorial',
+  promotional:      'ai_promotional'
+};
 
 const BASE_URL     = process.env.ATLAS_BASE_URL || 'https://api.atlascloud.ai/api/v1';
 const DEFAULT_MODEL = process.env.ATLAS_VIDEO_MODEL || 'xai/grok-imagine-video/reference-to-video';
@@ -398,12 +414,12 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
   const caps  = capsFor(model);
   const aspectRatio = resolveAspectRatioForModel(platformAspect, caps);
 
-  const [brand, product, layoutInput, campaign] = await Promise.all([
+  const [brand, product, layoutInputInitial, campaign] = await Promise.all([
     Brand.findById(media.brandId).lean(),
     ad.productId ? CatalogProduct.findById(ad.productId).lean() : null,
     LayoutInputArtifact.findOne({ mediaId: media._id, productId: ad.productId || null })
       .sort({ createdAt: -1 }).lean(),
-    ad.campaignId ? Campaign.findById(ad.campaignId).select('creativeBrief').lean() : null
+    ad.campaignId ? Campaign.findById(ad.campaignId).select('creativeBrief kind').lean() : null
   ]);
   const brief = campaign?.creativeBrief || null;
 
@@ -411,6 +427,43 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
   if (ad.conceptId && ad.conceptArtifactId) {
     const direction = await CreativeDirectionArtifact.findById(ad.conceptArtifactId).lean();
     concept = direction?.concepts?.find(c => c.concept_id === ad.conceptId) || null;
+  }
+
+  // Video pipeline previously skipped layoutInput derivation, so
+  // products that hadn't been through the image-gen pipeline arrived
+  // here with no derived rating/price/benefits/badges/proof data —
+  // collapsing every ad to the concept.copy_picks fallback shape.
+  // Trigger derivation now if the artifact is missing or empty. The
+  // builder caches per (mediaId, template, aspectRatio, productId,
+  // variantKind, campaignContextHash) — so subsequent runs hit the
+  // cache instead of re-deriving. Non-fatal: if derivation fails
+  // (e.g. Gemini credits exhausted), we fall back to whatever data
+  // was already on the artifact / CatalogProduct.
+  let layoutInput = layoutInputInitial;
+  const lpEmpty = !layoutInput?.input || Object.keys(layoutInput.input || {}).length === 0;
+  if (lpEmpty && ad.productId) {
+    const tmpl = CREATIVE_STYLE_TO_TEMPLATE[concept?.creative_style] || 'ai_brand_led';
+    try {
+      console.log(`📐 layoutInput[ad=${ad._id}]: deriving (template=${tmpl}, aspect=${aspectRatio}, product=${ad.productId})...`);
+      const t0 = Date.now();
+      await buildLayoutInput({
+        mediaId:     media._id,
+        template:    tmpl,
+        aspectRatio,
+        options: {
+          campaignKind:  campaign?.kind || 'product',
+          variantKind:   'product_image',
+          productId:     ad.productId,
+          paletteSource: 'media'
+        }
+      });
+      console.log(`📐 layoutInput[ad=${ad._id}]: derived in ${Date.now() - t0}ms`);
+      layoutInput = await LayoutInputArtifact
+        .findOne({ mediaId: media._id, productId: ad.productId })
+        .sort({ createdAt: -1 }).lean();
+    } catch (err) {
+      console.warn(`⚠️  layoutInput[ad=${ad._id}]: derivation failed (non-fatal) — ${err.message}`);
+    }
   }
 
   const lpInput    = layoutInput?.input || null;
@@ -483,12 +536,12 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     );
   }
 
-  const [brand, product, layoutInput, campaign] = await Promise.all([
+  const [brand, product, layoutInputInitial, campaign] = await Promise.all([
     Brand.findById(media.brandId).lean(),
     ad.productId ? CatalogProduct.findById(ad.productId).lean() : null,
     LayoutInputArtifact.findOne({ mediaId: media._id, productId: ad.productId || null })
       .sort({ createdAt: -1 }).lean(),
-    ad.campaignId ? Campaign.findById(ad.campaignId).select('creativeBrief').lean() : null
+    ad.campaignId ? Campaign.findById(ad.campaignId).select('creativeBrief kind').lean() : null
   ]);
   const brief = campaign?.creativeBrief || null;
 
@@ -496,6 +549,43 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   if (ad.conceptId && ad.conceptArtifactId) {
     const direction = await CreativeDirectionArtifact.findById(ad.conceptArtifactId).lean();
     concept = direction?.concepts?.find(c => c.concept_id === ad.conceptId) || null;
+  }
+
+  // Video pipeline previously skipped layoutInput derivation, so
+  // products that hadn't been through the image-gen pipeline arrived
+  // here with no derived rating/price/benefits/badges/proof data —
+  // collapsing every ad to the concept.copy_picks fallback shape.
+  // Trigger derivation now if the artifact is missing or empty. The
+  // builder caches per (mediaId, template, aspectRatio, productId,
+  // variantKind, campaignContextHash) — so subsequent runs hit the
+  // cache instead of re-deriving. Non-fatal: if derivation fails
+  // (e.g. Gemini credits exhausted), we fall back to whatever data
+  // was already on the artifact / CatalogProduct.
+  let layoutInput = layoutInputInitial;
+  const lpEmpty = !layoutInput?.input || Object.keys(layoutInput.input || {}).length === 0;
+  if (lpEmpty && ad.productId) {
+    const tmpl = CREATIVE_STYLE_TO_TEMPLATE[concept?.creative_style] || 'ai_brand_led';
+    try {
+      console.log(`📐 layoutInput[ad=${ad._id}]: deriving (template=${tmpl}, aspect=${aspectRatio}, product=${ad.productId})...`);
+      const t0 = Date.now();
+      await buildLayoutInput({
+        mediaId:     media._id,
+        template:    tmpl,
+        aspectRatio,
+        options: {
+          campaignKind:  campaign?.kind || 'product',
+          variantKind:   'product_image',
+          productId:     ad.productId,
+          paletteSource: 'media'
+        }
+      });
+      console.log(`📐 layoutInput[ad=${ad._id}]: derived in ${Date.now() - t0}ms`);
+      layoutInput = await LayoutInputArtifact
+        .findOne({ mediaId: media._id, productId: ad.productId })
+        .sort({ createdAt: -1 }).lean();
+    } catch (err) {
+      console.warn(`⚠️  layoutInput[ad=${ad._id}]: derivation failed (non-fatal) — ${err.message}`);
+    }
   }
 
   const lpInput    = layoutInput?.input || null;
