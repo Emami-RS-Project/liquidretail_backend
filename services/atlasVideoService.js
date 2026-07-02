@@ -516,6 +516,21 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
     brief
   });
 
+  // Attach the copy bundle + concept metadata to the storyboard so
+  // downstream chrome normalization can (a) verify each text_beat's
+  // text is verbatim from the supplied copy (drop 4.1 hallucinations),
+  // (b) inject required role beats based on concept style + available
+  // content. Fields prefixed with underscore so they're clearly
+  // "meta" — not part of the storyboard schema, just piggyback data.
+  if (storyboard) {
+    storyboard._copy = copy;
+    storyboard._concept = concept ? {
+      creative_style:    concept.creative_style || null,
+      social_proof_type: concept.social_proof_type || null,
+      archetype:         concept.archetype || null
+    } : null;
+  }
+
   return { storyboard, aspectRatio };
 }
 
