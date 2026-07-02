@@ -19,6 +19,7 @@ const Ad     = require('../models/Ad');
 const Brand  = require('../models/Brand');
 const Media  = require('../models/Media');
 const { renderChrome, RENDERER_VERSION } = require('./chromeRendererService');
+const { getBrandStyle } = require('./brandStyles');
 
 const {
   aspectRatioForPlatformFormat
@@ -329,6 +330,54 @@ function normalizeContent(storyboard, adId) {
   return { ...storyboard, text_beats: kept };
 }
 
+// ── Brand-layout application ──────────────────────────────────────────
+//
+// Applies per-role position + treatment overrides from the brand's
+// style file. Runs AFTER content normalization (verbatim + injection)
+// and BEFORE contrast normalization (so contrast checks the final
+// brand-applied color × background combo).
+//
+// Storyboard's job: pick which roles + text + timing.
+// Brand's role_layout: pick where each role sits + how it looks.
+// If the brand has no role_layout entry for a beat's role, that beat
+// keeps whatever the storyboard picked (renderer defaults if unset).
+//
+// Fields that CAN be brand-overridden: position, scale, font_style,
+// color_hint, motion, background_treatment.
+// Fields that stay from storyboard: time, role, text, emphasis.
+// (Timing + copy + role are content decisions; the rest are identity.)
+
+const BRAND_OVERRIDABLE_FIELDS = [
+  'position', 'scale', 'font_style', 'color_hint',
+  'motion', 'background_treatment'
+];
+
+function applyBrandLayout(storyboard, brand, adId) {
+  if (!storyboard?.text_beats?.length) return storyboard;
+  const brandStyle = getBrandStyle(brand);
+  const layoutMap = brandStyle?.role_layout;
+  if (!layoutMap) return storyboard;
+
+  const fixed = { ...storyboard, text_beats: storyboard.text_beats.map(tb => ({ ...tb })) };
+  const overrides = [];
+  for (const tb of fixed.text_beats) {
+    const roleLayout = layoutMap[tb.role];
+    if (!roleLayout) continue;
+    const changed = [];
+    for (const field of BRAND_OVERRIDABLE_FIELDS) {
+      if (roleLayout[field] != null && tb[field] !== roleLayout[field]) {
+        changed.push(`${field}: ${tb[field]}→${roleLayout[field]}`);
+        tb[field] = roleLayout[field];
+      }
+    }
+    if (changed.length) overrides.push(`${tb.role}[${changed.join(', ')}]`);
+  }
+  if (overrides.length) {
+    console.log(`🎨 reelsChrome[ad=${adId}]: brand layout applied (${brandStyle.brandName || 'brand'}) — ${overrides.join('; ')}`);
+  }
+  return fixed;
+}
+
 // ── Contrast normalization ────────────────────────────────────────────
 //
 // Storyboard sometimes picks color_hint + background_treatment combinations
@@ -390,20 +439,25 @@ async function generateForAd({ ad, storyboard = null, operatorPrompt = null }) {
     return { skipped: true, reason: 'no storyboard.text_beats — nothing to render' };
   }
 
-  // Two-stage deterministic normalization before rendering:
-  //   1. Content — verbatim-copy enforcement, role injection based on
-  //      concept style + available content, density cap.
-  //   2. Contrast — flip color_hint when it would render invisibly
-  //      against the chosen background_treatment.
+  const { media, brand } = await loadContext(ad);
+
+  // Three-stage deterministic normalization before rendering:
+  //   1. Content    — verbatim-copy enforcement, role injection,
+  //                   density cap. Ensures the beat list is trustworthy.
+  //   2. Brand layout — per-role position + treatment overrides from
+  //                     the brand's style file. Ensures visual identity
+  //                     is consistent across every ad for the brand.
+  //   3. Contrast   — flip color_hint when it would render invisibly
+  //                   against the (possibly brand-overridden) background.
   // Order matters: content first (may add new beats via injection),
-  // then contrast (checks each surviving beat's color × background).
+  // then brand layout (may swap positions/backgrounds/colors), then
+  // contrast (final legibility guarantor).
   const contentSb = normalizeContent(rawSb, ad._id);
   if (!contentSb.text_beats?.length) {
     return { skipped: true, reason: 'no text_beats survived content normalization' };
   }
-  const sb = normalizeContrast(contentSb, ad._id);
-
-  const { media, brand } = await loadContext(ad);
+  const brandedSb = applyBrandLayout(contentSb, brand, ad._id);
+  const sb = normalizeContrast(brandedSb, ad._id);
   const subjects = Array.isArray(media?.subjects) ? media.subjects : [];
 
   const t0 = Date.now();
@@ -436,4 +490,4 @@ async function generateForAd({ ad, storyboard = null, operatorPrompt = null }) {
   return { chromeHtml, elapsedMs };
 }
 
-module.exports = { generateForAd, enabled, enabledFor, normalizeContrast, normalizeContent };
+module.exports = { generateForAd, enabled, enabledFor, normalizeContrast, normalizeContent, applyBrandLayout };

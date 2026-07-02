@@ -26,7 +26,9 @@ const {
   safeAreaForPlatformFormat
 } = require('./platformFormats');
 
-const RENDERER_VERSION = '3.0.0';   // deterministic, GPT-free
+const { getBrandStyle } = require('./brandStyles');
+
+const RENDERER_VERSION = '3.1.0';   // per-brand style overrides
 
 // ── Time parsing ────────────────────────────────────────────────────────
 
@@ -52,11 +54,12 @@ const BASE_FONT_SIZE = {
   small:  28
 };
 
-function resolveFontSize(scale, canvas) {
+function resolveFontSize(scale, canvas, brandStyle = null) {
+  const base = (brandStyle?.fontSizes?.[scale]) ?? BASE_FONT_SIZE[scale] ?? BASE_FONT_SIZE.medium;
   const baseShort = 1000;   // Reels canvas short edge
   const shortEdge = Math.min(canvas.width, canvas.height);
   const scaleFactor = shortEdge / baseShort;
-  return Math.round((BASE_FONT_SIZE[scale] || BASE_FONT_SIZE.medium) * scaleFactor);
+  return Math.round(base * scaleFactor);
 }
 
 // ── Font style → Google Font + family chain ─────────────────────────────
@@ -93,7 +96,9 @@ const FONT_STYLES = {
   }
 };
 
-function resolveFontStyle(fontStyle) {
+function resolveFontStyle(fontStyle, brandStyle = null) {
+  const override = brandStyle?.fonts?.[fontStyle];
+  if (override) return override;
   return FONT_STYLES[fontStyle] || FONT_STYLES.confident_sans;
 }
 
@@ -115,7 +120,9 @@ const COLOR_HINTS = {
   brand_accent:        '#1A1A1A'
 };
 
-function resolveColor(colorHint) {
+function resolveColor(colorHint, brandStyle = null) {
+  const override = brandStyle?.colors?.[colorHint];
+  if (override) return override;
   return COLOR_HINTS[colorHint] || COLOR_HINTS.neutral_white;
 }
 
@@ -151,13 +158,16 @@ const CORNER_MAX_WIDTH_RATIO = 0.30;
 // sits on the canvas; the content element handles styling + animation.
 // This isolates the animation's transform from any centering transform,
 // preventing the keyframe-overrides-translate(-50%,-50%) bug.
-function resolvePosition(positionEnum, canvas, safe) {
+function resolvePosition(positionEnum, canvas, safe, brandStyle = null) {
   const safeRect = {
     y:      safe.top || 0,
     height: canvas.height - (safe.top || 0) - (safe.bottom || 0)
   };
-  const centerMaxW = Math.round(canvas.width * CENTER_MAX_WIDTH_RATIO);
-  const cornerMaxW = Math.round(canvas.width * CORNER_MAX_WIDTH_RATIO);
+  const cornerInset = brandStyle?.cornerInset ?? CORNER_INSET;
+  const centerRatio = brandStyle?.centerMaxWidthRatio ?? CENTER_MAX_WIDTH_RATIO;
+  const cornerRatio = brandStyle?.cornerMaxWidthRatio ?? CORNER_MAX_WIDTH_RATIO;
+  const centerMaxW = Math.round(canvas.width * centerRatio);
+  const cornerMaxW = Math.round(canvas.width * cornerRatio);
 
   // Centered positions: wrapper spans full width with text-align:center;
   // content is inline-block centered horizontally by the wrapper.
@@ -175,10 +185,10 @@ function resolvePosition(positionEnum, canvas, safe) {
   // Corner positions: wrapper anchored to that corner; content is inline-block.
   const corner = (vert, horiz) => {
     const w = {};
-    if (vert === 'top')   w.top    = safeRect.y + CORNER_INSET;
-    if (vert === 'bot')   w.bottom = canvas.height - safeRect.y - safeRect.height + CORNER_INSET;
-    if (horiz === 'left') w.left   = CORNER_INSET;
-    if (horiz === 'right')w.right  = CORNER_INSET;
+    if (vert === 'top')   w.top    = safeRect.y + cornerInset;
+    if (vert === 'bot')   w.bottom = canvas.height - safeRect.y - safeRect.height + cornerInset;
+    if (horiz === 'left') w.left   = cornerInset;
+    if (horiz === 'right')w.right  = cornerInset;
     return { mode: 'corner', wrapper: w, content: { maxWidth: cornerMaxW } };
   };
 
@@ -335,16 +345,16 @@ function buildBackgroundCSS(treatment, textHex) {
 
 // Produces one full CSS block + one HTML <div> for a text_beat.
 // Returns { css, html } or null if the beat is unrenderable.
-function renderBeat(textBeat, beatIndex, canvas, safe) {
+function renderBeat(textBeat, beatIndex, canvas, safe, brandStyle = null) {
   const time = parseTimeRange(textBeat.time);
   if (!time) return null;
   const durationMs = Math.max(0, time.endMs - time.startMs);
   if (durationMs < 100) return null;   // skip degenerate 0:08-0:08 beats
 
-  const pos        = resolvePosition(textBeat.position, canvas, safe);
-  const fontSpec   = resolveFontStyle(textBeat.font_style);
-  const fontSize   = resolveFontSize(textBeat.scale, canvas);
-  const textHex    = resolveColor(textBeat.color_hint);
+  const pos        = resolvePosition(textBeat.position, canvas, safe, brandStyle);
+  const fontSpec   = resolveFontStyle(textBeat.font_style, brandStyle);
+  const fontSize   = resolveFontSize(textBeat.scale, canvas, brandStyle);
+  const textHex    = resolveColor(textBeat.color_hint, brandStyle);
   const bgCSS      = buildBackgroundCSS(textBeat.background_treatment, textHex);
   const holdToEnd  = isHoldToEnd(time.endMs);
   const { keyframes, name: animName } = buildKeyframes(textBeat.motion || 'fade', beatIndex, durationMs, holdToEnd);
@@ -414,20 +424,22 @@ function dimsFor(platformFormat) {
 }
 
 // Render the full chrome HTML document. Synchronous, side-effect-free.
+// Per-brand style overrides (fonts, colors, sizes, corner insets) are
+// looked up from services/brandStyles/ by brand.name and merged over
+// renderer defaults. Absent brand or unregistered brand → pure defaults.
 function renderChrome({ storyboard, platformFormat = 'meta_reels_9_16', brand = null, subjects = [] }) {
   const { canvas, safe } = dimsFor(platformFormat);
+  const brandStyle = getBrandStyle(brand);
   const textBeats = Array.isArray(storyboard?.text_beats) ? storyboard.text_beats : [];
 
   if (textBeats.length === 0) {
-    // Empty chrome — just an invisible transparent canvas so the
-    // composite pipeline still produces a clean ad.
-    return buildHTML(canvas, '', '', new Set(), { version: RENDERER_VERSION });
+    return buildHTML(canvas, '', '', new Set(), { version: RENDERER_VERSION, brandStyle });
   }
 
   const renderedBeats = [];
   const fontImports = new Set();
   for (let i = 0; i < textBeats.length; i++) {
-    const result = renderBeat(textBeats[i], i, canvas, safe);
+    const result = renderBeat(textBeats[i], i, canvas, safe, brandStyle);
     if (!result) continue;
     renderedBeats.push(result);
     fontImports.add(result.fontImport);
@@ -436,7 +448,7 @@ function renderChrome({ storyboard, platformFormat = 'meta_reels_9_16', brand = 
   const cssBlocks = renderedBeats.map(b => b.css).join('\n\n');
   const htmlBlocks = renderedBeats.map(b => b.html).join('\n');
 
-  return buildHTML(canvas, cssBlocks, htmlBlocks, fontImports, { version: RENDERER_VERSION });
+  return buildHTML(canvas, cssBlocks, htmlBlocks, fontImports, { version: RENDERER_VERSION, brandStyle });
 }
 
 // HTML wrapper. @import the union of all fonts used by the beats.
@@ -445,7 +457,11 @@ function buildHTML(canvas, cssBlocks, htmlBlocks, fontImports, meta) {
     ? `@import url('https://fonts.googleapis.com/css2?${Array.from(fontImports).map(f => 'family=' + f).join('&')}&display=swap');`
     : '';
 
+  const brandStyleTag = meta.brandStyle
+    ? `<!-- brandStyle: ${meta.brandStyle.brandName || 'custom'} -->`
+    : '<!-- brandStyle: default -->';
   return `<!-- chromeRenderer v${meta.version} -->
+${brandStyleTag}
 <!DOCTYPE html>
 <html lang="en">
 <head>
