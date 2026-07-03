@@ -235,6 +235,102 @@ router.post('/:id/render-script', express.json(), async (req, res) => {
   }
 });
 
+// POST /api/brand/:id/generate-script
+// Uses Claude (via Atlas) to draft a canvas overlay script for this
+// brand. Loads brand context + the U Beauty reference template, builds
+// a sandbox-contract system prompt, and returns the generated JS.
+// Does NOT save — caller reviews then hits the Style card's Save.
+// Body: { direction?: string } — optional operator nudge (e.g.
+// "very minimal, no CTA button, brand mark upper-right").
+router.post('/:id/generate-script', express.json(), async (req, res) => {
+  const started = Date.now();
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+
+    const direction = String(req.body?.direction || '').trim();
+
+    // Load U Beauty script template as a concrete reference — much
+    // more effective than describing the contract in prose. Falls back
+    // to a contract-only prompt if the file's missing.
+    const fs = require('fs');
+    const path = require('path');
+    let referenceScript = '';
+    try {
+      referenceScript = fs.readFileSync(
+        path.join(__dirname, '..', 'services', 'brandScripts', 'u_beauty.script.js'),
+        'utf8'
+      );
+    } catch { /* absent — proceed with contract-only prompt */ }
+
+    const system = [
+      'You are generating a per-brand canvas overlay script for a video ad pipeline.',
+      '',
+      'The script runs in a sandboxed Node.js child process. It MUST:',
+      '- Export a single object via `module.exports = { renderFrame: async (frameIndex, ctx, plate, meta, h) => { ... } };`',
+      '- Draw one frame per call. Consumer loops frameIndex from 0 to totalFrames-1.',
+      '- Draw the plate first (`ctx.drawImage(plate, 0, 0, ctx.canvas.width, ctx.canvas.height)`) if the base video should be visible.',
+      '- Use ONLY the sandbox globals: `canvas` (@napi-rs/canvas namespace), `sharp` (image ops), `helpers` / `h` (clamp, t01, eoc, eob, smooth, rgba), `colors` (WHITE, BLACK, NAVY, GOLD, HEART, SOFT).',
+      '- NEVER call `require`, `process`, `fs`, `global`, `import`. These are not available in the sandbox.',
+      '- Reference text vars only via `meta.<key>`: brandName, headline, cta, quote, productName, price, benefits[], badges[], reviewsText, likes. Provide safe fallbacks for any missing key.',
+      '- Reference fonts by family name in `ctx.font = "<weight> <size>px \\"FamilyName\\""`. Available families depend on what\'s bundled in assets/fonts — safe bets: Inter, Montserrat, Great Vibes, Cormorant Garamond, Lora, Playfair Display, DM Sans, Antonio.',
+      '',
+      'OUTPUT: return ONLY the raw JS source. No markdown fences, no commentary. Start with `module.exports = {` and end with `};` (or top-level helpers followed by module.exports). The file must be directly assignable to Brand.styleScript and runnable in the sandbox as-is.'
+    ].join('\n');
+
+    const brandContextLines = [
+      `Brand name: ${brand.name}`,
+      brand.tagline           ? `Tagline: ${brand.tagline}` : null,
+      brand.summary           ? `Summary: ${brand.summary}` : null,
+      brand.tone?.length      ? `Tone: ${brand.tone.join(', ')}` : null,
+      brand.primaryColor      ? `Primary color: ${brand.primaryColor}` : null,
+      brand.secondaryColor    ? `Secondary color: ${brand.secondaryColor}` : null,
+      brand.accentColor       ? `Accent color: ${brand.accentColor}` : null,
+      brand.fontColor         ? `Font color: ${brand.fontColor}` : null,
+      brand.fontFamily        ? `Preferred font family: ${brand.fontFamily}` : null,
+      brand.hashtags?.length  ? `Hashtags: ${brand.hashtags.join(' ')}` : null
+    ].filter(Boolean);
+
+    const user = [
+      `Generate a canvas overlay script tailored to this brand:`,
+      '',
+      brandContextLines.join('\n'),
+      '',
+      direction ? `Operator direction: ${direction}` : '',
+      '',
+      referenceScript ? '── Reference script (U Beauty — study the structure, then produce a distinctly different aesthetic for the brand above):' : '',
+      referenceScript ? '```javascript' : '',
+      referenceScript,
+      referenceScript ? '```' : '',
+      '',
+      `Now write the ${brand.name} script.`
+    ].filter(Boolean).join('\n');
+
+    const { generate, DEFAULT_MODEL } = require('../services/atlasTextService');
+    const result = await generate({ system, user, temperature: 0.5, maxTokens: 4096 });
+
+    // Strip accidental markdown fences (Claude sometimes wraps despite
+    // the instruction). Keeps the payload directly pastable into the
+    // Style card textarea.
+    const cleaned = result.text
+      .replace(/^```(?:javascript|js)?\s*\n?/i, '')
+      .replace(/\n?```\s*$/i, '')
+      .trim();
+
+    res.json({
+      ok:          true,
+      script:      cleaned,
+      model:       result.model,
+      usage:       result.usage,
+      finishReason: result.finishReason,
+      totalMs:     Date.now() - started
+    });
+  } catch (err) {
+    console.error('generate-script failed:', err);
+    res.status(err.status || 500).json({ error: err.message || 'generate-script failed' });
+  }
+});
+
 // GET /api/brand/:id/style
 // Returns the current per-brand video style state:
 //   - overrides       — Brand.styleOverrides (JSON layout, enum-based)
