@@ -10,10 +10,10 @@
 const axios = require('axios');
 
 const BASE_URL = process.env.ATLAS_BASE_URL || 'https://api.atlascloud.ai/api/v1';
-// Default to the latest small-context Claude on Atlas. Override via
-// ATLAS_TEXT_MODEL_ID (e.g. anthropic/claude-opus-4-1) when a task
+// Default to the latest Claude Sonnet on Atlas. Override via
+// ATLAS_TEXT_MODEL_ID (e.g. anthropic/claude-opus-4.7) when a task
 // needs bigger context or more reasoning.
-const DEFAULT_MODEL = process.env.ATLAS_TEXT_MODEL_ID || 'anthropic/claude-sonnet-4-5';
+const DEFAULT_MODEL = process.env.ATLAS_TEXT_MODEL_ID || 'anthropic/claude-sonnet-4.6';
 
 const HTTP_TIMEOUT_MS = 5 * 60 * 1000; // Claude script gen can run 30-90s.
 
