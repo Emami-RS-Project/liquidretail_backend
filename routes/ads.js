@@ -22,6 +22,7 @@ const router = express.Router();
 
 const Ad           = require('../models/Ad');
 const Media        = require('../models/Media');
+const Brand        = require('../models/Brand');
 const CropArtifact = require('../models/CropArtifact');
 const Campaign     = require('../models/Campaign');
 const CampaignRun  = require('../models/CampaignRun');
@@ -447,15 +448,28 @@ async function renderOne(run, job, adId, index, renderToken) {
         await Ad.updateOne({ _id: adId }, { $set: { veoStoryboard: storyboard, updatedAt: new Date() } });
       }
 
-      // Stage 2 — fire Grok + chrome in parallel. Chrome doesn't need the
-      // Grok output; it works from the storyboard + the seed image's
-      // subject bboxes. Composite still has to wait for Grok (it needs the
-      // base video), but chrome HTML is ready by then.
+      // Load brand once to decide which overlay path this ad takes.
+      // When Brand.styleScript is set, the sandboxed canvas executor
+      // replaces the HTML/Puppeteer chrome path — chrome HTML gen is
+      // wasted work in that case, so we skip its parallel dispatch.
+      const brandMedia = await Media.findById(ad.mediaId).select('brandId').lean();
+      const brandDoc   = brandMedia?.brandId
+        ? await Brand.findById(brandMedia.brandId).select('name styleScript').lean()
+        : null;
+      const useCanvasScript = !!(brandDoc?.styleScript && String(brandDoc.styleScript).trim());
+
+      // Stage 2 — fire Grok + chrome in parallel. Chrome is skipped
+      // when the brand opts into the canvas path. Composite still has
+      // to wait for Grok (it needs the base video), but chrome HTML
+      // (when used) is ready by then.
       const adForChrome = await Ad.findById(adId).lean();
-      const [veoResultSettled, chromeSettled] = await Promise.allSettled([
-        veoGenerateForAd({ ad, storyboard }),
-        chromeGenerateForAd({ ad: adForChrome, storyboard })
-      ]);
+      const parallel = [veoGenerateForAd({ ad, storyboard })];
+      if (!useCanvasScript) {
+        parallel.push(chromeGenerateForAd({ ad: adForChrome, storyboard }));
+      }
+      const settled = await Promise.allSettled(parallel);
+      const veoResultSettled = settled[0];
+      const chromeSettled    = settled[1]; // may be undefined when canvas path is taken
 
       if (veoResultSettled.status === 'rejected') throw veoResultSettled.reason;
       const veoResult = veoResultSettled.value;
@@ -467,7 +481,7 @@ async function renderOne(run, job, adId, index, renderToken) {
         );
         return;
       }
-      if (chromeSettled.status === 'rejected') {
+      if (chromeSettled && chromeSettled.status === 'rejected') {
         console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeSettled.reason?.message || chromeSettled.reason}`);
       }
 
@@ -499,13 +513,26 @@ async function renderOne(run, job, adId, index, renderToken) {
         }
       );
 
-      // Stage 3 — Puppeteer animated chrome capture + ffmpeg composite.
-      // Runs only when chrome HTML is present. Overwrites
-      // renderUrl/posterUrl/cloudinaryPublicId on success.
-      const adWithChrome = await Ad.findById(adId).lean();
-      if (adWithChrome?.chromeHtml) {
+      // Stage 3 — final overlay + composite. Two paths:
+      //   canvas — brand-owned styleScript (sandboxed child, direct
+      //            frame-level draws with @napi-rs/canvas). Overwrites
+      //            renderUrl on success.
+      //   HTML   — legacy Puppeteer capture + ffmpeg overlay of
+      //            chrome PNGs onto Grok video. Overwrites
+      //            renderUrl/posterUrl/cloudinaryPublicId on success.
+      // Either failure is non-fatal — Ad.renderUrl already carries
+      // the raw Grok video from the Stage 2.5 update above.
+      const adFinal = await Ad.findById(adId).lean();
+      if (useCanvasScript && brandDoc) {
         try {
-          await reelsPuppeteerComposite({ ad: adWithChrome });
+          const { renderBrandScriptAndSave } = require('../services/brandScriptExecutor');
+          await renderBrandScriptAndSave({ ad: adFinal, brand: brandDoc });
+        } catch (scriptErr) {
+          console.warn(`⚠️ brandScript[ad=${adId}]: failed (non-fatal) — ${scriptErr.message}`);
+        }
+      } else if (adFinal?.chromeHtml) {
+        try {
+          await reelsPuppeteerComposite({ ad: adFinal });
         } catch (puppeteerErr) {
           console.warn(`⚠️ reelsPuppeteer[ad=${adId}]: failed (non-fatal) — ${puppeteerErr.message}`);
         }

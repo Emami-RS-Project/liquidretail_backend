@@ -235,4 +235,86 @@ function runChild(config) {
   });
 }
 
-module.exports = { renderBrandScript };
+// ── High-level helpers ─────────────────────────────────────────────
+
+// Build the text-var meta object that a brand script sees. Pulls
+// preferred fields from ad.copy first, then falls back to the ad's
+// LayoutInputArtifact bundle if present. Called by both the initial
+// pipeline (routes/ads.js Veo path) and the manual trigger endpoint
+// (routes/brand.js) so meta shape stays consistent.
+async function buildMetaForAd(ad, brand) {
+  let layoutInput = null;
+  try {
+    const LayoutInputArtifact = require('../models/LayoutInputArtifact');
+    layoutInput = await LayoutInputArtifact.findOne({ mediaId: ad.mediaId }).sort({ createdAt: -1 }).lean();
+  } catch { /* optional */ }
+
+  return {
+    brandName:    brand?.name || null,
+    headline:     ad.copy?.headline    || layoutInput?.copy?.headline     || null,
+    cta:          ad.copy?.cta_text    || layoutInput?.copy?.cta_text     || 'SHOP NOW',
+    quote:        ad.copy?.quote       || layoutInput?.social_proof?.primary_quote || null,
+    productName:  ad.copy?.productName  || layoutInput?.product?.name     || null,
+    price:        ad.copy?.productPrice || layoutInput?.product?.price    || null,
+    benefits:     layoutInput?.product?.benefits || [],
+    badges:       layoutInput?.product?.badges   || [],
+    reviewsText:  layoutInput?.social_proof?.review_count
+                    ? `${layoutInput.social_proof.review_count} reviews`
+                    : '53 reviews',
+    likes:        layoutInput?.social_proof?.likes || 572
+  };
+}
+
+// End-to-end: render the brand's styleScript over the ad's Grok video,
+// upload to Cloudinary, update Ad.renderUrl. Returns the new URL +
+// timings. Caller decides how to handle errors — this helper doesn't
+// swallow them, so both fatal (pipeline) and non-fatal (script preview)
+// call sites can choose behavior.
+async function renderBrandScriptAndSave({ ad, brand }) {
+  if (!brand?.styleScript || !String(brand.styleScript).trim()) {
+    const e = new Error('brand has no styleScript');
+    e.status = 400;
+    throw e;
+  }
+  if (!ad?.veoVideoUrl) {
+    const e = new Error('ad has no veoVideoUrl — Grok has not rendered yet');
+    e.status = 400;
+    throw e;
+  }
+
+  const meta = await buildMetaForAd(ad, brand);
+  const result = await renderBrandScript({
+    videoUrl:    ad.veoVideoUrl,
+    styleScript: brand.styleScript,
+    meta,
+    adId:        String(ad._id),
+    brandName:   brand.name
+  });
+
+  // Upload + persist renderUrl. Cleanup on success; retain tempDir on
+  // failure when BRAND_SCRIPT_RETAIN_TMP is set for post-mortem.
+  const fs = require('fs');
+  const { uploadBufferToCloudinary } = require('./cloudinaryService');
+  const Ad = require('../models/Ad');
+  try {
+    const buffer = await fs.promises.readFile(result.finalPath);
+    const uploaded = await uploadBufferToCloudinary(buffer, {
+      folder:       'liquidretail/brand_script',
+      resourceType: 'video',
+      overwrite:    true
+    });
+    await Ad.updateOne(
+      { _id: ad._id },
+      { $set: { renderUrl: uploaded.secure_url, updatedAt: new Date() } }
+    );
+    await fs.promises.rm(result.tempDir, { recursive: true, force: true }).catch(() => {});
+    return { renderUrl: uploaded.secure_url, timings: result.timings };
+  } catch (err) {
+    if (!process.env.BRAND_SCRIPT_RETAIN_TMP) {
+      await fs.promises.rm(result.tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+    throw err;
+  }
+}
+
+module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd };
