@@ -23,29 +23,43 @@
 const DetectRun            = require('../models/DetectRun');
 const Media                = require('../models/Media');
 const IntegrationCredential = require('../models/IntegrationCredential');
+const Brand                = require('../models/Brand');
+const CatalogProduct       = require('../models/CatalogProduct');
 
 // Per-source connection probes. Returning false means "not connected,
 // no gate needed" — a brand that hasn't linked IG simply skips the
 // social source rather than being blocked forever on a step they
 // never started.
 //
+// Two ingest paths are recognized:
+//   Real Meta/IG: IntegrationCredential row + Media.source='instagram'
+//                 + CatalogProduct.source='ig-catalog'.
+//   Sales demo:   Brand.apifyDemo config + Media.source='apify-ig'
+//                 + CatalogProduct.source='apify-shopify'. No OAuth.
+//
 // Social presence is defined by ACTUAL ingested posts, not by the
-// presence of an IG credential. A brand that connected IG for Meta
-// catalog access only (catalogId set, posts ingestion never opted
-// into) shouldn't be blocked by "No Instagram posts ingested yet" —
-// catalog-only ad generation is a first-class supported workflow.
-// Catalog presence stays credential-driven (catalogId set) so that
-// a freshly connected brand mid-first-sync is still gated until at
-// least one catalog product lands.
+// presence of a credential or config — a brand that only synced
+// products (catalog-only ad generation is first-class supported)
+// should skip the social gate. Catalog presence uses the credential's
+// catalogId OR the demo's shopifyUrl WITH at least one product row,
+// so a freshly configured brand mid-first-sync is still gated until
+// at least one product lands.
 async function probeConnections(brandId) {
-  const cred = await IntegrationCredential.findOne({
-    brandId, type: 'instagram', status: 'active'
-  }).select('catalogId').lean();
-  const socialMediaCount = await Media.countDocuments({
-    brandId, source: 'instagram'
-  });
+  const [cred, brand] = await Promise.all([
+    IntegrationCredential.findOne({ brandId, type: 'instagram', status: 'active' }).select('catalogId').lean(),
+    Brand.findById(brandId).select('isDemo apifyDemo').lean()
+  ]);
+  const apifyDemo = brand?.isDemo ? (brand.apifyDemo || {}) : {};
+
+  const [socialMediaCount, demoCatalogCount] = await Promise.all([
+    Media.countDocuments({ brandId, source: { $in: ['instagram', 'apify-ig'] } }),
+    apifyDemo.shopifyUrl
+      ? CatalogProduct.countDocuments({ brandId, source: 'apify-shopify' })
+      : Promise.resolve(0)
+  ]);
+
   return {
-    catalog: !!cred?.catalogId,
+    catalog: !!cred?.catalogId || (!!apifyDemo.shopifyUrl && demoCatalogCount > 0),
     social:  socialMediaCount > 0
   };
 }
@@ -71,6 +85,20 @@ async function getAdReadiness(brandId) {
   const connections = await probeConnections(brandId);
 
   if (!connections.catalog && !connections.social) {
+    // Message + code depend on whether this is a demo brand (route to
+    // the Sales Demos page) or a real one (route to Integrations).
+    const brand = await Brand.findById(brandId).select('isDemo').lean();
+    if (brand?.isDemo) {
+      return {
+        ready: false,
+        reason: 'Run an Apify sync from the Sales Demos page before creating ads.',
+        blockers: [{
+          code: 'demo-not-synced',
+          source: null,
+          message: 'No demo posts or products ingested yet. Open Sales Demos → this brand → Sync from Apify.'
+        }]
+      };
+    }
     return {
       ready: false,
       reason: 'Connect Instagram (catalog and/or posts) before creating ads.',
@@ -89,7 +117,7 @@ async function getAdReadiness(brandId) {
       ? Media.find({ brandId, source: 'catalog-product' }).select('_id').lean().then(rs => rs.map(r => r._id))
       : Promise.resolve([]),
     connections.social
-      ? Media.find({ brandId, source: 'instagram' }).select('_id').lean().then(rs => rs.map(r => r._id))
+      ? Media.find({ brandId, source: { $in: ['instagram', 'apify-ig'] } }).select('_id').lean().then(rs => rs.map(r => r._id))
       : Promise.resolve([])
   ]);
 
