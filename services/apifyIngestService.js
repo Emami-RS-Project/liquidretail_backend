@@ -34,6 +34,13 @@ async function syncBrandApify(brandId) {
     e.status = 400;
     throw e;
   }
+
+  // Reset the abort flag at the start of every sync. Cooperative
+  // cancellation: /abort flips this to true; the ingest loops re-read
+  // it between records and bail when they see it.
+  brand.apifyDemo.aborted = false;
+  await brand.save();
+
   const cfg = brand.apifyDemo || {};
   const out = { ok: true, brandId: String(brand._id), ig: null, shopify: null };
   const t0 = Date.now();
@@ -42,16 +49,29 @@ async function syncBrandApify(brandId) {
     try       { out.ig = await syncBrandInstagram(brand); }
     catch (err) { out.ig = { ok: false, reason: err.message }; }
   }
-  if (cfg.shopifyUrl) {
+  // Check between the two sources too — an abort during IG shouldn't
+  // fall through into Shopify.
+  const stillAborted = await isBrandAborted(brand._id);
+  if (cfg.shopifyUrl && !stillAborted) {
     try       { out.shopify = await syncBrandShopify(brand); }
     catch (err) { out.shopify = { ok: false, reason: err.message }; }
+  } else if (cfg.shopifyUrl && stillAborted) {
+    out.shopify = { ok: false, reason: 'aborted before Shopify sync started' };
   }
 
   brand.apifyDemo.lastSyncedAt = new Date();
   await brand.save();
 
   out.durationMs = Date.now() - t0;
+  out.aborted    = stillAborted || (await isBrandAborted(brand._id));
   return out;
+}
+
+// Lean read of the abort flag. Called between records so /abort can
+// take effect mid-loop without a full brand fetch.
+async function isBrandAborted(brandId) {
+  const b = await Brand.findById(brandId).select('apifyDemo.aborted').lean();
+  return !!b?.apifyDemo?.aborted;
 }
 
 // ── IG side ────────────────────────────────────────────────────────
@@ -63,9 +83,14 @@ async function syncBrandInstagram(brand) {
   console.log(`📸 Apify IG sync starting: brand=${brand._id} handle=@${handle}`);
   const posts = await pullInstagramPosts(handle);
 
-  const summary = { ok: true, fetched: posts.length, ingested: 0, skipped: 0, errors: 0, queuedRunIds: [] };
+  const summary = { ok: true, fetched: posts.length, ingested: 0, skipped: 0, errors: 0, queuedRunIds: [], aborted: false };
 
   for (const post of posts) {
+    if (await isBrandAborted(brand._id)) {
+      summary.aborted = true;
+      console.log(`   · Apify IG ingest aborted mid-loop for brand=${brand._id}`);
+      break;
+    }
     try {
       const r = await ingestIgPost(brand, post);
       if (r?.skipped) summary.skipped++;
@@ -145,8 +170,16 @@ async function ingestIgPost(brand, post) {
     throw err;
   }
 
-  const existingRunCount = await DetectRun.countDocuments({ mediaId: media._id });
-  if (existingRunCount > 0) return { mediaId: media._id, runId: null };
+  // Skip enqueue only if there's an ACTIVE run (queued/processing/
+  // completed). A run marked failed by /abort should NOT block a fresh
+  // enqueue on the next sync — that's what makes "run off the index
+  // on resume" work: the Media row is already ingested, and the next
+  // sync re-enqueues detect for any Media whose prior run was killed.
+  const existingActive = await DetectRun.findOne({
+    mediaId: media._id,
+    status:  { $in: ['queued', 'processing', 'completed'] }
+  }).select('_id').lean();
+  if (existingActive) return { mediaId: media._id, runId: null };
 
   let run;
   try {
@@ -178,9 +211,14 @@ async function syncBrandShopify(brand) {
   console.log(`🛍  Apify Shopify sync starting: brand=${brand._id} shop=${shopifyUrl}`);
   const products = await pullShopifyProducts(shopifyUrl);
 
-  const summary = { ok: true, fetched: products.length, added: 0, updated: 0, errors: 0 };
+  const summary = { ok: true, fetched: products.length, added: 0, updated: 0, errors: 0, aborted: false };
 
   for (const p of products) {
+    if (await isBrandAborted(brand._id)) {
+      summary.aborted = true;
+      console.log(`   · Apify Shopify ingest aborted mid-loop for brand=${brand._id}`);
+      break;
+    }
     try {
       const result = await CatalogProduct.findOneAndUpdate(
         { brandId: brand._id, externalId: p.externalId },
@@ -215,12 +253,16 @@ async function syncBrandShopify(brand) {
   }
 
   // Fire product-path detect for any newly imported products with images.
-  // Same helper the Meta catalog sync uses at end of run.
-  try {
-    const { enqueueBrandProductDetects } = require('./catalogProductDetectService');
-    await enqueueBrandProductDetects(brand._id);
-  } catch (err) {
-    console.warn(`   ⚠️  product-path detect enqueue failed: ${err.message}`);
+  // Same helper the Meta catalog sync uses at end of run. Skipped if
+  // /abort fired — no point queueing detect for a run the operator
+  // just killed.
+  if (!summary.aborted && !(await isBrandAborted(brand._id))) {
+    try {
+      const { enqueueBrandProductDetects } = require('./catalogProductDetectService');
+      await enqueueBrandProductDetects(brand._id);
+    } catch (err) {
+      console.warn(`   ⚠️  product-path detect enqueue failed: ${err.message}`);
+    }
   }
 
   summary.durationMs = Date.now() - t0;

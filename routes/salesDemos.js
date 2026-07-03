@@ -7,6 +7,7 @@ const express = require('express');
 const router  = express.Router();
 
 const Brand                = require('../models/Brand');
+const DetectRun            = require('../models/DetectRun');
 const AdvertiserMembership = require('../models/AdvertiserMembership');
 const {
   ensureSalesDemosAdvertiser,
@@ -183,6 +184,46 @@ router.post('/brands/:id/sync', async (req, res) => {
     res.status(202).json({ ok: true, brandId: String(brand._id), status: 'started' });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'apify sync failed' });
+  }
+});
+
+// POST /api/sales-demos/brands/:id/abort — cooperative cancellation.
+// Sets Brand.apifyDemo.aborted=true (the in-flight ingest loop reads
+// this between records and bails) and marks all in-flight DetectRuns
+// for the brand as failed with error='aborted by operator'. Detected
+// Media / CatalogProduct rows already ingested are preserved so the
+// next Sync click runs off the index instead of re-pulling from Apify.
+router.post('/brands/:id/abort', async (req, res) => {
+  try {
+    const brand = await Brand.findOne({
+      _id: req.params.id,
+      advertiserId: req.salesDemosAdvertiserId,
+      isDemo: true
+    });
+    if (!brand) return res.status(404).json({ error: 'demo brand not found' });
+
+    brand.apifyDemo.aborted = true;
+    await brand.save();
+
+    const now = new Date();
+    const result = await DetectRun.updateMany(
+      { brandId: brand._id, status: { $in: ['queued', 'processing'] } },
+      { $set: {
+          status:      'failed',
+          error:       'aborted by operator',
+          errorStage:  'abort',
+          completedAt: now
+        }
+      }
+    );
+
+    res.json({
+      ok: true,
+      brandId: String(brand._id),
+      cancelledDetectRuns: result?.modifiedCount ?? 0
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'abort failed' });
   }
 });
 

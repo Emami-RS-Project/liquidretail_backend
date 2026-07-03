@@ -216,7 +216,11 @@ const brandSchema = new mongoose.Schema({
   apifyDemo: {
     igHandle:      { type: String, default: null },  // '@' stripped, lowercase
     shopifyUrl:    { type: String, default: null },  // e.g. 'https://store.example.com'
-    lastSyncedAt:  { type: Date,   default: null }
+    lastSyncedAt:  { type: Date,   default: null },
+    // Cooperative cancellation flag. /abort sets true; the ingest
+    // service resets it to false at the start of every sync and
+    // checks it between records, bailing early when flipped mid-run.
+    aborted:       { type: Boolean, default: false }
   },
 
   // Per-brand video-chrome style overrides. Mirrors the shape of the
