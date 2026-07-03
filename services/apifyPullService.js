@@ -1,0 +1,135 @@
+// Apify pull — public scrape adapters for Instagram + Shopify. Used
+// by demo Brands (created under the Sales Demos advertiser) to pull
+// records BEFORE the prospect has done a real OAuth handshake.
+//
+// One shared token (APIFY_TOKEN) authenticates every call. Actor IDs
+// and per-source result limits are env-configurable so the Sales team
+// can tune limits without a deploy. Uses Apify's synchronous
+// `run-sync-get-dataset-items` endpoint — blocks until the actor
+// finishes and returns dataset items in one call, no polling.
+//
+// Contract: each puller returns a plain array of normalized records.
+// Shape normalization stays intentionally shallow — downstream ingest
+// services (apify → Media + DetectRun for IG, apify → CatalogProduct
+// for Shopify) are responsible for mapping into the domain shape.
+
+const axios = require('axios');
+
+const APIFY_API_ROOT = 'https://api.apify.com/v2';
+
+// Actor slugs — override in .env when Apify releases newer scrapers
+// or if we want to swap to a different community actor.
+const IG_ACTOR      = process.env.APIFY_IG_ACTOR      || 'apify/instagram-scraper';
+const SHOPIFY_ACTOR = process.env.APIFY_SHOPIFY_ACTOR || 'apify/shopify-scraper';
+
+// Per-source hard limits. Kept modest by default; a demo doesn't need
+// 500 posts. Bump via .env if Sales asks for more.
+const IG_LIMIT      = Math.max(1, parseInt(process.env.APIFY_IG_LIMIT, 10)      || 10);
+const SHOPIFY_LIMIT = Math.max(1, parseInt(process.env.APIFY_SHOPIFY_LIMIT, 10) || 50);
+
+// Apify's sync-run endpoint blocks for up to 5 min. Our HTTP client
+// caps at 5 min + 15s slack so we always see the actor error, not an
+// axios timeout, when Apify itself is slow.
+const APIFY_HTTP_TIMEOUT_MS = 5 * 60 * 1000 + 15_000;
+
+function getToken() {
+  const t = process.env.APIFY_TOKEN;
+  if (!t) throw new Error('APIFY_TOKEN is not set — cannot invoke Apify actors');
+  return t;
+}
+
+async function runActorSync(actorId, input) {
+  const token = getToken();
+  const url = `${APIFY_API_ROOT}/acts/${encodeURIComponent(actorId)}/run-sync-get-dataset-items`;
+  const res = await axios.post(url, input, {
+    params:  { token },
+    timeout: APIFY_HTTP_TIMEOUT_MS,
+    headers: { 'content-type': 'application/json' }
+  });
+  return Array.isArray(res.data) ? res.data : [];
+}
+
+// Pull recent public posts for an IG handle. Returns normalized
+// items — shape below stays close to Media doc fields so the ingest
+// service is a thin mapping layer.
+async function pullInstagramPosts(handle, { limit } = {}) {
+  if (!handle) throw new Error('IG handle is required');
+  const cleanHandle = String(handle).trim().replace(/^@+/, '');
+  const resultsLimit = Math.max(1, Math.min(parseInt(limit, 10) || IG_LIMIT, IG_LIMIT));
+
+  const input = {
+    directUrls:   [`https://www.instagram.com/${cleanHandle}/`],
+    resultsType:  'posts',
+    resultsLimit,
+    addParentData: false
+  };
+  const items = await runActorSync(IG_ACTOR, input);
+  return items.map(normalizeIgPost).filter(Boolean);
+}
+
+function normalizeIgPost(raw) {
+  if (!raw || !raw.id) return null;
+  const isVideo = raw.type === 'Video' || raw.type === 'Reel' || !!raw.videoUrl;
+  return {
+    externalId:    String(raw.id),
+    shortCode:     raw.shortCode || null,
+    permalink:     raw.url || (raw.shortCode ? `https://www.instagram.com/p/${raw.shortCode}/` : null),
+    mediaType:     isVideo ? 'VIDEO' : 'IMAGE',
+    mediaUrl:      isVideo ? (raw.videoUrl || raw.displayUrl) : raw.displayUrl,
+    thumbnailUrl:  raw.displayUrl || null,
+    caption:       raw.caption || null,
+    timestamp:     raw.timestamp || null,
+    ownerUsername: raw.ownerUsername || null,
+    likeCount:     Number.isFinite(raw.likesCount)    ? raw.likesCount    : null,
+    commentsCount: Number.isFinite(raw.commentsCount) ? raw.commentsCount : null
+  };
+}
+
+// Pull recent products from a public Shopify storefront. Returns
+// normalized items shaped for CatalogProduct upsert.
+async function pullShopifyProducts(shopUrl, { limit } = {}) {
+  if (!shopUrl) throw new Error('Shopify URL is required');
+  const maxItems = Math.max(1, Math.min(parseInt(limit, 10) || SHOPIFY_LIMIT, SHOPIFY_LIMIT));
+
+  const input = {
+    startUrls: [{ url: String(shopUrl) }],
+    maxItems
+  };
+  const items = await runActorSync(SHOPIFY_ACTOR, input);
+  return items.map(normalizeShopifyProduct).filter(Boolean);
+}
+
+function normalizeShopifyProduct(raw) {
+  if (!raw) return null;
+  const externalId = raw.id || raw.productId || raw.handle;
+  if (!externalId) return null;
+
+  const images = Array.isArray(raw.images)
+    ? raw.images.map(i => (typeof i === 'string' ? i : i?.src || i?.url)).filter(Boolean)
+    : [];
+  const variants = Array.isArray(raw.variants) ? raw.variants : [];
+  const firstVariant = variants[0] || {};
+  const priceStr = raw.price ?? firstVariant.price ?? raw.priceRange?.min ?? null;
+  const price    = priceStr != null ? Number(String(priceStr).replace(/[^\d.]/g, '')) : null;
+
+  return {
+    externalId:    String(externalId),
+    title:         raw.title || raw.name || null,
+    description:   raw.description || raw.bodyHtml || null,
+    productUrl:    raw.url || raw.productUrl || null,
+    imageUrl:      images[0] || raw.image || raw.featuredImage || null,
+    additionalImageUrls: images.slice(1),
+    price:         Number.isFinite(price) ? price : null,
+    currency:      raw.currency || raw.priceRange?.currency || null,
+    availability:  raw.available === false ? 'out of stock' : 'in stock',
+    brand:         raw.vendor || raw.brand || null,
+    handle:        raw.handle || null
+  };
+}
+
+module.exports = {
+  pullInstagramPosts,
+  pullShopifyProducts,
+  IG_LIMIT,
+  SHOPIFY_LIMIT
+};

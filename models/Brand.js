@@ -207,6 +207,18 @@ const brandSchema = new mongoose.Schema({
     autoCreateFromDetect: { type: Boolean, default: false }
   },
 
+  // Sales demo brand. Owned by the "Sales Demos" Advertiser and
+  // populated via Apify scraping (public IG posts + Shopify products)
+  // instead of OAuth ingest. Filtered out of normal customer-facing
+  // brand lists. Ingest limits live in server .env (APIFY_IG_LIMIT,
+  // APIFY_SHOPIFY_LIMIT); Apify token is server-wide (APIFY_TOKEN).
+  isDemo:    { type: Boolean, default: false, index: true },
+  apifyDemo: {
+    igHandle:      { type: String, default: null },  // '@' stripped, lowercase
+    shopifyUrl:    { type: String, default: null },  // e.g. 'https://store.example.com'
+    lastSyncedAt:  { type: Date,   default: null }
+  },
+
   // Derived voice — structured profile extracted by
   // brandVoiceDerivationService from the brand's existing Meta/Google
   // ad creatives, performance-weighted by Campaign.insights so winners

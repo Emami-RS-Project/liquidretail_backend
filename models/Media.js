@@ -24,7 +24,7 @@ const mediaSchema = new mongoose.Schema({
   source:        {
     type: String,
     required: true,
-    enum: ['meta', 'tiktok', 'instagram', 'youtube', 'manual_upload', 'catalog-product', 'other']
+    enum: ['meta', 'tiktok', 'instagram', 'youtube', 'manual_upload', 'catalog-product', 'apify-ig', 'other']
   },
   sourceUrl:     String,                   // original platform URL, if known
 

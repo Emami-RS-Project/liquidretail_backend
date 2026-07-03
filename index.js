@@ -169,6 +169,7 @@ app.use((req, res, next) => {
 });
 app.use('/api/ads',       requireAuth, adsRoutes);
 app.use('/api/seeds',     requireAuth, seedsRoutes);
+app.use('/api/sales-demos', requireAuth, require('./routes/salesDemos'));
 
 app.post('/api/products/:id/push-to-shopify', requireAuth, async (req, res) => {
   try {
