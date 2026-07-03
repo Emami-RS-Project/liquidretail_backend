@@ -235,6 +235,57 @@ router.post('/:id/render-script', express.json(), async (req, res) => {
   }
 });
 
+// POST /api/brand/:id/preview-script
+// Renders a small handful of frames against a synthetic plate so the
+// operator can iterate on a canvas script without waiting for a real
+// ad to be generated first. Body: { script?: string } — pass an
+// unsaved script from the textarea to preview it; omit to preview
+// the currently-saved Brand.styleScript.
+router.post('/:id/preview-script', express.json(), async (req, res) => {
+  const started = Date.now();
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+
+    const script = String(req.body?.script || brand.styleScript || '').trim();
+    if (!script) return res.status(400).json({ error: 'no script — pass one in the body or save Brand.styleScript first' });
+
+    const totalFrames = 145;
+    const previewIndices = [0, Math.floor(totalFrames / 2), totalFrames - 1];
+    const meta = {
+      brandName:    brand.name,
+      headline:     brand.tagline || 'Made better.',
+      cta:          'SHOP NOW',
+      quote:        'Highly rated for comfort, durability, and standout style.',
+      productName:  null,
+      price:        null,
+      benefits:     [],
+      badges:       [],
+      reviewsText:  '53 reviews',
+      likes:        572
+    };
+
+    const { previewBrandScript } = require('../services/brandScriptExecutor');
+    const result = await previewBrandScript({
+      styleScript:     script,
+      meta,
+      totalFrames,
+      previewIndices,
+      plateBackground: brand.primaryColor || '#3D3D3D',
+      brandName:       brand.name
+    });
+
+    res.json({
+      ok:      true,
+      frames:  result.frames,
+      totalMs: Date.now() - started
+    });
+  } catch (err) {
+    console.error('preview-script failed:', err);
+    res.status(err.status || 500).json({ error: err.message || 'preview-script failed' });
+  }
+});
+
 // POST /api/brand/:id/generate-script
 // Uses Claude (via Atlas) to draft a canvas overlay script for this
 // brand. Loads brand context + the U Beauty reference template, builds

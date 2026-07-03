@@ -235,6 +235,86 @@ function runChild(config) {
   });
 }
 
+// ── Preview mode ───────────────────────────────────────────────────
+
+// Render a small handful of frames against a synthetic plate — no
+// Grok video needed. Used by the Brand-page Style card's Preview
+// button to give operators a fast "does my script draw the right
+// thing" loop without waiting for a real ad to be generated.
+//
+// Returns { frames: [{ index, dataUrl }] } where dataUrl is a
+// base64-encoded PNG suitable for direct <img src=...>.
+async function previewBrandScript({
+  styleScript, meta,
+  width = 1080, height = 1080,
+  totalFrames = 145,
+  previewIndices = [0, Math.floor(145 / 2), 144],
+  plateBackground = '#3D3D3D',
+  brandName
+}) {
+  const runId  = crypto.randomBytes(6).toString('hex');
+  const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), `bpreview_${runId}_`));
+  const plateDir = path.join(tempDir, 'plates');
+  const outDir   = path.join(tempDir, 'out');
+  await fsp.mkdir(plateDir, { recursive: true });
+  await fsp.mkdir(outDir,   { recursive: true });
+
+  try {
+    // One synthetic plate — the runner re-uses it across all
+    // requested preview indices.
+    const sharp = require('sharp');
+    const rgb = hexToRgb(plateBackground);
+    await sharp({
+      create: { width, height, channels: 3, background: rgb }
+    }).png().toFile(path.join(plateDir, 'p0000.png'));
+
+    await runChild({
+      styleScript,
+      meta:      meta || {},
+      plateDir,
+      outDir,
+      fontsDir:  FONTS_DIR,
+      width, height,
+      totalFrames,
+      previewIndices,
+      brandName
+    });
+
+    // Read back the rendered previews and base64-encode.
+    const frames = [];
+    for (const i of previewIndices) {
+      const p = path.join(outDir, `f${String(i).padStart(4, '0')}.png`);
+      try {
+        const buf = await fsp.readFile(p);
+        frames.push({ index: i, dataUrl: `data:image/png;base64,${buf.toString('base64')}` });
+      } catch {
+        // Frame missing — script may have thrown for this index. Surface
+        // as an empty entry so the UI can still show the successful ones.
+        frames.push({ index: i, dataUrl: null });
+      }
+    }
+
+    return { frames };
+  } finally {
+    await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function hexToRgb(hex) {
+  const clean = String(hex || '').replace(/^#/, '');
+  const s = clean.length === 3
+    ? clean.split('').map(c => c + c).join('')
+    : clean.padEnd(6, '0').slice(0, 6);
+  const r = parseInt(s.slice(0, 2), 16);
+  const g = parseInt(s.slice(2, 4), 16);
+  const b = parseInt(s.slice(4, 6), 16);
+  return {
+    r: Number.isFinite(r) ? r : 60,
+    g: Number.isFinite(g) ? g : 60,
+    b: Number.isFinite(b) ? b : 60
+  };
+}
+
 // ── High-level helpers ─────────────────────────────────────────────
 
 // Build the text-var meta object that a brand script sees. Pulls
@@ -317,4 +397,4 @@ async function renderBrandScriptAndSave({ ad, brand }) {
   }
 }
 
-module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd };
+module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript };

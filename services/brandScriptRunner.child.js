@@ -36,10 +36,12 @@ async function main() {
   const config = await readConfigFromStdin();
   const {
     styleScript, meta, plateDir, outDir, fontsDir,
-    width, height, totalFrames, brandName, adId
+    width, height, totalFrames, brandName, adId,
+    previewIndices
   } = config;
 
-  progress(`starting brand=${brandName || '?'} ad=${adId || '?'} frames=${totalFrames} ${width}×${height}`);
+  const isPreview = Array.isArray(previewIndices) && previewIndices.length > 0;
+  progress(`starting brand=${brandName || '?'} ad=${adId || '?'} ${isPreview ? `preview[${previewIndices.join(',')}]` : `frames=${totalFrames}`} ${width}×${height}`);
 
   // Register any TTF/OTF in the fonts dir. Family name = file stem.
   await registerFontsFromDir(fontsDir);
@@ -54,28 +56,41 @@ async function main() {
 
   // Render frames.
   const plateFiles = (await fsp.readdir(plateDir)).filter(f => f.endsWith('.png')).sort();
-  const frameCount = Math.min(totalFrames || plateFiles.length, plateFiles.length);
   let framesProduced = 0;
 
-  for (let i = 0; i < frameCount; i++) {
-    const platePath = path.join(plateDir, plateFiles[i]);
+  const renderOne = async (i, platePath) => {
     const plate = await canvasLib.loadImage(platePath);
     const canvas = canvasLib.createCanvas(width, height);
     const ctx = canvas.getContext('2d');
-
     try {
       await brandModule.renderFrame(i, ctx, plate, meta || {}, HELPERS);
     } catch (err) {
       throw new Error(`brand renderFrame(${i}) threw: ${err.message}\n${err.stack}`);
     }
-
     const buf = await canvas.encode('png');
     const outPath = path.join(outDir, `f${String(i).padStart(4, '0')}.png`);
     await fsp.writeFile(outPath, buf);
     framesProduced++;
+  };
 
-    // Progress every 24 frames (~1 second at 24fps).
-    if (i > 0 && i % 24 === 0) progress(`rendered frame ${i}/${frameCount}`);
+  if (isPreview) {
+    // Preview mode — render only the requested frame indices against
+    // plate[0]. The frameIndex value passed to renderFrame is the
+    // REQUESTED index so time-based animations show the correct
+    // state at each preview moment (t=0, mid, end typically).
+    if (plateFiles.length === 0) throw new Error('preview needs at least one plate file');
+    const platePath = path.join(plateDir, plateFiles[0]);
+    for (const i of previewIndices) {
+      await renderOne(i, platePath);
+      progress(`preview frame ${i} rendered`);
+    }
+  } else {
+    // Full-render mode — loop every plate.
+    const frameCount = Math.min(totalFrames || plateFiles.length, plateFiles.length);
+    for (let i = 0; i < frameCount; i++) {
+      await renderOne(i, path.join(plateDir, plateFiles[i]));
+      if (i > 0 && i % 24 === 0) progress(`rendered frame ${i}/${frameCount}`);
+    }
   }
 
   // Last line of stdout is the report JSON — parent parses it.
