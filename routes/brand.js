@@ -196,6 +196,108 @@ router.patch('/:id', express.json(), async (req, res) => {
   }
 });
 
+// POST /api/brand/:id/render-script
+// Manual one-shot: run the brand's styleScript against a specific
+// ad's Grok base video and produce a final MP4. Uploads to Cloudinary,
+// updates Ad.renderUrl. Used to preview + debug scripts before we
+// auto-wire the executor into the ad pipeline. Body: { adId }.
+router.post('/:id/render-script', express.json(), async (req, res) => {
+  const started = Date.now();
+  let tempDirToClean = null;
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id }));
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+    if (!brand.styleScript || !String(brand.styleScript).trim()) {
+      return res.status(400).json({ error: 'brand has no styleScript configured' });
+    }
+
+    const { adId } = req.body || {};
+    if (!adId) return res.status(400).json({ error: 'adId is required in body' });
+
+    const Ad    = require('../models/Ad');
+    const Media = require('../models/Media');
+    const ad = await Ad.findById(adId);
+    if (!ad) return res.status(404).json({ error: 'ad not found' });
+    // Ownership: ad → media → brand. Reject cross-brand requests.
+    const media = await Media.findById(ad.mediaId).select('brandId advertiserId').lean();
+    if (!media || String(media.brandId) !== String(brand._id)) {
+      return res.status(403).json({ error: 'ad does not belong to this brand' });
+    }
+    if (!ad.veoVideoUrl) {
+      return res.status(400).json({ error: 'ad has no veoVideoUrl — Grok has not rendered yet' });
+    }
+
+    // Copy meta — Ad.copy is the primary source. Layout input is a
+    // richer bundle when present (benefits, badges, review counts)
+    // but the script trusts whatever's here and falls back to its
+    // own defaults for missing keys.
+    let layoutInput = null;
+    try {
+      const LayoutInputArtifact = require('../models/LayoutInputArtifact');
+      layoutInput = await LayoutInputArtifact.findOne({ mediaId: ad.mediaId }).sort({ createdAt: -1 }).lean();
+    } catch { /* optional */ }
+
+    const meta = {
+      brandName:    brand.name,
+      headline:     ad.copy?.headline    || layoutInput?.copy?.headline     || null,
+      cta:          ad.copy?.cta_text    || layoutInput?.copy?.cta_text     || 'SHOP NOW',
+      quote:        ad.copy?.quote       || layoutInput?.social_proof?.primary_quote || null,
+      productName:  ad.copy?.productName  || layoutInput?.product?.name     || null,
+      price:        ad.copy?.productPrice || layoutInput?.product?.price    || null,
+      benefits:     layoutInput?.product?.benefits || [],
+      badges:       layoutInput?.product?.badges   || [],
+      reviewsText:  layoutInput?.social_proof?.review_count
+                      ? `${layoutInput.social_proof.review_count} reviews`
+                      : '53 reviews',
+      likes:        layoutInput?.social_proof?.likes || 572
+    };
+
+    const { renderBrandScript } = require('../services/brandScriptExecutor');
+    const { uploadBufferToCloudinary } = require('../services/cloudinaryService');
+
+    const result = await renderBrandScript({
+      videoUrl:    ad.veoVideoUrl,
+      styleScript: brand.styleScript,
+      meta,
+      adId:        String(ad._id),
+      brandName:   brand.name
+    });
+    tempDirToClean = result.tempDir;
+
+    // Upload final MP4 to Cloudinary and swap Ad.renderUrl.
+    const fs = require('fs');
+    const buffer = await fs.promises.readFile(result.finalPath);
+    const uploaded = await uploadBufferToCloudinary(buffer, {
+      folder:       'liquidretail/brand_script',
+      resourceType: 'video',
+      overwrite:    true
+    });
+
+    ad.renderUrl = uploaded.secure_url;
+    ad.updatedAt = new Date();
+    await ad.save();
+
+    // Clean up temp dir now that the upload succeeded.
+    await fs.promises.rm(result.tempDir, { recursive: true, force: true }).catch(() => {});
+    tempDirToClean = null;
+
+    res.json({
+      ok:            true,
+      renderUrl:     ad.renderUrl,
+      timings:       result.timings,
+      framesProduced: result.timings.framesProduced,
+      totalMs:       Date.now() - started
+    });
+  } catch (err) {
+    console.error('render-script failed:', err);
+    if (tempDirToClean && !process.env.BRAND_SCRIPT_RETAIN_TMP) {
+      const fs = require('fs');
+      await fs.promises.rm(tempDirToClean, { recursive: true, force: true }).catch(() => {});
+    }
+    res.status(err.status || 500).json({ error: err.message || 'render-script failed' });
+  }
+});
+
 // GET /api/brand/:id/style
 // Returns the current per-brand video-chrome style state: the DB
 // override (if any) and the JS-file style (if a slug alias matches).

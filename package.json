@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
+    "@napi-rs/canvas": "^1.0.2",
     "axios": "^1.11.0",
     "cloudinary": "^2.7.0",
     "cors": "^2.8.6",

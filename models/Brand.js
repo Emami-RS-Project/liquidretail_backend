@@ -232,6 +232,15 @@ const brandSchema = new mongoose.Schema({
   // renderer's own defaults absorb any missing keys.
   styleOverrides: { type: mongoose.Schema.Types.Mixed, default: null },
 
+  // Per-brand canvas overlay script. Raw JS source that exports a
+  // renderAll({ inputDir, outputDir, meta, fonts }) function. Run in
+  // a sandboxed child process by services/brandScriptExecutor.js
+  // after the base video finishes. Takes precedence over the
+  // HTML/Puppeteer chrome path — when styleScript is set for a brand,
+  // the executor is used; otherwise the pipeline falls back to
+  // aiReelsChromeService + aiReelsPuppeteerService.
+  styleScript: { type: String, default: null },
+
   // Derived voice — structured profile extracted by
   // brandVoiceDerivationService from the brand's existing Meta/Google
   // ad creatives, performance-weighted by Campaign.insights so winners
