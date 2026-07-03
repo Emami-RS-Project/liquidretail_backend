@@ -18,9 +18,14 @@ const axios = require('axios');
 const APIFY_API_ROOT = 'https://api.apify.com/v2';
 
 // Actor slugs — override in .env when Apify releases newer scrapers
-// or if we want to swap to a different community actor.
+// or if we want to swap to a different community actor. The default
+// Shopify actor (webdatalabs/shopify-product-scraper) takes a "mode"
+// switch: 'url' uses our startUrls; 'storeUrls' uses the actor's
+// bundled multi-store list. We always send mode='url' explicitly —
+// omitting it lets the actor fall back to its default input, which
+// scrapes allbirds.com instead of the target store.
 const IG_ACTOR      = process.env.APIFY_IG_ACTOR      || 'apify/instagram-scraper';
-const SHOPIFY_ACTOR = process.env.APIFY_SHOPIFY_ACTOR || 'apify/shopify-scraper';
+const SHOPIFY_ACTOR = process.env.APIFY_SHOPIFY_ACTOR || 'webdatalabs/shopify-product-scraper';
 
 // Per-source hard limits. Kept modest by default; a demo doesn't need
 // 500 posts. Bump via .env if Sales asks for more.
@@ -91,9 +96,14 @@ async function pullShopifyProducts(shopUrl, { limit } = {}) {
   if (!shopUrl) throw new Error('Shopify URL is required');
   const maxItems = Math.max(1, Math.min(parseInt(limit, 10) || SHOPIFY_LIMIT, SHOPIFY_LIMIT));
 
+  // mode='url' is REQUIRED so the actor reads startUrls (our target)
+  // rather than falling back to its bundled storeUrls demo list.
   const input = {
     startUrls: [{ url: String(shopUrl) }],
-    maxItems
+    mode:      'url',
+    maxItems,
+    maxPages:  10,
+    proxyConfiguration: { useApifyProxy: true }
   };
   const items = await runActorSync(SHOPIFY_ACTOR, input);
   return items.map(normalizeShopifyProduct).filter(Boolean);
