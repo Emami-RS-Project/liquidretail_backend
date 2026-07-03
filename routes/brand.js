@@ -295,11 +295,13 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
 // "very minimal, no CTA button, brand mark upper-right").
 router.post('/:id/generate-script', express.json(), async (req, res) => {
   const started = Date.now();
+  console.log(`🧠 generate-script: entry brandId=${req.params.id}`);
   try {
     const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
     if (!brand) return res.status(404).json({ error: 'brand not found' });
 
     const direction = String(req.body?.direction || '').trim();
+    console.log(`🧠 generate-script: brand="${brand.name}" directionChars=${direction.length}`);
 
     // Load U Beauty script template as a concrete reference — much
     // more effective than describing the contract in prose. Falls back

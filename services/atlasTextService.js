@@ -40,21 +40,46 @@ async function generate({
   if (system) messages.push({ role: 'system',    content: system });
   if (user)   messages.push({ role: 'user',      content: user   });
 
-  const res = await axios.post(
-    `${BASE_URL}/chat/completions`,
-    { model, messages, temperature, max_tokens: maxTokens },
-    {
-      headers: {
-        Authorization: `Bearer ${apiKey()}`,
-        'content-type': 'application/json'
-      },
-      timeout: HTTP_TIMEOUT_MS
-    }
-  );
+  const url = `${BASE_URL}/chat/completions`;
+  const promptChars = (system?.length || 0) + (user?.length || 0);
+  console.log(`🧠 atlasText: POST ${url} model=${model} promptChars=${promptChars} maxTokens=${maxTokens}`);
+  const t0 = Date.now();
+  let res;
+  try {
+    res = await axios.post(
+      url,
+      { model, messages, temperature, max_tokens: maxTokens },
+      {
+        headers: {
+          Authorization: `Bearer ${apiKey()}`,
+          'content-type': 'application/json'
+        },
+        timeout: HTTP_TIMEOUT_MS
+      }
+    );
+  } catch (err) {
+    const ms = Date.now() - t0;
+    // Log the actual response body — critical for diagnosing model
+    // slug 404s, quota errors, etc. axios errors have .response on
+    // HTTP failures and .code on network failures.
+    const status = err.response?.status;
+    const body   = err.response?.data;
+    const bodyStr = typeof body === 'string'
+      ? body.slice(0, 500)
+      : body != null ? JSON.stringify(body).slice(0, 500) : '(no body)';
+    console.error(`❌ atlasText: FAILED in ${ms}ms status=${status || 'network'} code=${err.code || '?'} body=${bodyStr}`);
+    throw err;
+  }
+  const ms = Date.now() - t0;
 
   const choice = res.data?.choices?.[0];
   const text   = choice?.message?.content;
-  if (!text) throw new Error('Atlas returned no message content');
+  const outputChars = text?.length || 0;
+  console.log(`🧠 atlasText: OK in ${ms}ms outputChars=${outputChars} finishReason=${choice?.finish_reason || '?'} model=${res.data?.model || '?'}`);
+  if (!text) {
+    console.warn(`⚠️  atlasText: empty content — full response head: ${JSON.stringify(res.data).slice(0, 500)}`);
+    throw new Error('Atlas returned no message content');
+  }
   return {
     text,
     model:        res.data?.model || model,
