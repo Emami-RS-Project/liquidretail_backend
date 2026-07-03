@@ -286,26 +286,21 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
   }
 });
 
-// POST /api/brand/:id/generate-script
-// Uses Claude (via Atlas) to draft a canvas overlay script for this
-// brand. Loads brand context + the U Beauty reference template, builds
-// a sandbox-contract system prompt, and returns the generated JS.
-// Does NOT save — caller reviews then hits the Style card's Save.
-// Body: { direction?: string } — optional operator nudge (e.g.
-// "very minimal, no CTA button, brand mark upper-right").
-router.post('/:id/generate-script', express.json(), async (req, res) => {
-  const started = Date.now();
-  console.log(`🧠 generate-script: entry brandId=${req.params.id}`);
+// In-memory job store for async script generation. Claude can take
+// 30-90s per script; Netlify's ~26s proxy timeout would 504 the
+// browser long before Atlas responds if we awaited inline. So the
+// POST kicks off a promise and returns 202 immediately; the frontend
+// polls GET /generate-script/:jobId until status transitions.
+// Auto-cleaned after DONE/FAILED + 5 min so the map doesn't grow.
+const scriptJobs = new Map(); // jobId → { status, startedAt, script?, error?, model?, usage?, finishReason?, brand? }
+const SCRIPT_JOB_TTL_MS = 5 * 60 * 1000;
+
+function reapJob(jobId) {
+  setTimeout(() => scriptJobs.delete(jobId), SCRIPT_JOB_TTL_MS);
+}
+
+async function runGenerateScript(jobId, brand, direction) {
   try {
-    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
-    if (!brand) return res.status(404).json({ error: 'brand not found' });
-
-    const direction = String(req.body?.direction || '').trim();
-    console.log(`🧠 generate-script: brand="${brand.name}" directionChars=${direction.length}`);
-
-    // Load U Beauty script template as a concrete reference — much
-    // more effective than describing the contract in prose. Falls back
-    // to a contract-only prompt if the file's missing.
     const fs = require('fs');
     const path = require('path');
     let referenceScript = '';
@@ -359,28 +354,98 @@ router.post('/:id/generate-script', express.json(), async (req, res) => {
       `Now write the ${brand.name} script.`
     ].filter(Boolean).join('\n');
 
-    const { generate, DEFAULT_MODEL } = require('../services/atlasTextService');
+    const { generate } = require('../services/atlasTextService');
     const result = await generate({ system, user, temperature: 0.5, maxTokens: 4096 });
 
-    // Strip accidental markdown fences (Claude sometimes wraps despite
-    // the instruction). Keeps the payload directly pastable into the
-    // Style card textarea.
     const cleaned = result.text
       .replace(/^```(?:javascript|js)?\s*\n?/i, '')
       .replace(/\n?```\s*$/i, '')
       .trim();
 
-    res.json({
-      ok:          true,
-      script:      cleaned,
-      model:       result.model,
-      usage:       result.usage,
+    const job = scriptJobs.get(jobId) || {};
+    scriptJobs.set(jobId, {
+      ...job,
+      status:       'done',
+      script:       cleaned,
+      model:        result.model,
+      usage:        result.usage,
       finishReason: result.finishReason,
-      totalMs:     Date.now() - started
+      completedAt:  Date.now()
+    });
+    reapJob(jobId);
+    console.log(`🧠 generate-script: job=${jobId} DONE in ${Date.now() - (job.startedAt || Date.now())}ms outputChars=${cleaned.length}`);
+  } catch (err) {
+    console.error(`🧠 generate-script: job=${jobId} FAILED — ${err.message}`);
+    const job = scriptJobs.get(jobId) || {};
+    scriptJobs.set(jobId, {
+      ...job,
+      status:      'failed',
+      error:       err.message || 'generate failed',
+      completedAt: Date.now()
+    });
+    reapJob(jobId);
+  }
+}
+
+// POST /api/brand/:id/generate-script
+// Kicks off a Claude-via-Atlas script generation in the background
+// and returns a jobId. Poll GET /generate-script/:jobId for status.
+// Body: { direction?: string } — optional operator nudge.
+router.post('/:id/generate-script', express.json(), async (req, res) => {
+  console.log(`🧠 generate-script: entry brandId=${req.params.id}`);
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+
+    const direction = String(req.body?.direction || '').trim();
+    const crypto = require('crypto');
+    const jobId = crypto.randomBytes(6).toString('hex');
+    console.log(`🧠 generate-script: brand="${brand.name}" directionChars=${direction.length} job=${jobId}`);
+
+    scriptJobs.set(jobId, {
+      status:      'pending',
+      startedAt:   Date.now(),
+      brand:       String(brand._id)
+    });
+    // Fire-and-forget. runGenerateScript flips the job to done/failed
+    // when Atlas returns; errors are logged and never crash the process.
+    runGenerateScript(jobId, brand, direction);
+
+    res.status(202).json({
+      ok:    true,
+      jobId,
+      status: 'pending'
     });
   } catch (err) {
     console.error('generate-script failed:', err);
     res.status(err.status || 500).json({ error: err.message || 'generate-script failed' });
+  }
+});
+
+// GET /api/brand/:id/generate-script/:jobId — poll target for the
+// async generation kicked off by POST. Returns the job state:
+//   { status: 'pending' | 'done' | 'failed', script?, error?,
+//     model?, usage?, finishReason?, elapsedMs }
+// 404 when the job doesn't exist OR was reaped after 5 min.
+router.get('/:id/generate-script/:jobId', async (req, res) => {
+  try {
+    const job = scriptJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'job not found or expired' });
+    // Cross-brand safety: reject reads for the wrong brand id.
+    if (job.brand && String(job.brand) !== String(req.params.id)) {
+      return res.status(404).json({ error: 'job not found' });
+    }
+    res.json({
+      status:       job.status,
+      script:       job.script,
+      error:        job.error,
+      model:        job.model,
+      usage:        job.usage,
+      finishReason: job.finishReason,
+      elapsedMs:    Date.now() - (job.startedAt || Date.now())
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'status lookup failed' });
   }
 });
 
