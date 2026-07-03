@@ -163,16 +163,24 @@ router.patch('/brands/:id', async (req, res) => {
   }
 });
 
-// POST /api/sales-demos/brands/:id/sync — pull records from Apify and
-// feed them into the detect pipeline / catalog. Runs synchronously so
-// the caller sees per-source counts in the response.
+// POST /api/sales-demos/brands/:id/sync — kicks off an Apify pull in
+// the background and returns 202 immediately. Apify actor runs
+// routinely exceed Netlify's ~30s proxy timeout, so we can't block
+// the HTTP request on them. The sync writes Media / CatalogProduct
+// rows as it goes and stamps Brand.apifyDemo.lastSyncedAt on
+// completion — the UI polls the brands list to see progress.
 router.post('/brands/:id/sync', async (req, res) => {
   try {
     const brand = await Brand.findOne({ _id: req.params.id, advertiserId: req.salesDemosAdvertiserId, isDemo: true }).select('_id');
     if (!brand) return res.status(404).json({ error: 'demo brand not found' });
 
-    const result = await syncBrandApify(brand._id);
-    res.json(result);
+    // Fire-and-forget. Errors are logged but not surfaced to the
+    // caller since the response has already been sent.
+    syncBrandApify(brand._id).catch(err => {
+      console.error(`⚠️  Apify sync failed for brand=${brand._id}: ${err.message}`);
+    });
+
+    res.status(202).json({ ok: true, brandId: String(brand._id), status: 'started' });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'apify sync failed' });
   }
