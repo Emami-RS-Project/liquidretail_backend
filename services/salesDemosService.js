@@ -94,11 +94,23 @@ async function createDemoBrand({ name, igHandle, shopifyUrl }) {
   return brand;
 }
 
+// Comma-separated allowlist of emails permitted to bootstrap the Sales
+// Demos workspace via POST /api/sales-demos/bootstrap. Additional reps
+// are added via the normal /api/members invite flow after the first
+// admin lands. Case-insensitive.
+function isAllowedBootstrapper(email) {
+  if (!email) return false;
+  const raw = process.env.SALES_DEMOS_ADMINS || '';
+  const allow = raw.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  return allow.includes(String(email).trim().toLowerCase());
+}
+
 module.exports = {
   SALES_DEMOS_SLUG,
   SALES_DEMOS_NAME,
   ensureSalesDemosAdvertiser,
   normalizeIgHandle,
   normalizeShopifyUrl,
-  createDemoBrand
+  createDemoBrand,
+  isAllowedBootstrapper
 };

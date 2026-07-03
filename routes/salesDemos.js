@@ -6,24 +6,111 @@
 const express = require('express');
 const router  = express.Router();
 
-const Brand = require('../models/Brand');
+const Brand                = require('../models/Brand');
+const AdvertiserMembership = require('../models/AdvertiserMembership');
 const {
   ensureSalesDemosAdvertiser,
   createDemoBrand,
   normalizeIgHandle,
-  normalizeShopifyUrl
+  normalizeShopifyUrl,
+  isAllowedBootstrapper
 } = require('../services/salesDemosService');
 const { syncBrandApify } = require('../services/apifyIngestService');
 
-// Gate every route on the caller being in the Sales Demos advertiser
-// context. The advertiser is created lazily on first use so no
-// deploy-time seed is required.
+// POST /api/sales-demos/bootstrap — first-run setup. Any authenticated
+// user whose email is on the SALES_DEMOS_ADMINS env allowlist can call
+// this to seed the Sales Demos advertiser and grant themselves an
+// active owner membership. Idempotent — re-calling upgrades an
+// existing pending/editor membership to active owner. Mounted BEFORE
+// requireSalesDemosScope so the first admin can call it without
+// already being a member.
+router.post('/bootstrap', async (req, res) => {
+  try {
+    const email = req.user?.email;
+    if (!email) return res.status(401).json({ error: 'not authenticated' });
+    if (!isAllowedBootstrapper(email)) {
+      return res.status(403).json({
+        error: 'Your email is not on the SALES_DEMOS_ADMINS allowlist.',
+        code:  'NOT_ALLOWLISTED'
+      });
+    }
+
+    const adv = await ensureSalesDemosAdvertiser();
+
+    const userId = req.user.userId;
+    const filter = { advertiserId: adv._id, userId };
+    const existing = await AdvertiserMembership.findOne(filter);
+    let membership;
+    if (existing) {
+      let changed = false;
+      if (existing.role !== 'owner')    { existing.role   = 'owner';   changed = true; }
+      if (existing.status !== 'active') { existing.status = 'active';  existing.acceptedAt = existing.acceptedAt || new Date(); changed = true; }
+      if (changed) await existing.save();
+      membership = existing;
+    } else {
+      membership = await AdvertiserMembership.create({
+        advertiserId: adv._id,
+        userId,
+        email,
+        role:         'owner',
+        status:       'active',
+        acceptedAt:   new Date()
+      });
+    }
+
+    res.json({
+      advertiserId:   String(adv._id),
+      advertiserSlug: adv.slug,
+      advertiserName: adv.name,
+      membershipId:   String(membership._id)
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'bootstrap failed' });
+  }
+});
+
+// GET /api/sales-demos/bootstrap-status — lightweight endpoint for the
+// UI to decide whether to render the "Set up workspace" panel. No
+// side effects. Returns the caller's relationship to the Sales Demos
+// advertiser without requiring them to already be in that scope.
+router.get('/bootstrap-status', async (req, res) => {
+  try {
+    const email = req.user?.email;
+    if (!email) return res.status(401).json({ error: 'not authenticated' });
+
+    const canBootstrap = isAllowedBootstrapper(email);
+    // Look up the advertiser without creating it — we don't want a
+    // status probe to seed the row for random authenticated users.
+    const Advertiser = require('../models/Advertiser');
+    const adv = await Advertiser.findOne({ slug: 'sales-demos' }).lean();
+    let alreadyMember = false;
+    if (adv) {
+      const m = await AdvertiserMembership.findOne({
+        advertiserId: adv._id,
+        userId:       req.user.userId,
+        status:       'active'
+      }).select('_id').lean();
+      alreadyMember = !!m;
+    }
+    res.json({
+      canBootstrap,
+      alreadyMember,
+      advertiserId: adv ? String(adv._id) : null
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'status check failed' });
+  }
+});
+
+// Gate every route BELOW this line on the caller being in the Sales
+// Demos advertiser context. The advertiser is created lazily on first
+// bootstrap so no deploy-time seed is required.
 async function requireSalesDemosScope(req, res, next) {
   try {
     if (!req.advertiserId) return res.status(401).json({ error: 'not authenticated' });
     const adv = await ensureSalesDemosAdvertiser();
     if (String(req.advertiserId) !== String(adv._id)) {
-      return res.status(403).json({ error: 'not scoped to Sales Demos advertiser' });
+      return res.status(403).json({ error: 'not scoped to Sales Demos advertiser', code: 'NOT_IN_SCOPE' });
     }
     req.salesDemosAdvertiserId = adv._id;
     next();
