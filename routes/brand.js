@@ -150,7 +150,7 @@ router.patch('/:id', express.json(), async (req, res) => {
     const editable = ['name', 'websiteUrl', 'tagline', 'summary', 'logoUrl',
                       'primaryColor', 'secondaryColor', 'accentColor', 'fontColor',
                       'fontFamily', 'tone', 'hashtags', 'tags', 'demographics',
-                      'brandSafety', 'styleOverrides'];
+                      'brandSafety', 'styleOverrides', 'styleScript'];
     const fontTouched = Object.prototype.hasOwnProperty.call(req.body || {}, 'fontFamily');
     const fontCleared = fontTouched && (req.body.fontFamily == null || req.body.fontFamily === '');
     const before = { websiteUrl: brand.websiteUrl };
@@ -299,18 +299,40 @@ router.post('/:id/render-script', express.json(), async (req, res) => {
 });
 
 // GET /api/brand/:id/style
-// Returns the current per-brand video-chrome style state: the DB
-// override (if any) and the JS-file style (if a slug alias matches).
-// Consumed by the Brand page's Style card to seed the JSON editor
-// and drive the "Load defaults" / "Clear override" affordances.
+// Returns the current per-brand video style state:
+//   - overrides       — Brand.styleOverrides (JSON layout, enum-based)
+//   - fileStyle       — services/brandStyles/*.js (file-based enum layout)
+//   - script          — Brand.styleScript (canvas overlay JS source)
+//   - scriptTemplates — { <name>: <source> } seed scripts from
+//                        services/brandScripts/*.script.js so the UI
+//                        can offer "Load template" without a second
+//                        round-trip.
 router.get('/:id/style', async (req, res) => {
   try {
     const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
     if (!brand) return res.status(404).json({ error: 'brand not found' });
     const { getFileStyle } = require('../services/brandStyles');
+
+    // Read shipped script templates. Cheap; only ~5 files max and the
+    // Brand page is not a hot path. Falls through to empty map when
+    // the dir doesn't exist (in-progress deployments).
+    const fs   = require('fs');
+    const path = require('path');
+    const scriptsDir = path.join(__dirname, '..', 'services', 'brandScripts');
+    const scriptTemplates = {};
+    try {
+      for (const name of fs.readdirSync(scriptsDir)) {
+        if (!name.endsWith('.script.js')) continue;
+        const key = name.replace(/\.script\.js$/, '');
+        scriptTemplates[key] = fs.readFileSync(path.join(scriptsDir, name), 'utf8');
+      }
+    } catch { /* dir missing — no templates */ }
+
     res.json({
-      overrides: brand.styleOverrides || null,
-      fileStyle: getFileStyle(brand)
+      overrides:       brand.styleOverrides || null,
+      fileStyle:       getFileStyle(brand),
+      script:          brand.styleScript || null,
+      scriptTemplates
     });
   } catch (err) {
     res.status(500).json({ error: err.message || 'style lookup failed' });
