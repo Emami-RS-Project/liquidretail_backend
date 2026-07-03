@@ -219,6 +219,15 @@ const brandSchema = new mongoose.Schema({
     lastSyncedAt:  { type: Date,   default: null }
   },
 
+  // Per-brand video-chrome style overrides. Mirrors the shape of the
+  // services/brandStyles/*.js modules (role_layout, fonts, colors,
+  // fontSizes, cornerInset, centerMaxWidthRatio). When set, wins over
+  // the JS-file style for this brand. When null, brand falls back to
+  // the JS file (if a slug alias matches) or renderer defaults.
+  // Mixed so the shape can evolve without a schema migration — the
+  // renderer's own defaults absorb any missing keys.
+  styleOverrides: { type: mongoose.Schema.Types.Mixed, default: null },
+
   // Derived voice — structured profile extracted by
   // brandVoiceDerivationService from the brand's existing Meta/Google
   // ad creatives, performance-weighted by Campaign.insights so winners

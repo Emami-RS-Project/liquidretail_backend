@@ -150,7 +150,7 @@ router.patch('/:id', express.json(), async (req, res) => {
     const editable = ['name', 'websiteUrl', 'tagline', 'summary', 'logoUrl',
                       'primaryColor', 'secondaryColor', 'accentColor', 'fontColor',
                       'fontFamily', 'tone', 'hashtags', 'tags', 'demographics',
-                      'brandSafety'];
+                      'brandSafety', 'styleOverrides'];
     const fontTouched = Object.prototype.hasOwnProperty.call(req.body || {}, 'fontFamily');
     const fontCleared = fontTouched && (req.body.fontFamily == null || req.body.fontFamily === '');
     const before = { websiteUrl: brand.websiteUrl };
@@ -193,6 +193,25 @@ router.patch('/:id', express.json(), async (req, res) => {
     }
     console.error('brand update failed:', err);
     res.status(500).json({ error: err.message || 'brand update failed' });
+  }
+});
+
+// GET /api/brand/:id/style
+// Returns the current per-brand video-chrome style state: the DB
+// override (if any) and the JS-file style (if a slug alias matches).
+// Consumed by the Brand page's Style card to seed the JSON editor
+// and drive the "Load defaults" / "Clear override" affordances.
+router.get('/:id/style', async (req, res) => {
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+    const { getFileStyle } = require('../services/brandStyles');
+    res.json({
+      overrides: brand.styleOverrides || null,
+      fileStyle: getFileStyle(brand)
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'style lookup failed' });
   }
 });
 

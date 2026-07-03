@@ -25,14 +25,22 @@
 //   2. Adjust fonts/colors/sizes to the brand's visual identity
 //   3. Register in the STYLES map below with all name aliases
 
-const uBeautyStyle = require('./u_beauty');
+const uBeautyStyle          = require('./u_beauty');
+const camelbackFlowersStyle = require('./camelback_flowers');
 
 // Map slugified brand-name → style module. Multiple aliases resolve to
 // the same style so different DB spellings work.
 const STYLES = {
   'u_beauty':  uBeautyStyle,
   'ubeauty':   uBeautyStyle,
-  'u_beauty_':  uBeautyStyle  // trailing punctuation fallback
+  'u_beauty_':  uBeautyStyle,  // trailing punctuation fallback
+
+  // Camelback Flowers — florist. Multiple aliases cover DB spellings
+  // (with and without spaces, .com domain form).
+  'camelback_flowers':     camelbackFlowersStyle,
+  'camelbackflowers':      camelbackFlowersStyle,
+  'camelbackflowers_com':  camelbackFlowersStyle,
+  'camelback_flowers_com': camelbackFlowersStyle
 };
 
 function slugify(name) {
@@ -46,10 +54,32 @@ function slugify(name) {
 // Returns the brand's style overrides object, or null if no per-brand
 // style is registered. Renderer falls back to its own defaults for any
 // field the brand style doesn't override.
+//
+// Priority order (first hit wins):
+//   1. brand.styleOverrides   — DB-editable per-brand overrides (set
+//                                via the Brand page's Style card)
+//   2. STYLES[slugify(name)]  — JS-file style module (u_beauty.js etc.)
+//   3. null                   — renderer uses its bare defaults
+//
+// The DB override wins so an operator can iterate on a style without
+// waiting for a redeploy; the JS file remains the seed / template.
 function getBrandStyle(brand) {
+  if (!brand) return null;
+  if (brand.styleOverrides && typeof brand.styleOverrides === 'object' && Object.keys(brand.styleOverrides).length > 0) {
+    return brand.styleOverrides;
+  }
+  if (!brand.name) return null;
+  const key = slugify(brand.name);
+  return STYLES[key] || null;
+}
+
+// Returns the JS-file style for a brand, ignoring any DB override.
+// Used by the Brand page's Style card to seed the editor with the
+// file default when the operator clicks "Load defaults".
+function getFileStyle(brand) {
   if (!brand?.name) return null;
   const key = slugify(brand.name);
   return STYLES[key] || null;
 }
 
-module.exports = { getBrandStyle, slugify };
+module.exports = { getBrandStyle, getFileStyle, slugify };
