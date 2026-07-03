@@ -9,7 +9,10 @@
 
 const axios = require('axios');
 
-const BASE_URL = process.env.ATLAS_BASE_URL || 'https://api.atlascloud.ai/api/v1';
+// Text uses /v1 (no /api prefix). Video endpoints live under /api/v1,
+// so ATLAS_BASE_URL (which the video service uses) is wrong for chat
+// completions. ATLAS_TEXT_BASE_URL overrides this per-service.
+const BASE_URL = process.env.ATLAS_TEXT_BASE_URL || 'https://api.atlascloud.ai/v1';
 // Default to the latest Claude Sonnet on Atlas. Override via
 // ATLAS_TEXT_MODEL_ID (e.g. anthropic/claude-opus-4.7) when a task
 // needs bigger context or more reasoning.
