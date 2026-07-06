@@ -150,17 +150,40 @@ router.patch('/:id', express.json(), async (req, res) => {
     const editable = ['name', 'websiteUrl', 'tagline', 'summary', 'logoUrl',
                       'primaryColor', 'secondaryColor', 'accentColor', 'fontColor',
                       'fontFamily', 'tone', 'hashtags', 'tags', 'demographics',
-                      'brandSafety', 'styleOverrides', 'styleScript'];
+                      'brandSafety', 'styleOverrides', 'styleScript', 'styleTheme'];
+
+    // Entry log for style-related mutations so we can trace why a
+    // Clear button isn't sticking. Non-noisy: only fires when one of
+    // the three style fields is present in the body.
+    const stylePayload = ['styleOverrides', 'styleScript', 'styleTheme']
+      .filter(k => Object.prototype.hasOwnProperty.call(req.body || {}, k))
+      .map(k => {
+        const v = req.body[k];
+        if (v == null) return `${k}=null`;
+        if (typeof v === 'string') return `${k}=<${v.length} chars>`;
+        if (typeof v === 'object') return `${k}=<${Object.keys(v).length} keys>`;
+        return `${k}=<${typeof v}>`;
+      });
+    if (stylePayload.length) {
+      console.log(`✏️  brand PATCH ${req.params.id}: ${stylePayload.join(', ')}`);
+    }
     const fontTouched = Object.prototype.hasOwnProperty.call(req.body || {}, 'fontFamily');
     const fontCleared = fontTouched && (req.body.fontFamily == null || req.body.fontFamily === '');
     const before = { websiteUrl: brand.websiteUrl };
     const curatedSet = new Set(brand.curatedFields || []);
+
+    // Mongoose Mixed fields don't auto-detect deep mutations —
+    // markModified is required to guarantee the change persists,
+    // ESPECIALLY when clearing to null. Applies to any field the
+    // Brand schema declares as mongoose.Schema.Types.Mixed.
+    const MIXED_FIELDS = new Set(['styleOverrides', 'styleTheme', 'brandSafety']);
 
     for (const k of editable) {
       if (Object.prototype.hasOwnProperty.call(req.body || {}, k)) {
         const v = req.body[k];
         const isEmpty = v == null || v === '' || (Array.isArray(v) && v.length === 0);
         brand[k] = isEmpty ? (Array.isArray(v) ? [] : null) : v;
+        if (MIXED_FIELDS.has(k)) brand.markModified(k);
         // Clearing a field is a request to RE-enrich it, not lock the
         // empty value as curated. Setting a value is curation.
         if (isEmpty) curatedSet.delete(k);
