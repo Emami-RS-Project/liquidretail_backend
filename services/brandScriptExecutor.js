@@ -329,19 +329,37 @@ async function buildMetaForAd(ad, brand) {
     layoutInput = await LayoutInputArtifact.findOne({ mediaId: ad.mediaId }).sort({ createdAt: -1 }).lean();
   } catch { /* optional */ }
 
+  // CatalogProduct fallback lookup for product-level fields not
+  // captured on Ad.copy. Cheap when Ad has a productId.
+  let catalogProduct = null;
+  if (ad.productId) {
+    try {
+      const CatalogProduct = require('../models/CatalogProduct');
+      catalogProduct = await CatalogProduct.findById(ad.productId).select('title description price rating reviewCount').lean();
+    } catch { /* optional */ }
+  }
+
+  const rating      = layoutInput?.social_proof?.rating      ?? catalogProduct?.rating      ?? null;
+  const reviewCount = layoutInput?.social_proof?.review_count ?? catalogProduct?.reviewCount ?? null;
+
   return {
-    brandName:    brand?.name || null,
-    headline:     ad.copy?.headline    || layoutInput?.copy?.headline     || null,
-    cta:          ad.copy?.cta_text    || layoutInput?.copy?.cta_text     || 'SHOP NOW',
-    quote:        ad.copy?.quote       || layoutInput?.social_proof?.primary_quote || null,
-    productName:  ad.copy?.productName  || layoutInput?.product?.name     || null,
-    price:        ad.copy?.productPrice || layoutInput?.product?.price    || null,
-    benefits:     layoutInput?.product?.benefits || [],
-    badges:       layoutInput?.product?.badges   || [],
-    reviewsText:  layoutInput?.social_proof?.review_count
-                    ? `${layoutInput.social_proof.review_count} reviews`
-                    : '53 reviews',
-    likes:        layoutInput?.social_proof?.likes || 572
+    brandName:          brand?.name || null,
+    headline:           ad.copy?.headline    || layoutInput?.copy?.headline     || null,
+    cta:                ad.copy?.cta_text    || layoutInput?.copy?.cta_text     || 'SHOP NOW',
+    quote:              ad.copy?.quote       || layoutInput?.social_proof?.primary_quote || null,
+    productName:        ad.copy?.productName  || layoutInput?.product?.name     || catalogProduct?.title || null,
+    productDescription: layoutInput?.product?.description || catalogProduct?.description || null,
+    price:              ad.copy?.productPrice || layoutInput?.product?.price    || catalogProduct?.price || null,
+    benefits:           layoutInput?.product?.benefits || [],
+    badges:             layoutInput?.product?.badges   || [],
+    // Structured review data — scripts render a star bar + count.
+    rating,
+    reviewCount,
+    // Preformatted string kept for scripts that don't want to lay out
+    // stars themselves — always populated.
+    reviewsText:        reviewCount != null ? `${reviewCount} review${reviewCount === 1 ? '' : 's'}`
+                       : '53 reviews',
+    likes:              layoutInput?.social_proof?.likes || 572
   };
 }
 

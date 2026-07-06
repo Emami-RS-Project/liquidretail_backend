@@ -253,16 +253,19 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
     const totalFrames = 145;
     const previewIndices = [0, Math.floor(totalFrames / 2), totalFrames - 1];
     const meta = {
-      brandName:    brand.name,
-      headline:     brand.tagline || 'Made better.',
-      cta:          'SHOP NOW',
-      quote:        'Highly rated for comfort, durability, and standout style.',
-      productName:  null,
-      price:        null,
-      benefits:     [],
-      badges:       [],
-      reviewsText:  '53 reviews',
-      likes:        572
+      brandName:          brand.name,
+      headline:           brand.tagline || 'Made better.',
+      cta:                'SHOP NOW',
+      quote:              'Highly rated for comfort, durability, and standout style.',
+      productName:        'Signature Product',
+      productDescription: 'Crafted for daily wear. Made with premium materials that last.',
+      price:              '$48',
+      benefits:           [],
+      badges:             [],
+      rating:             4.6,
+      reviewCount:        128,
+      reviewsText:        '128 reviews',
+      likes:              572
     };
 
     const { previewBrandScript } = require('../services/brandScriptExecutor');
@@ -320,8 +323,21 @@ async function runGenerateScript(jobId, brand, direction) {
       '- Draw the plate first (`ctx.drawImage(plate, 0, 0, ctx.canvas.width, ctx.canvas.height)`) if the base video should be visible.',
       '- Use ONLY the sandbox globals: `canvas` (@napi-rs/canvas namespace), `sharp` (image ops), `helpers` / `h` (clamp, t01, eoc, eob, smooth, rgba), `colors` (WHITE, BLACK, NAVY, GOLD, HEART, SOFT).',
       '- NEVER call `require`, `process`, `fs`, `global`, `import`. These are not available in the sandbox.',
-      '- Reference text vars only via `meta.<key>`: brandName, headline, cta, quote, productName, price, benefits[], badges[], reviewsText, likes. Provide safe fallbacks for any missing key.',
+      '- Reference text vars only via `meta.<key>`: brandName, headline, cta, quote, productName, productDescription, price, benefits[], badges[], rating (number 0-5), reviewCount (number), reviewsText, likes.',
       '- Reference fonts by family name in `ctx.font = "<weight> <size>px \\"FamilyName\\""`. Available families depend on what\'s bundled in assets/fonts — safe bets: Inter, Montserrat, Great Vibes, Cormorant Garamond, Lora, Playfair Display, DM Sans, Antonio.',
+      '',
+      'MANDATORY OVERLAY ELEMENTS — every generated script MUST prominently draw all four of these on every frame (with appropriate timing/animation):',
+      '  1. PRODUCT NAME — meta.productName. Fallback to meta.headline if productName is falsy.',
+      '  2. REVIEW BAR — a visible 5-star rating using meta.rating (0-5) + meta.reviewCount as a count next to it. If meta.rating is falsy, render a subtle "meta.reviewsText"-style row instead. Never omit the review element.',
+      '  3. QUOTE OR DESCRIPTION (priority): if meta.quote is a non-empty string, draw it as an italicized quote. Otherwise draw meta.productDescription. Otherwise draw meta.headline. Never render an obvious placeholder like "Made better." — always use whichever meta key has real content.',
+      '  4. CTA — meta.cta on a highly salient pill or button. Never omit.',
+      '',
+      'QUALITY RULES:',
+      '- SAFE MARGINS: no text may render within 6% of any canvas edge (compute SAFE = 0.06 * min(W, H) once; keep every text baseline + text extent inside the inner rect).',
+      '- CONTRAST: every text zone MUST sit on a scrim, wash, solid card, or shadow that guarantees ≥ 4.5:1 luminance contrast vs. the text color. Assume the base plate can be any color — do NOT rely on the plate for contrast.',
+      '- TEXT WRAPPING: if a text value could exceed the available width, wrap it to multiple lines rather than clipping. Cap at 3 lines; measure with ctx.measureText.',
+      '- LEGIBILITY: no text under 22px at 1080-wide canvas scale. CTA text ≥ 28px.',
+      '- SALIENCE: mandatory elements must remain visible for at least half of the frame range (not just briefly).',
       '',
       'OUTPUT: return ONLY the raw JS source. No markdown fences, no commentary. Start with `module.exports = {` and end with `};` (or top-level helpers followed by module.exports). The file must be directly assignable to Brand.styleScript and runnable in the sandbox as-is.'
     ].join('\n');
