@@ -96,24 +96,20 @@ async function pullShopifyProducts(shopUrl, { limit } = {}) {
   if (!shopUrl) throw new Error('Shopify URL is required');
   const maxItems = Math.max(1, Math.min(parseInt(limit, 10) || SHOPIFY_LIMIT, SHOPIFY_LIMIT));
 
-  // The webdatalabs actor merges caller input over its FACTORY defaults
-  // rather than replacing them. Its default input includes
-  // `storeUrls: [allbirds]` + `maxProducts: 100` + `maxStores: 1000`.
-  // If we only send startUrls + mode='url', those allbirds defaults
-  // still get processed alongside our target — which is exactly the
-  // bug reported ("apify pulled allbirds products again"). So we
-  // explicitly zero out every default that could pull unintended data.
+  // Despite mode='url' + a startUrls field being present, the
+  // webdatalabs actor actually consumes `storeUrls` as the primary
+  // target list — it even validates "At least one store URL is
+  // required in URL mode" when storeUrls is empty. Sending our
+  // target URL under `startUrls` alone let the actor's default
+  // storeUrls (allbirds) win, which was the original bug.
   //
-  // mode='url'      → makes startUrls the primary target
-  // storeUrls: []   → explicitly clears the allbirds fallback
-  // maxStores: 1    → belt-and-suspenders in case storeUrls is still consulted
-  // maxProducts / maxItems both set to our limit so whichever the
-  // actor reads is capped correctly
-  // category: ''    → clears any bundled category filter
+  // Fix: put the target URL in BOTH fields, and cap max* / maxStores
+  // so the actor can't wander to other stores its defaults might list.
+  const target = String(shopUrl);
   const input = {
     mode:               'url',
-    startUrls:          [{ url: String(shopUrl) }],
-    storeUrls:          [],
+    storeUrls:          [{ url: target }],   // the field the actor actually reads
+    startUrls:          [{ url: target }],   // belt-and-suspenders — some builds check this too
     maxItems,
     maxProducts:        maxItems,
     maxStores:          1,
