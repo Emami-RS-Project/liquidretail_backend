@@ -96,13 +96,29 @@ async function pullShopifyProducts(shopUrl, { limit } = {}) {
   if (!shopUrl) throw new Error('Shopify URL is required');
   const maxItems = Math.max(1, Math.min(parseInt(limit, 10) || SHOPIFY_LIMIT, SHOPIFY_LIMIT));
 
-  // mode='url' is REQUIRED so the actor reads startUrls (our target)
-  // rather than falling back to its bundled storeUrls demo list.
+  // The webdatalabs actor merges caller input over its FACTORY defaults
+  // rather than replacing them. Its default input includes
+  // `storeUrls: [allbirds]` + `maxProducts: 100` + `maxStores: 1000`.
+  // If we only send startUrls + mode='url', those allbirds defaults
+  // still get processed alongside our target — which is exactly the
+  // bug reported ("apify pulled allbirds products again"). So we
+  // explicitly zero out every default that could pull unintended data.
+  //
+  // mode='url'      → makes startUrls the primary target
+  // storeUrls: []   → explicitly clears the allbirds fallback
+  // maxStores: 1    → belt-and-suspenders in case storeUrls is still consulted
+  // maxProducts / maxItems both set to our limit so whichever the
+  // actor reads is capped correctly
+  // category: ''    → clears any bundled category filter
   const input = {
-    startUrls: [{ url: String(shopUrl) }],
-    mode:      'url',
+    mode:               'url',
+    startUrls:          [{ url: String(shopUrl) }],
+    storeUrls:          [],
     maxItems,
-    maxPages:  10,
+    maxProducts:        maxItems,
+    maxStores:          1,
+    maxPages:           10,
+    category:           '',
     proxyConfiguration: { useApifyProxy: true }
   };
   const items = await runActorSync(SHOPIFY_ACTOR, input);
