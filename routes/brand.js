@@ -237,40 +237,71 @@ router.post('/:id/render-script', express.json(), async (req, res) => {
 
 // POST /api/brand/:id/preview-script
 // Renders a small handful of frames against a synthetic plate so the
-// operator can iterate on a canvas script without waiting for a real
-// ad to be generated first. Body: { script?: string } — pass an
-// unsaved script from the textarea to preview it; omit to preview
-// the currently-saved Brand.styleScript.
+// operator can iterate on a canvas script (or theme) without waiting
+// for a real ad. Body:
+//   { script?: string }  — preview an unsaved custom renderer
+//   { theme?:  object }  — preview an unsaved theme against the canonical
+//   (both omitted)       — preview whichever of styleScript / styleTheme
+//                          is currently saved on the brand
 router.post('/:id/preview-script', express.json(), async (req, res) => {
   const started = Date.now();
   try {
     const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
     if (!brand) return res.status(404).json({ error: 'brand not found' });
 
-    const script = String(req.body?.script || brand.styleScript || '').trim();
-    if (!script) return res.status(400).json({ error: 'no script — pass one in the body or save Brand.styleScript first' });
+    const bodyScript = req.body?.script ? String(req.body.script).trim() : null;
+    const bodyTheme  = req.body?.theme && typeof req.body.theme === 'object' ? req.body.theme : null;
+
+    // Resolve which path we're previewing.
+    //   1. Explicit script in body → custom renderer preview.
+    //   2. Explicit theme in body → canonical + body theme.
+    //   3. brand.styleScript saved → custom renderer preview.
+    //   4. brand.styleTheme saved → canonical + saved theme.
+    //   5. Nothing → 400.
+    let styleScript = null;
+    let themeForPreview = null;
+    let useCanonical = false;
+    if (bodyScript) {
+      styleScript = bodyScript;
+    } else if (bodyTheme) {
+      useCanonical = true;
+      themeForPreview = bodyTheme;
+    } else if (brand.styleScript && String(brand.styleScript).trim()) {
+      styleScript = brand.styleScript;
+    } else if (brand.styleTheme && Object.keys(brand.styleTheme).length > 0) {
+      useCanonical = true;
+      themeForPreview = brand.styleTheme;
+    } else {
+      return res.status(400).json({ error: 'no script or theme — pass one in the body or save the brand first' });
+    }
 
     const totalFrames = 145;
     const previewIndices = [0, Math.floor(totalFrames / 2), totalFrames - 1];
     const meta = {
       brandName:          brand.name,
-      headline:           brand.tagline || 'Made better.',
-      cta:                'SHOP NOW',
-      quote:              'Highly rated for comfort, durability, and standout style.',
+      badgeText:          'Customer Favorite',
       productName:        'Signature Product',
       productDescription: 'Crafted for daily wear. Made with premium materials that last.',
       price:              '$48',
+      headline:           brand.tagline || 'Made better.',
+      cta:                'SHOP NOW',
+      ctaText:            'SHOP NOW',
+      quote:              'Highly rated for comfort, durability, and standout style.',
+      reviewer:           'Verified customer',
+      deliveryLine:       'Ships free — arrives in 2-3 days',
       benefits:           [],
       badges:             [],
       rating:             4.6,
       reviewCount:        128,
       reviewsText:        '128 reviews',
-      likes:              572
+      likes:              572,
+      theme:              themeForPreview || {}
     };
 
     const { previewBrandScript } = require('../services/brandScriptExecutor');
     const result = await previewBrandScript({
-      styleScript:     script,
+      styleScript,
+      useCanonical,
       meta,
       totalFrames,
       previewIndices,
@@ -302,44 +333,75 @@ function reapJob(jobId) {
   setTimeout(() => scriptJobs.delete(jobId), SCRIPT_JOB_TTL_MS);
 }
 
+// Reference theme — Claude studies this to understand the schema.
+// Camelback Flowers, hand-tuned. Emphasises earthy, botanical palette
+// so Claude has a concrete example of thoughtful color pairing.
+const REFERENCE_THEME = {
+  sansFontFamily:    'Inter',
+  serifFontFamily:   'Lora',
+  productFontFamily: 'Cormorant Garamond',
+  productFontWeight: 600,
+  quoteFontFamily:   'Lora',
+  badgeBgColor:      [194, 209, 173],
+  badgeTextColor:    [66, 94, 54],
+  ctaBgColor:        [70, 120, 62],
+  ctaTextColor:      [255, 248, 239],
+  ctaStrokeColor:    [225, 222, 209],
+  textPrimary:       [250, 244, 236],
+  textSecondary:     [224, 214, 202],
+  textMuted:         [201, 189, 175],
+  accentGold:        [214, 171, 83],
+  ratingBarStart:    [201, 128, 130],
+  ratingBarMid:      [216, 169, 81],
+  ratingBarEnd:      [120, 144, 95],
+  dividerColor:      [213, 199, 183],
+  brandPillStroke:   [255, 247, 239],
+  brandPillText:     [255, 247, 239]
+};
+
 async function runGenerateScript(jobId, brand, direction) {
   try {
-    const fs = require('fs');
-    const path = require('path');
-    let referenceScript = '';
-    try {
-      referenceScript = fs.readFileSync(
-        path.join(__dirname, '..', 'services', 'brandScripts', 'u_beauty.script.js'),
-        'utf8'
-      );
-    } catch { /* absent — proceed with contract-only prompt */ }
-
     const system = [
-      'You are generating a per-brand canvas overlay script for a video ad pipeline.',
+      'You are picking a THEME for a per-brand canvas overlay in a video ad pipeline.',
       '',
-      'The script runs in a sandboxed Node.js child process. It MUST:',
-      '- Export a single object via `module.exports = { renderFrame: async (frameIndex, ctx, plate, meta, h) => { ... } };`',
-      '- Draw one frame per call. Consumer loops frameIndex from 0 to totalFrames-1.',
-      '- Draw the plate first (`ctx.drawImage(plate, 0, 0, ctx.canvas.width, ctx.canvas.height)`) if the base video should be visible.',
-      '- Use ONLY the sandbox globals: `canvas` (@napi-rs/canvas namespace), `sharp` (image ops), `helpers` / `h` (clamp, t01, eoc, eob, smooth, rgba), `colors` (WHITE, BLACK, NAVY, GOLD, HEART, SOFT).',
-      '- NEVER call `require`, `process`, `fs`, `global`, `import`. These are not available in the sandbox.',
-      '- Reference text vars only via `meta.<key>`: brandName, headline, cta, quote, productName, productDescription, price, benefits[], badges[], rating (number 0-5), reviewCount (number), reviewsText, likes.',
-      '- Reference fonts by family name in `ctx.font = "<weight> <size>px \\"FamilyName\\""`. Available families depend on what\'s bundled in assets/fonts — safe bets: Inter, Montserrat, Great Vibes, Cormorant Garamond, Lora, Playfair Display, DM Sans, Antonio.',
+      'Layout, animation, and which elements appear are FIXED by a shared renderer. Your ONLY job is to pick colors + font families that fit the brand. Return a single JSON object matching this exact shape (all keys required, all arrays are [R, G, B] with values 0-255):',
       '',
-      'MANDATORY OVERLAY ELEMENTS — every generated script MUST prominently draw all four of these on every frame (with appropriate timing/animation):',
-      '  1. PRODUCT NAME — meta.productName. Fallback to meta.headline if productName is falsy.',
-      '  2. REVIEW BAR — a visible 5-star rating using meta.rating (0-5) + meta.reviewCount as a count next to it. If meta.rating is falsy, render a subtle "meta.reviewsText"-style row instead. Never omit the review element.',
-      '  3. QUOTE OR DESCRIPTION (priority): if meta.quote is a non-empty string, draw it as an italicized quote. Otherwise draw meta.productDescription. Otherwise draw meta.headline. Never render an obvious placeholder like "Made better." — always use whichever meta key has real content.',
-      '  4. CTA — meta.cta on a highly salient pill or button. Never omit.',
+      '{',
+      '  "sansFontFamily":    "Inter",',
+      '  "serifFontFamily":   "Lora",',
+      '  "productFontFamily": "Cormorant Garamond",',
+      '  "productFontWeight": 600,',
+      '  "quoteFontFamily":   "Lora",',
+      '  "badgeBgColor":      [R, G, B],   // small pastel pill behind badgeText ("Customer Favorite")',
+      '  "badgeTextColor":    [R, G, B],   // text inside the badge pill — high contrast vs badgeBg',
+      '  "ctaBgColor":        [R, G, B],   // primary CTA button fill',
+      '  "ctaTextColor":      [R, G, B],   // CTA label — high contrast vs ctaBg',
+      '  "ctaStrokeColor":    [R, G, B],   // thin stroke around CTA',
+      '  "textPrimary":       [R, G, B],   // product name + top of quote — usually near white',
+      '  "textSecondary":     [R, G, B],   // reviewer, delivery line, secondary meta',
+      '  "textMuted":         [R, G, B],   // supporting labels',
+      '  "accentGold":        [R, G, B],   // 5-star row + accent moments',
+      '  "ratingBarStart":    [R, G, B],   // left end of the 5-star fill gradient',
+      '  "ratingBarMid":      [R, G, B],',
+      '  "ratingBarEnd":      [R, G, B],',
+      '  "dividerColor":      [R, G, B],',
+      '  "brandPillStroke":   [R, G, B],   // stroke of the top brand pill',
+      '  "brandPillText":     [R, G, B]',
+      '}',
       '',
-      'QUALITY RULES:',
-      '- SAFE MARGINS: no text may render within 6% of any canvas edge (compute SAFE = 0.06 * min(W, H) once; keep every text baseline + text extent inside the inner rect).',
-      '- CONTRAST: every text zone MUST sit on a scrim, wash, solid card, or shadow that guarantees ≥ 4.5:1 luminance contrast vs. the text color. Assume the base plate can be any color — do NOT rely on the plate for contrast.',
-      '- TEXT WRAPPING: if a text value could exceed the available width, wrap it to multiple lines rather than clipping. Cap at 3 lines; measure with ctx.measureText.',
-      '- LEGIBILITY: no text under 22px at 1080-wide canvas scale. CTA text ≥ 28px.',
-      '- SALIENCE: mandatory elements must remain visible for at least half of the frame range (not just briefly).',
+      'FONT FAMILY RULES:',
+      '- Pick from families bundled in assets/fonts: Inter, Montserrat, Great Vibes, Cormorant Garamond, Lora, Playfair Display, DM Sans, Antonio.',
+      '- sansFontFamily should be a clean modern sans (Inter, DM Sans, Montserrat).',
+      '- productFontFamily is the hero — pick something that matches the brand vibe (Cormorant Garamond for elegant, Antonio for bold, Playfair Display for editorial).',
+      '- quoteFontFamily should read well in italic — Lora, Playfair Display, Cormorant Garamond.',
       '',
-      'OUTPUT: return ONLY the raw JS source. No markdown fences, no commentary. Start with `module.exports = {` and end with `};` (or top-level helpers followed by module.exports). The file must be directly assignable to Brand.styleScript and runnable in the sandbox as-is.'
+      'COLOR RULES:',
+      '- Palette must feel cohesive — pick 2-3 base hues and lean into their neighbours.',
+      '- Every text color pairs with its background at ≥4.5:1 contrast.',
+      '- The rating bar gradient (start → mid → end) should read as a warm cross-color arc.',
+      '- Video plates behind the overlay may be any color, so text colors should hold up on both light AND dark plates (a soft scrim already gives 40-70% dark backdrop for text zones — pick text colors that read against ~30% grey).',
+      '',
+      'OUTPUT: return ONLY the raw JSON object. No markdown fences, no commentary, no leading prose. The response must parse cleanly with JSON.parse().'
     ].join('\n');
 
     const brandContextLines = [
@@ -356,40 +418,54 @@ async function runGenerateScript(jobId, brand, direction) {
     ].filter(Boolean);
 
     const user = [
-      `Generate a canvas overlay script tailored to this brand:`,
+      `Pick a theme JSON tailored to this brand:`,
       '',
       brandContextLines.join('\n'),
       '',
       direction ? `Operator direction: ${direction}` : '',
       '',
-      referenceScript ? '── Reference script (U Beauty — study the structure, then produce a distinctly different aesthetic for the brand above):' : '',
-      referenceScript ? '```javascript' : '',
-      referenceScript,
-      referenceScript ? '```' : '',
+      '── Reference theme (Camelback Flowers — earthy botanical). Study the structure, then produce a distinctly different palette for the brand above:',
+      '```json',
+      JSON.stringify(REFERENCE_THEME, null, 2),
+      '```',
       '',
-      `Now write the ${brand.name} script.`
+      `Now write the ${brand.name} theme.`
     ].filter(Boolean).join('\n');
 
     const { generate } = require('../services/atlasTextService');
-    const result = await generate({ system, user, temperature: 0.5, maxTokens: 4096 });
+    const result = await generate({ system, user, temperature: 0.4, maxTokens: 1500 });
 
+    // Strip accidental markdown fences (Claude sometimes wraps despite
+    // the instruction).
     const cleaned = result.text
-      .replace(/^```(?:javascript|js)?\s*\n?/i, '')
+      .replace(/^```(?:json)?\s*\n?/i, '')
       .replace(/\n?```\s*$/i, '')
       .trim();
+
+    // Validate as JSON — if the LLM's response isn't parseable, that's
+    // a hard failure the operator needs to see.
+    let theme;
+    try {
+      theme = JSON.parse(cleaned);
+    } catch (parseErr) {
+      throw new Error(`Claude returned invalid JSON: ${parseErr.message}\nRaw response:\n${cleaned.slice(0, 500)}`);
+    }
+    if (!theme || typeof theme !== 'object' || Array.isArray(theme)) {
+      throw new Error('Claude returned non-object JSON — expected a theme object');
+    }
 
     const job = scriptJobs.get(jobId) || {};
     scriptJobs.set(jobId, {
       ...job,
       status:       'done',
-      script:       cleaned,
+      theme,
       model:        result.model,
       usage:        result.usage,
       finishReason: result.finishReason,
       completedAt:  Date.now()
     });
     reapJob(jobId);
-    console.log(`🧠 generate-script: job=${jobId} DONE in ${Date.now() - (job.startedAt || Date.now())}ms outputChars=${cleaned.length}`);
+    console.log(`🧠 generate-script: job=${jobId} DONE in ${Date.now() - (job.startedAt || Date.now())}ms themeKeys=${Object.keys(theme).length}`);
   } catch (err) {
     console.error(`🧠 generate-script: job=${jobId} FAILED — ${err.message}`);
     const job = scriptJobs.get(jobId) || {};
@@ -453,7 +529,8 @@ router.get('/:id/generate-script/:jobId', async (req, res) => {
     }
     res.json({
       status:       job.status,
-      script:       job.script,
+      theme:        job.theme,   // new theme-driven path
+      script:       job.script,  // legacy custom-JS path (may be null)
       error:        job.error,
       model:        job.model,
       usage:        job.usage,
@@ -499,6 +576,7 @@ router.get('/:id/style', async (req, res) => {
       overrides:       brand.styleOverrides || null,
       fileStyle:       getFileStyle(brand),
       script:          brand.styleScript || null,
+      theme:           brand.styleTheme || null,
       scriptTemplates
     });
   } catch (err) {

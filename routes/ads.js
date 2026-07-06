@@ -449,14 +449,18 @@ async function renderOne(run, job, adId, index, renderToken) {
       }
 
       // Load brand once to decide which overlay path this ad takes.
-      // When Brand.styleScript is set, the sandboxed canvas executor
-      // replaces the HTML/Puppeteer chrome path — chrome HTML gen is
-      // wasted work in that case, so we skip its parallel dispatch.
+      // Canvas path fires when the brand has EITHER a bespoke
+      // styleScript OR a styleTheme (which uses the shared canonical
+      // renderer). Either way, chrome HTML gen is wasted work — skip
+      // it in the parallel dispatch below.
       const brandMedia = await Media.findById(ad.mediaId).select('brandId').lean();
       const brandDoc   = brandMedia?.brandId
-        ? await Brand.findById(brandMedia.brandId).select('name styleScript').lean()
+        ? await Brand.findById(brandMedia.brandId).select('name styleScript styleTheme').lean()
         : null;
-      const useCanvasScript = !!(brandDoc?.styleScript && String(brandDoc.styleScript).trim());
+      const useCanvasScript = !!(
+        (brandDoc?.styleScript && String(brandDoc.styleScript).trim()) ||
+        (brandDoc?.styleTheme && Object.keys(brandDoc.styleTheme).length > 0)
+      );
 
       // Stage 2 — fire Grok + chrome in parallel. Chrome is skipped
       // when the brand opts into the canvas path. Composite still has

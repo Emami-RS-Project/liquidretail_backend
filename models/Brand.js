@@ -235,11 +235,20 @@ const brandSchema = new mongoose.Schema({
   // Per-brand canvas overlay script. Raw JS source that exports a
   // renderAll({ inputDir, outputDir, meta, fonts }) function. Run in
   // a sandboxed child process by services/brandScriptExecutor.js
-  // after the base video finishes. Takes precedence over the
-  // HTML/Puppeteer chrome path — when styleScript is set for a brand,
-  // the executor is used; otherwise the pipeline falls back to
-  // aiReelsChromeService + aiReelsPuppeteerService.
+  // after the base video finishes. Escape hatch for brands that want
+  // a fully bespoke renderer — most brands opt into styleTheme
+  // (below) + the shared canonical layout instead.
+  //
+  // Executor priority: styleScript > (canonical + styleTheme) >
+  // HTML/Puppeteer.
   styleScript: { type: String, default: null },
+
+  // Per-brand theme JSON consumed by the shared canonical brand-script
+  // renderer (services/brandScripts/canonical.script.js or the DB
+  // SystemConfig override). Colors, font families, and specific text
+  // overrides — layout and animation stay fixed in the canonical.
+  // Passed into meta.theme at render time.
+  styleTheme: { type: mongoose.Schema.Types.Mixed, default: null },
 
   // Derived voice — structured profile extracted by
   // brandVoiceDerivationService from the brand's existing Meta/Google

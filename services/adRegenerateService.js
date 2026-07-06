@@ -147,8 +147,12 @@ async function regenerateAd({ ad, prompt, mode, requestedBy }) {
 async function resolveBrandPath(adId) {
   const ad = await Ad.findById(adId).select('mediaId').lean();
   const media = ad?.mediaId ? await Media.findById(ad.mediaId).select('brandId').lean() : null;
-  const brand = media?.brandId ? await Brand.findById(media.brandId).select('name styleScript').lean() : null;
-  return { brand, useCanvasScript: !!(brand?.styleScript && String(brand.styleScript).trim()) };
+  const brand = media?.brandId ? await Brand.findById(media.brandId).select('name styleScript styleTheme').lean() : null;
+  const useCanvasScript = !!(
+    (brand?.styleScript && String(brand.styleScript).trim()) ||
+    (brand?.styleTheme && Object.keys(brand.styleTheme).length > 0)
+  );
+  return { brand, useCanvasScript };
 }
 
 async function runVideoFull(adId, prompt) {

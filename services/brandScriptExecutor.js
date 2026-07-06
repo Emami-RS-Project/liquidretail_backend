@@ -250,8 +250,24 @@ async function previewBrandScript({
   totalFrames = 145,
   previewIndices = [0, Math.floor(145 / 2), 144],
   plateBackground = '#3D3D3D',
-  brandName
+  brandName,
+  // Optional: when styleScript is falsy but useCanonical is true,
+  // the preview loads the canonical renderer instead. Meta.theme
+  // supplies the per-brand colors/fonts.
+  useCanonical = false
 }) {
+  // Resolve script source: caller-provided styleScript wins;
+  // otherwise pull the canonical (DB > file).
+  if (!styleScript && useCanonical) {
+    const { getCanonicalScript } = require('./systemConfigService');
+    const { script } = await getCanonicalScript();
+    styleScript = script;
+  }
+  if (!styleScript) {
+    const e = new Error('previewBrandScript requires styleScript or useCanonical');
+    e.status = 400;
+    throw e;
+  }
   const runId  = crypto.randomBytes(6).toString('hex');
   const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), `bpreview_${runId}_`));
   const plateDir = path.join(tempDir, 'plates');
@@ -342,16 +358,26 @@ async function buildMetaForAd(ad, brand) {
   const rating      = layoutInput?.social_proof?.rating      ?? catalogProduct?.rating      ?? null;
   const reviewCount = layoutInput?.social_proof?.review_count ?? catalogProduct?.reviewCount ?? null;
 
+  const ctaText = ad.copy?.cta_text || layoutInput?.copy?.cta_text || 'SHOP NOW';
+  const reviewerLabel = layoutInput?.social_proof?.reviewer_label || 'Verified customer';
+  const deliveryLine = layoutInput?.product?.delivery_line || (brand?.tagline || 'Ships free');
+  const badgeText = (layoutInput?.product?.badges?.[0]) || 'Bestseller';
+
   return {
+    // ── Text used by the canonical renderer + most custom scripts ──
     brandName:          brand?.name || null,
-    headline:           ad.copy?.headline    || layoutInput?.copy?.headline     || null,
-    cta:                ad.copy?.cta_text    || layoutInput?.copy?.cta_text     || 'SHOP NOW',
-    quote:              ad.copy?.quote       || layoutInput?.social_proof?.primary_quote || null,
+    badgeText,
     productName:        ad.copy?.productName  || layoutInput?.product?.name     || catalogProduct?.title || null,
     productDescription: layoutInput?.product?.description || catalogProduct?.description || null,
     price:              ad.copy?.productPrice || layoutInput?.product?.price    || catalogProduct?.price || null,
     benefits:           layoutInput?.product?.benefits || [],
     badges:             layoutInput?.product?.badges   || [],
+    headline:           ad.copy?.headline    || layoutInput?.copy?.headline     || null,
+    quote:              ad.copy?.quote       || layoutInput?.social_proof?.primary_quote || null,
+    reviewer:           reviewerLabel,
+    deliveryLine,
+    ctaText,
+    cta:                ctaText, // legacy alias — some scripts still read meta.cta
     // Structured review data — scripts render a star bar + count.
     rating,
     reviewCount,
@@ -359,18 +385,42 @@ async function buildMetaForAd(ad, brand) {
     // stars themselves — always populated.
     reviewsText:        reviewCount != null ? `${reviewCount} review${reviewCount === 1 ? '' : 's'}`
                        : '53 reviews',
-    likes:              layoutInput?.social_proof?.likes || 572
+    likes:              layoutInput?.social_proof?.likes || 572,
+
+    // ── Theme (canonical path) ─────────────────────────────────────
+    // Colors + font families that Claude / an operator picks per
+    // brand. Feeds meta.theme in the canonical renderer. Kept as a
+    // freeform object so future fields (icon color, secondary badge,
+    // etc.) don't need schema changes.
+    theme:              brand?.styleTheme || {}
   };
 }
 
-// End-to-end: render the brand's styleScript over the ad's Grok video,
+// Resolve which script source to run for a brand. Priority:
+//   1. brand.styleScript  — custom bespoke renderer (escape hatch)
+//   2. brand.styleTheme   — canonical shared renderer + theme injection
+//   3. no script          — caller falls back to HTML/Puppeteer
+async function resolveBrandRenderer(brand) {
+  if (brand?.styleScript && String(brand.styleScript).trim()) {
+    return { path: 'custom', script: brand.styleScript };
+  }
+  if (brand?.styleTheme && Object.keys(brand.styleTheme).length > 0) {
+    const { getCanonicalScript } = require('./systemConfigService');
+    const { script, source } = await getCanonicalScript();
+    return { path: 'canonical', script, canonicalSource: source };
+  }
+  return { path: null, script: null };
+}
+
+// End-to-end: render the brand's chosen path over the ad's Grok video,
 // upload to Cloudinary, update Ad.renderUrl. Returns the new URL +
 // timings. Caller decides how to handle errors — this helper doesn't
 // swallow them, so both fatal (pipeline) and non-fatal (script preview)
 // call sites can choose behavior.
 async function renderBrandScriptAndSave({ ad, brand }) {
-  if (!brand?.styleScript || !String(brand.styleScript).trim()) {
-    const e = new Error('brand has no styleScript');
+  const renderer = await resolveBrandRenderer(brand);
+  if (!renderer.script) {
+    const e = new Error('brand has no styleScript or styleTheme');
     e.status = 400;
     throw e;
   }
@@ -381,9 +431,10 @@ async function renderBrandScriptAndSave({ ad, brand }) {
   }
 
   const meta = await buildMetaForAd(ad, brand);
+  console.log(`🎨 brandScript[ad=${ad._id}]: path=${renderer.path}${renderer.canonicalSource ? ` (canonical from ${renderer.canonicalSource})` : ''}`);
   const result = await renderBrandScript({
     videoUrl:    ad.veoVideoUrl,
-    styleScript: brand.styleScript,
+    styleScript: renderer.script,
     meta,
     adId:        String(ad._id),
     brandName:   brand.name
@@ -415,4 +466,4 @@ async function renderBrandScriptAndSave({ ad, brand }) {
   }
 }
 
-module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript };
+module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript, resolveBrandRenderer };
