@@ -123,13 +123,33 @@ async function requireSalesDemosScope(req, res, next) {
 router.use(requireSalesDemosScope);
 
 // GET /api/sales-demos/brands — list demo brands for this rep.
+// Each brand is augmented with `inFlightDetectRuns`, the count of
+// queued+processing DetectRuns for that brand. This lets the UI
+// render an Abort button whenever real work is in flight — even
+// after a page navigation dropped the local "syncing" React state.
 router.get('/brands', async (req, res) => {
   try {
     const brands = await Brand.find({ advertiserId: req.salesDemosAdvertiserId, isDemo: true })
       .select('name nameNormalized logoUrl websiteUrl apifyDemo createdAt')
       .sort({ createdAt: -1 })
       .lean();
-    res.json({ brands });
+
+    if (brands.length === 0) return res.json({ brands });
+
+    // One aggregation for all brands — cheaper than N queries.
+    const brandIds = brands.map(b => b._id);
+    const runs = await DetectRun.aggregate([
+      { $match: { brandId: { $in: brandIds }, status: { $in: ['queued', 'processing'] } } },
+      { $group: { _id: '$brandId', count: { $sum: 1 } } }
+    ]);
+    const inFlightByBrand = new Map(runs.map(r => [String(r._id), r.count]));
+
+    const enriched = brands.map(b => ({
+      ...b,
+      inFlightDetectRuns: inFlightByBrand.get(String(b._id)) || 0
+    }));
+
+    res.json({ brands: enriched });
   } catch (err) {
     res.status(500).json({ error: err.message || 'list demo brands failed' });
   }
