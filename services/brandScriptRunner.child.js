@@ -30,6 +30,7 @@
 const fs   = require('fs');
 const fsp  = fs.promises;
 const path = require('path');
+const vm   = require('vm');
 const canvasLib = require('@napi-rs/canvas');
 
 async function main() {
@@ -101,19 +102,64 @@ async function main() {
 
 function loadBrandScript(source) {
   const brandModule = { exports: {} };
-  // `new Function` with a controlled parameter list = a sandbox that
-  // doesn't inherit access to require / process / global. The brand
-  // script can only see what we pass in explicitly.
-  const fn = new Function(
-    'module', 'exports', 'canvas', 'sharp', 'helpers', 'colors',
-    source
-  );
+  // vm.compileFunction has the same sandboxing property as new Function
+  // (the compiled function only sees what we pass in via `params`),
+  // but it also gives syntax errors WITH file+line+column info instead
+  // of a bare "Unexpected token X" — critical when the script is
+  // LLM-generated and needs debugging.
+  let fn;
+  try {
+    fn = vm.compileFunction(
+      source,
+      ['module', 'exports', 'canvas', 'sharp', 'helpers', 'colors'],
+      { filename: 'brand-script.js' }
+    );
+  } catch (err) {
+    // Syntax error — dump a line-numbered slice around the offending
+    // location so the parent can surface it to the operator.
+    const loc = extractLocation(err);
+    const context = renderSourceContext(source, loc.line, 4);
+    process.stderr.write(`\n── brand script parse error ──\n${err.message}\n\n${context}\n\n`);
+    const e = new Error(`brand styleScript syntax error: ${err.message}${loc.line ? ` (line ${loc.line}${loc.column ? `, col ${loc.column}` : ''})` : ''}`);
+    e.parseError = true;
+    e.line = loc.line;
+    e.column = loc.column;
+    e.context = context;
+    throw e;
+  }
+
   try {
     fn(brandModule, brandModule.exports, canvasLib, require('sharp'), HELPERS, COLORS);
   } catch (err) {
     throw new Error(`brand styleScript failed to load: ${err.message}\n${err.stack}`);
   }
   return brandModule.exports;
+}
+
+// Pull line + column from a Node SyntaxError. compileFunction stacks
+// include "brand-script.js:LINE:COL" — regex that out. Returns
+// { line: number|null, column: number|null }.
+function extractLocation(err) {
+  const stack = err.stack || '';
+  const m = stack.match(/brand-script\.js:(\d+)(?::(\d+))?/);
+  if (m) return { line: Number(m[1]), column: m[2] ? Number(m[2]) : null };
+  return { line: null, column: null };
+}
+
+// Render a small window of source lines around the error, prefixed by
+// line numbers with a marker on the offending row. Makes it obvious
+// where the parse failed when the operator reviews the textarea.
+function renderSourceContext(source, targetLine, span = 3) {
+  if (!targetLine) return source.split('\n').slice(0, 10).map((l, i) => `${String(i + 1).padStart(4)} | ${l}`).join('\n');
+  const lines = source.split('\n');
+  const start = Math.max(0, targetLine - span - 1);
+  const end   = Math.min(lines.length, targetLine + span);
+  const out = [];
+  for (let i = start; i < end; i++) {
+    const marker = (i + 1) === targetLine ? '>' : ' ';
+    out.push(`${marker} ${String(i + 1).padStart(4)} | ${lines[i]}`);
+  }
+  return out.join('\n');
 }
 
 // ── Helper library available to brand scripts ──────────────────────
