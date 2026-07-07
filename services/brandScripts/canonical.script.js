@@ -295,23 +295,25 @@ module.exports = {
 
     cursor += barH + 22;
 
-    // ── Quote — line count clamped so the whole flow fits ─────
-    // Available vertical space = distance from current cursor to
-    // the CTA bottom floor, minus reviewer line, divider gap, CTA
-    // row, and its top gap. If the budget is tight (long product
-    // title, short canvas) the quote drops to 1 line.
+    // ── Quote — FIXED 2-line block so downstream layout is
+    // deterministic regardless of quote length. wrapLines caps at 2
+    // lines with word-boundary ellipsis if overflow; short quotes
+    // render into 1 line + leave the second line empty (the fixed
+    // block height reserves space either way so reviewer / CTA don't
+    // shift up when the quote is short).
+    const QUOTE_LINES_FIXED = 2;
     const quoteFontSize = isVertical ? 26 : 20;
     const quoteLineH = Math.round(quoteFontSize * 1.22);
+    const QUOTE_BLOCK_H = QUOTE_LINES_FIXED * quoteLineH;
     const reviewerFontSize = isVertical ? 18 : 15;
     const reviewerLineH = Math.round(reviewerFontSize * 1.3);
-    const reviewerGap = 20;
-    const dividerGap = 18;
-    const ctaTopGap = 14;
 
-    const reservedBelowQuote =
-      reviewerGap + reviewerLineH + dividerGap + ctaTopGap + ctaH;
-    const availableForQuote = ctaBottomFloor - cursor - reservedBelowQuote - 4;
-    const maxQuoteLines = Math.max(1, Math.min(3, Math.floor(availableForQuote / quoteLineH)));
+    // Fixed margin between the reviewer attribution and the top of
+    // the delivery/CTA row. Divider is drawn in the middle of this
+    // gap. Was previously a computed sum of reviewerGap + dividerGap
+    // + ctaTopGap + a half-slack push-down. Now: one number.
+    const AUTHOR_TO_CTA_MARGIN = 40;
+    const POST_QUOTE_GAP = 6;
 
     ctx.save();
     ctx.globalAlpha = quoteT;
@@ -321,14 +323,14 @@ module.exports = {
     ctx.shadowColor = 'rgba(0,0,0,0.22)';
     ctx.shadowBlur = 10;
     ctx.font = `italic 400 ${quoteFontSize}px "${fonts.quoteFamily}"`;
-    const quoteLines = wrapLines(ctx, `\u201C${quote}\u201D`, contentW, maxQuoteLines);
+    const quoteLines = wrapLines(ctx, `\u201C${quote}\u201D`, contentW, QUOTE_LINES_FIXED);
     const quoteYOffset = (1 - quoteT) * 10;
 
     for (let i = 0; i < quoteLines.length; i++) {
       ctx.fillText(quoteLines[i], blockX, cursor + quoteYOffset + i * quoteLineH);
     }
     ctx.restore();
-    cursor += quoteLines.length * quoteLineH + 6;
+    cursor += QUOTE_BLOCK_H + POST_QUOTE_GAP;
 
     // ── Reviewer attribution ────────────────────────────────────
     ctx.save();
@@ -339,22 +341,11 @@ module.exports = {
     ctx.textBaseline = 'top';
     ctx.fillText(`\u2014 ${reviewer}`, blockX, cursor + (1 - quoteT) * 10);
     ctx.restore();
-    cursor += reviewerLineH + reviewerGap;
+    cursor += reviewerLineH;
 
-    // ── Divider between content block and bottom row ────────────
-    // Distribute any leftover vertical slack — the gap between the
-    // natural end-of-content position and the safe-area floor — by
-    // pushing the divider + CTA row DOWN by half of it. That closes
-    // the dead-space at the bottom when content is short (e.g. a
-    // 1-line quote) while still leaving the quote room to grow when
-    // it's longer. When content is at maximum height, slack is 0 and
-    // the row sits right below the divider as before.
-    const naturalDividerY = cursor;
-    const naturalCtaY = naturalDividerY + dividerGap + ctaTopGap;
-    const slack = Math.max(0, (ctaBottomFloor - ctaH) - naturalCtaY);
-    const pushDown = Math.floor(slack / 2);
-    const dividerY = naturalDividerY + pushDown;
-    const ctaY = naturalCtaY + pushDown;
+    // ── Fixed author-to-CTA margin (divider centered inside) ─────
+    const dividerY = cursor + AUTHOR_TO_CTA_MARGIN / 2;
+    const ctaY = cursor + AUTHOR_TO_CTA_MARGIN;
 
     ctx.save();
     ctx.strokeStyle = rgba(colors.divider, 0.52);
@@ -455,11 +446,22 @@ function fitText(ctx, text, maxWidth) {
   const str = String(text || '').trim();
   if (ctx.measureText(str).width <= maxWidth) return str;
 
-  let out = str;
+  // Word-boundary truncation — pop the last word until the string
+  // + ellipsis fits. Never breaks in the middle of a word.
+  const words = str.split(/\s+/);
+  while (words.length > 1) {
+    words.pop();
+    const candidate = words.join(' ') + '\u2026';
+    if (ctx.measureText(candidate).width <= maxWidth) return candidate;
+  }
+  // Single-word overflow (edge case: 30-char product name, narrow
+  // canvas). Fall back to character truncation only as a last
+  // resort — better than rendering nothing.
+  let out = words[0] || str;
   while (out.length > 3 && ctx.measureText(out + '\u2026').width > maxWidth) {
     out = out.slice(0, -1);
   }
-  return out.trim() + '\u2026';
+  return out + '\u2026';
 }
 
 function wrapLines(ctx, text, maxWidth, maxLines = 2) {
