@@ -104,6 +104,19 @@ async function syncBrandInstagram(brand) {
     }
   }
 
+  // Fire brand-level enrichment in the background so downstream ad
+  // generation can pull brandReviews / voice / colors from Gemini +
+  // Brandfetch. Requires a websiteUrl; skipped silently otherwise
+  // (demo brands sometimes don't have one). Non-blocking + idempotent
+  // (the service checks its own cache TTL per tier).
+  if (brand.websiteUrl) {
+    setImmediate(() => {
+      require('./brandEnrichmentService')
+        .enrichBrandFromUrl(brand._id)
+        .catch(err => console.warn(`   ⚠️  brand enrichment enqueue failed: ${err.message}`));
+    });
+  }
+
   summary.durationMs = Date.now() - t0;
   console.log(`📸 Apify IG sync done: brand=${brand._id} fetched=${summary.fetched} ingested=${summary.ingested} skipped=${summary.skipped} errors=${summary.errors} in ${summary.durationMs}ms`);
   return summary;
@@ -263,6 +276,18 @@ async function syncBrandShopify(brand) {
     } catch (err) {
       console.warn(`   ⚠️  product-path detect enqueue failed: ${err.message}`);
     }
+
+    // Fire catalog enrichment in the background — matches what
+    // catalogSyncService does after Meta catalog sync completes.
+    // Populates CatalogProduct.productReviews.quotes + productDetails
+    // (rating, sellers, specs) via Gemini + SerpAPI. Idempotent: the
+    // enrichment service skips products already fresh in its 30-day
+    // cache, so re-syncs are effectively free.
+    setImmediate(() => {
+      require('./catalogProductEnrichmentService')
+        .enqueueBrandProductEnrichment(brand._id)
+        .catch(err => console.warn(`   ⚠️  catalog enrichment enqueue failed: ${err.message}`));
+    });
   }
 
   summary.durationMs = Date.now() - t0;
