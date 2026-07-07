@@ -75,9 +75,23 @@ function hasVisibleUnmatchedProduct(media) {
 function rankCatalogMedias(medias) {
   if (!Array.isArray(medias) || !medias.length) return [];
   return medias.slice().sort((a, b) => {
+    // Primary: shot-type quality (lifestyle > on_model > flat_lay > ...)
     const ra = CATALOG_SHOT_RANK[a.classification?.shotType] ?? CATALOG_SHOT_RANK.unknown;
     const rb = CATALOG_SHOT_RANK[b.classification?.shotType] ?? CATALOG_SHOT_RANK.unknown;
     if (ra !== rb) return ra - rb;
+    // Secondary: adSuitability score DESC. When shot types tie (e.g. 4
+    // on_model shots for one product), the classifier's ad-suitability
+    // signal is the strongest available quality proxy — better than the
+    // Shopify hero/alt distinction, since Shopify heroes are frequently
+    // the plainest cutout images while more compelling styled shots
+    // land in the alt slots (observed on Pelagic: hero adSuit=3.7 while
+    // alts scored 7.3+).
+    const sa = a.adSuitability?.score ?? -1;
+    const sb = b.adSuitability?.score ?? -1;
+    if (sa !== sb) return sb - sa;
+    // Tertiary: hero over alt. Only used when shotType AND adSuit tie —
+    // preserves the previous behavior for the (rare) case where nothing
+    // else distinguishes two candidates.
     const ahero = (a.metadata?.imageRole === 'hero') ? 0 : 1;
     const bhero = (b.metadata?.imageRole === 'hero') ? 0 : 1;
     return ahero - bhero;
