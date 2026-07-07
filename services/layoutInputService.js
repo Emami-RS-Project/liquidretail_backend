@@ -1515,17 +1515,30 @@ async function assembleInput(ctx, template, aspectRatio, options, derivation, pr
   const tierBrand    = (ctx.match?.brandReviews?.quotes || ctx.brand?.brandReviews?.quotes || []).map(normalizeQuote).filter(Boolean);
   const tierLlm      = (Array.isArray(derivation.quotes) ? derivation.quotes : []).map(normalizeQuote).filter(Boolean);
 
-  let primaryQuote =
-       pickStrongestQuote(tierProduct)
-    || pickStrongestQuote(tierCategory)
-    || pickStrongestQuote(tierBrand)
-    || pickStrongestQuote(tierLlm)
-    || null;
+  const pickedProduct  = pickStrongestQuote(tierProduct);
+  const pickedCategory = pickedProduct  ? null : pickStrongestQuote(tierCategory);
+  const pickedBrand    = pickedProduct || pickedCategory ? null : pickStrongestQuote(tierBrand);
+  const pickedLlm      = pickedProduct || pickedCategory || pickedBrand ? null : pickStrongestQuote(tierLlm);
+  let primaryQuote = pickedProduct || pickedCategory || pickedBrand || pickedLlm || null;
+  let quoteTier = pickedProduct ? 'product'
+                : pickedCategory ? 'category'
+                : pickedBrand    ? 'brand'
+                : pickedLlm      ? 'llm'
+                :                  null;
 
   if (!primaryQuote) {
     const syn = synthesizeQuoteFromReviewSummary(ctx);
-    if (syn) primaryQuote = normalizeQuote(syn);
+    if (syn) { primaryQuote = normalizeQuote(syn); quoteTier = 'synth'; }
   }
+
+  // Observability — show tier counts + which tier won so a bad
+  // primary_quote is diagnosable from Render logs without a DB query.
+  console.log(
+    `📐 quote pool[media=${media._id}] ` +
+    `product=${tierProduct.length} category=${tierCategory.length} ` +
+    `brand=${tierBrand.length} llm=${tierLlm.length} ` +
+    `→ winner=${quoteTier || 'none'}${primaryQuote ? ` "${primaryQuote.text.slice(0, 60)}${primaryQuote.text.length > 60 ? '…' : ''}"` : ''}`
+  );
 
   // Secondaries: every other quote from every tier, minus the primary.
   const allQuotes = [...tierProduct, ...tierCategory, ...tierBrand, ...tierLlm];

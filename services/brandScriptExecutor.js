@@ -394,7 +394,9 @@ async function buildMetaForAd(ad, brand) {
     benefits:           layoutInput?.product?.benefits || [],
     badges:             layoutInput?.product?.badges   || [],
     headline:           ad.copy?.headline    || layoutInput?.copy?.headline     || null,
-    quote:              ad.copy?.quote       || layoutInput?.social_proof?.primary_quote || null,
+    // primary_quote is an OBJECT { text, author_name, source, verified } —
+    // pull .text so meta.quote is a string the canvas script can render.
+    quote:              ad.copy?.quote       || layoutInput?.social_proof?.primary_quote?.text || null,
     reviewer,
     deliveryLine,
     ctaText,
