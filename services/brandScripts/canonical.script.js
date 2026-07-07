@@ -177,12 +177,29 @@ module.exports = {
 
     ctx.restore();
 
-    // ── Content block layout (floating over scrim) ────────────────
+    // ── Layout: top-down flow with CTA/delivery pinned to bottom ──
+    //
+    // Reserve the CTA + delivery row at the bottom first, then flow
+    // the rest of the content downward from a fixed top anchor,
+    // collision-detecting the quote height so it can't overlap the
+    // bottom row. Previously the layout used two independent anchor
+    // systems (content down from ~0.61H + CTA up from bottomSafe)
+    // that collided visibly at 9:16.
     const blockX = leftPad;
-    const badgeY = Math.round(H * 0.61);
-    const titleY = badgeY + 88;
 
-    // Badge
+    // Bottom row height budget — CTA is the tallest element in it.
+    const ctaW = Math.min(Math.round(W * 0.42), 340);
+    const ctaH = isVertical ? 76 : 56;
+    const ctaX = W - rightSafe - ctaW;
+    const bottomRowTop = H - bottomSafe - ctaH;    // top of CTA
+    const bottomRowMid = bottomRowTop + ctaH / 2;  // vertical center of CTA
+    const ctaY = bottomRowTop;
+
+    // Content flow starts here — a solid ~55% down the canvas so the
+    // subject (product photography) breathes above.
+    let cursor = Math.round(H * 0.44);
+
+    // ── Badge ───────────────────────────────────────────────────
     ctx.save();
     ctx.globalAlpha = badgeT;
     ctx.font = `700 ${isVertical ? 21 : 17}px "${fonts.sans}"`;
@@ -190,78 +207,78 @@ module.exports = {
     ctx.textBaseline = 'middle';
 
     const badgeW = ctx.measureText(badgeText).width + 34;
-    const badgeH = 44;
+    const badgeH = 40;
     const badgeYOffset = (1 - badgeT) * 10;
 
     ctx.fillStyle = rgba(colors.badgeBg, 0.96);
-    roundedRect(ctx, blockX, badgeY + badgeYOffset, badgeW, badgeH, badgeH / 2);
+    roundedRect(ctx, blockX, cursor + badgeYOffset, badgeW, badgeH, badgeH / 2);
     ctx.fill();
 
     ctx.fillStyle = rgba(colors.badgeText, 1);
-    drawTrackedText(ctx, badgeText, blockX + 18, badgeY + badgeH / 2 + badgeYOffset + 1, 0.8, 'left');
+    drawTrackedText(ctx, badgeText, blockX + 18, cursor + badgeH / 2 + badgeYOffset + 1, 0.8, 'left');
     ctx.restore();
 
-    // Product title
+    cursor += badgeH + 18;
+
+    // ── Product title ───────────────────────────────────────────
     ctx.save();
     ctx.globalAlpha = titleT;
     ctx.fillStyle = rgba(colors.textPrimary, 1);
     ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
+    ctx.textBaseline = 'top';
     ctx.shadowColor = 'rgba(0,0,0,0.20)';
     ctx.shadowBlur = 10;
 
-    const productSize = isVertical ? 48 : 34;
+    const productSize = isVertical ? 44 : 32;
     ctx.font = `${fonts.productWeight} ${productSize}px "${fonts.productFamily}"`;
-
     const titleLines = wrapLines(ctx, productName, contentW, 2);
-    const titleLineH = Math.round(productSize * 1.08);
+    const titleLineH = Math.round(productSize * 1.1);
     const titleYOffset = (1 - titleT) * 12;
 
     for (let i = 0; i < titleLines.length; i++) {
-      ctx.fillText(titleLines[i], blockX, titleY + titleYOffset + i * titleLineH);
+      ctx.fillText(titleLines[i], blockX, cursor + titleYOffset + i * titleLineH);
     }
     ctx.restore();
+    cursor += titleLines.length * titleLineH + 20;
 
-    const titleHeight = titleLines.length * titleLineH;
-    const ratingBaseY = titleY + titleHeight + 34;
-
-    // Rating row
+    // ── Rating row (stars + count) ──────────────────────────────
     ctx.save();
     ctx.globalAlpha = ratingT;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
 
-    ctx.font = `800 ${isVertical ? 28 : 22}px "${fonts.sans}"`;
+    const ratingRowH = isVertical ? 28 : 22;
+    ctx.font = `800 ${ratingRowH}px "${fonts.sans}"`;
     ctx.fillStyle = rgba(colors.accentGold, 1);
     const stars = '\u2605 \u2605 \u2605 \u2605 \u2605';
     const ratingYOffset = (1 - ratingT) * 10;
-    ctx.fillText(stars, blockX, ratingBaseY + ratingYOffset);
+    const ratingMidY = cursor + ratingRowH / 2 + ratingYOffset;
+    ctx.fillText(stars, blockX, ratingMidY);
 
     const starsW = ctx.measureText(stars).width;
 
-    ctx.font = `700 ${isVertical ? 24 : 18}px "${fonts.sans}"`;
+    ctx.font = `700 ${isVertical ? 22 : 18}px "${fonts.sans}"`;
     ctx.fillStyle = rgba(colors.textPrimary, 1);
-    ctx.fillText(`${rating.toFixed(1)}/5`, blockX + starsW + 18, ratingBaseY + ratingYOffset);
-
+    ctx.fillText(`${rating.toFixed(1)}/5`, blockX + starsW + 16, ratingMidY);
     const ratingTextW = ctx.measureText(`${rating.toFixed(1)}/5`).width;
 
-    ctx.font = `500 ${isVertical ? 21 : 16}px "${fonts.sans}"`;
+    ctx.font = `500 ${isVertical ? 19 : 16}px "${fonts.sans}"`;
     ctx.fillStyle = rgba(colors.textSecondary, 0.96);
-    ctx.fillText(`\u2022  ${reviewCount}`, blockX + starsW + 18 + ratingTextW + 18, ratingBaseY + ratingYOffset);
+    ctx.fillText(`\u2022  ${reviewCount}`, blockX + starsW + 16 + ratingTextW + 16, ratingMidY);
     ctx.restore();
 
-    // Rating bar
-    const barBaseY = ratingBaseY + 54;
-    const barW = Math.min(contentW, Math.round(W * 0.64));
-    const barH = 12;
+    cursor += ratingRowH + 14;
+
+    // ── Rating bar ─────────────────────────────────────────────
+    const barW = Math.min(contentW, Math.round(W * 0.62));
+    const barH = 10;
 
     ctx.save();
     ctx.globalAlpha = ratingT;
-
     ctx.fillStyle = 'rgba(255,255,255,0.18)';
     ctx.strokeStyle = 'rgba(255,255,255,0.55)';
     ctx.lineWidth = 1;
-    roundedRect(ctx, blockX, barBaseY, barW, barH, barH / 2);
+    roundedRect(ctx, blockX, cursor, barW, barH, barH / 2);
     ctx.fill();
     ctx.stroke();
 
@@ -270,42 +287,54 @@ module.exports = {
     barGrad.addColorStop(0, rgba(colors.ratingBarStart, 1));
     barGrad.addColorStop(0.55, rgba(colors.ratingBarMid, 1));
     barGrad.addColorStop(1, rgba(colors.ratingBarEnd, 1));
-
     ctx.fillStyle = barGrad;
-    roundedRect(ctx, blockX, barBaseY, fillW, barH, barH / 2);
+    roundedRect(ctx, blockX, cursor, fillW, barH, barH / 2);
     ctx.fill();
     ctx.restore();
 
-    // Quote
-    const quoteBaseY = barBaseY + 76;
+    cursor += barH + 22;
 
+    // ── Quote — line count clamped to fit remaining space ──────
+    // Reserve room for the reviewer attribution (one line) and a
+    // 24px gap above the bottom row so nothing overlaps the CTA.
     ctx.save();
     ctx.globalAlpha = quoteT;
     ctx.fillStyle = rgba(colors.textPrimary, 0.98);
     ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
+    ctx.textBaseline = 'top';
     ctx.shadowColor = 'rgba(0,0,0,0.22)';
     ctx.shadowBlur = 10;
 
-    const quoteFontSize = isVertical ? 31 : 22;
+    const quoteFontSize = isVertical ? 26 : 20;
     ctx.font = `italic 400 ${quoteFontSize}px "${fonts.quoteFamily}"`;
+    const quoteLineH = Math.round(quoteFontSize * 1.22);
 
-    const quoteLines = wrapLines(ctx, `\u201C${quote}\u201D`, contentW, 3);
-    const quoteLineH = Math.round(quoteFontSize * 1.23);
+    const reviewerFontSize = isVertical ? 18 : 15;
+    const reviewerLineH = Math.round(reviewerFontSize * 1.3);
+    const dividerGap = 22;
+    const availableForQuote = bottomRowTop - cursor - reviewerLineH - dividerGap - 8;
+    const maxQuoteLines = Math.max(1, Math.min(3, Math.floor(availableForQuote / quoteLineH)));
+    const quoteLines = wrapLines(ctx, `\u201C${quote}\u201D`, contentW, maxQuoteLines);
     const quoteYOffset = (1 - quoteT) * 10;
 
     for (let i = 0; i < quoteLines.length; i++) {
-      ctx.fillText(quoteLines[i], blockX, quoteBaseY + quoteYOffset + i * quoteLineH);
+      ctx.fillText(quoteLines[i], blockX, cursor + quoteYOffset + i * quoteLineH);
     }
+    ctx.restore();
+    cursor += quoteLines.length * quoteLineH + 8;
 
-    ctx.shadowBlur = 0;
-    ctx.font = `500 ${isVertical ? 20 : 16}px "${fonts.sans}"`;
+    // ── Reviewer attribution ────────────────────────────────────
+    ctx.save();
+    ctx.globalAlpha = quoteT;
+    ctx.font = `500 ${reviewerFontSize}px "${fonts.sans}"`;
     ctx.fillStyle = rgba(colors.textSecondary, 0.94);
-    ctx.fillText(`\u2014 ${reviewer}`, blockX, quoteBaseY + quoteYOffset + quoteLines.length * quoteLineH + 30);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`\u2014 ${reviewer}`, blockX, cursor + (1 - quoteT) * 10);
     ctx.restore();
 
-    // Bottom divider
-    const dividerY = H - bottomSafe - 118;
+    // ── Divider between content block and bottom row ────────────
+    const dividerY = bottomRowTop - 16;
     ctx.save();
     ctx.strokeStyle = rgba(colors.divider, 0.52);
     ctx.lineWidth = 1;
@@ -315,26 +344,25 @@ module.exports = {
     ctx.stroke();
     ctx.restore();
 
-    // Bottom left utility line
-    const utilityY = H - bottomSafe - 34;
+    // ── Bottom row: delivery line (left) + CTA (right) ──────────
+    // Both vertically centered on the CTA's midline. The delivery
+    // text is clipped to the space left of the CTA so it can't
+    // overlap even with very long delivery copy.
+    const deliveryMaxX = ctaX - 20;
+    const iconSize = isVertical ? 18 : 14;
     ctx.save();
     ctx.fillStyle = rgba(colors.textSecondary, 0.96);
     ctx.font = `500 ${isVertical ? 18 : 15}px "${fonts.sans}"`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-
-    const iconSize = isVertical ? 18 : 14;
-    drawTruckIcon(ctx, blockX, utilityY - 9, iconSize, rgba(colors.textSecondary, 0.92));
-    ctx.fillText(deliveryLine, blockX + 38, utilityY);
+    drawTruckIcon(ctx, blockX, bottomRowMid - iconSize / 2, iconSize, rgba(colors.textSecondary, 0.92));
+    const deliveryTextX = blockX + iconSize * 2 + 8;
+    const deliveryFit = fitText(ctx, deliveryLine, Math.max(0, deliveryMaxX - deliveryTextX));
+    ctx.fillText(deliveryFit, deliveryTextX, bottomRowMid);
     ctx.restore();
 
     // CTA
-    const ctaW = Math.min(Math.round(W * 0.36), 330);
-    const ctaH = isVertical ? 72 : 56;
-    const ctaX = W - rightSafe - ctaW - leftPad;
-    const ctaY = H - bottomSafe - ctaH + 4;
     const ctaScale = ctaT * pulseT;
-
     ctx.save();
     ctx.translate(ctaX + ctaW / 2, ctaY + ctaH / 2);
     ctx.scale(ctaScale, ctaScale);
@@ -354,7 +382,7 @@ module.exports = {
     ctx.shadowBlur = 0;
     ctx.shadowOffsetY = 0;
     ctx.fillStyle = rgba(colors.ctaText, 1);
-    ctx.font = `800 ${isVertical ? 24 : 18}px "${fonts.sans}"`;
+    ctx.font = `800 ${isVertical ? 22 : 18}px "${fonts.sans}"`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     drawTrackedText(ctx, ctaText, ctaX + ctaW / 2, ctaY + ctaH / 2 + 1, 1.2);
