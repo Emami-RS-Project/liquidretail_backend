@@ -270,12 +270,20 @@ function buildReferenceImages({ media, product, aspectRatio, max = 7 }) {
 
 // ── Polling ───────────────────────────────────────────────────────────
 
-// Max consecutive errors (4xx fails immediately; 5xx + network errors
-// count up to this cap). With POLL_INTERVAL=5s, the cap of 6 gives
-// ~30s of "maybe transient" leeway before we give up and surface the
-// underlying Atlas error — which is far more useful to the operator
-// than 120 lines of "retrying" before a generic timeout.
-const MAX_CONSECUTIVE_ERRORS = parseInt(process.env.ATLAS_MAX_CONSECUTIVE_ERRORS, 10) || 6;
+// Max consecutive errors for GENUINE transient failures (network blips,
+// generic 5xx). 4xx fails immediately; rate-limit responses (429 or a
+// 5xx wrapping a 429 body — see isRateLimit below) get their own
+// exponential backoff and DO NOT count against this budget, because
+// Grok's 1 RPS ceiling routinely burns through 6+ polls in a burst
+// when VEO_CONCURRENCY > 1. With POLL_INTERVAL=5s, cap of 12 gives
+// ~60s of leeway for other transients before surfacing the error.
+const MAX_CONSECUTIVE_ERRORS = parseInt(process.env.ATLAS_MAX_CONSECUTIVE_ERRORS, 10) || 12;
+
+// Rate-limit backoff schedule (ms). Applied on each consecutive rate-limit
+// hit — resets on the next non-rate-limit response. Caps at the last value.
+// Grok's window is roughly per-second, so 30s should clear it easily; the
+// longer tail exists so a stuck rate-limit doesn't hammer Atlas.
+const RATE_LIMIT_BACKOFF_MS = [30_000, 60_000, 120_000, 120_000];
 
 function summarizeAxiosError(err) {
   const status = err.response?.status;
@@ -294,13 +302,31 @@ function summarizeAxiosError(err) {
   return { status, body: bodyStr, message: err.message };
 }
 
+// Atlas wraps upstream provider errors in its own envelope. Grok's 1 RPS
+// rate-limit surfaces as HTTP 500 with a body like:
+//   {"error":"unexpected http status code: 429, body: {\"code\":429,...}"}
+// So we can't rely on `err.response.status === 429` alone — inspect the
+// body for the tell-tale 429 signature or common phrasing.
+function isRateLimit(summary) {
+  if (!summary) return false;
+  if (summary.status === 429) return true;
+  const body = String(summary.body || summary.message || '').toLowerCase();
+  return /(\bcode\b\s*[:=]\s*429|\bstatus\b\s*[:=]\s*429|http status code:\s*429|rate[- ]?limit|too many requests)/i.test(body);
+}
+
 async function pollPrediction(predictionId) {
   const t0 = Date.now();
   let pollCount = 0;
   let consecutiveErrors = 0;
+  let consecutiveRateLimits = 0;
   let lastError = null;
   while (Date.now() - t0 < MAX_POLL_MS) {
-    await new Promise(r => setTimeout(r, POLL_INTERVAL));
+    // Jitter the poll interval by 0–3s so concurrent jobs desync — without
+    // this, N workers with the same POLL_INTERVAL burn through Grok's 1 RPS
+    // budget in lockstep, converting every poll cycle into a rate-limit
+    // burst even before the submission traffic weighs in.
+    const jitter = Math.floor(Math.random() * 3000);
+    await new Promise(r => setTimeout(r, POLL_INTERVAL + jitter));
     pollCount++;
     let res;
     try {
@@ -309,19 +335,37 @@ async function pollPrediction(predictionId) {
         timeout: 30000
       });
       consecutiveErrors = 0;   // reset on any successful HTTP response
+      consecutiveRateLimits = 0;
       lastError = null;
     } catch (err) {
       const summary = summarizeAxiosError(err);
       lastError = summary;
       const status = summary.status;
 
-      // 4xx is a hard failure — bad predictionId / bad auth / etc.
+      // Rate limit (either 429 direct or 5xx wrapping a 429 body from the
+      // upstream provider). Doesn't count against consecutiveErrors — just
+      // back off and keep polling. Grok's 1 RPS ceiling routinely trips
+      // this when VEO_CONCURRENCY > 1 or when submissions collide with
+      // an in-flight burst of polls.
+      if (isRateLimit(summary)) {
+        consecutiveRateLimits++;
+        const backoffMs = RATE_LIMIT_BACKOFF_MS[Math.min(consecutiveRateLimits - 1, RATE_LIMIT_BACKOFF_MS.length - 1)];
+        console.warn(
+          `   ⏳ atlasVideo: poll #${pollCount} rate-limited ` +
+          `(hit #${consecutiveRateLimits}, backing off ${backoffMs / 1000}s): ${summary.body || summary.message}`
+        );
+        await new Promise(r => setTimeout(r, backoffMs));
+        continue;
+      }
+
+      // 4xx (non-429) is a hard failure — bad predictionId / bad auth / etc.
       // Retrying won't help, and the body has the real diagnosis.
       if (status && status >= 400 && status < 500) {
         throw new Error(`atlasVideo: poll returned ${status} (id=${predictionId}): ${summary.body || summary.message}`);
       }
 
       consecutiveErrors++;
+      consecutiveRateLimits = 0;
       console.warn(
         `   ⚠️  atlasVideo: poll #${pollCount} error ${status || 'network'} ` +
         `(${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS} consecutive): ${summary.body || summary.message}`
