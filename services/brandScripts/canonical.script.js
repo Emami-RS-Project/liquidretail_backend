@@ -177,27 +177,28 @@ module.exports = {
 
     ctx.restore();
 
-    // ── Layout: top-down flow with CTA/delivery pinned to bottom ──
+    // ── Layout: single top-down flow inside the scrim ─────────────
     //
-    // Reserve the CTA + delivery row at the bottom first, then flow
-    // the rest of the content downward from a fixed top anchor,
-    // collision-detecting the quote height so it can't overlap the
-    // bottom row. Previously the layout used two independent anchor
-    // systems (content down from ~0.61H + CTA up from bottomSafe)
-    // that collided visibly at 9:16.
+    // Everything below flows downward from just inside the top of the
+    // bottom scrim. The CTA/delivery row is NOT pinned to the bottom
+    // safe area — it flows right after the reviewer with a divider
+    // gap. That keeps the whole content block visually contained in
+    // the shaded scrim area and eliminates dead space between the
+    // reviewer attribution and the CTA row.
     const blockX = leftPad;
 
-    // Bottom row height budget — CTA is the tallest element in it.
     const ctaW = Math.min(Math.round(W * 0.42), 340);
     const ctaH = isVertical ? 76 : 56;
     const ctaX = W - rightSafe - ctaW;
-    const bottomRowTop = H - bottomSafe - ctaH;    // top of CTA
-    const bottomRowMid = bottomRowTop + ctaH / 2;  // vertical center of CTA
-    const ctaY = bottomRowTop;
+    // Absolute floor — CTA bottom must never fall past this so the
+    // player controls / IG safe-area stay clear. If the flow pushes
+    // CTA past it, the quote clamp below shrinks to fit.
+    const ctaBottomFloor = H - bottomSafe;
 
-    // Content flow starts here — a solid ~55% down the canvas so the
-    // subject (product photography) breathes above.
-    let cursor = Math.round(H * 0.44);
+    // Content cursor — starts just inside the top of the scrim
+    // (scrim begins at 0.52H). At 0.54H the first element (badge)
+    // sits on shaded background instead of raw video.
+    let cursor = Math.round(H * 0.54);
 
     // ── Badge ───────────────────────────────────────────────────
     ctx.save();
@@ -294,9 +295,24 @@ module.exports = {
 
     cursor += barH + 22;
 
-    // ── Quote — line count clamped to fit remaining space ──────
-    // Reserve room for the reviewer attribution (one line) and a
-    // 24px gap above the bottom row so nothing overlaps the CTA.
+    // ── Quote — line count clamped so the whole flow fits ─────
+    // Available vertical space = distance from current cursor to
+    // the CTA bottom floor, minus reviewer line, divider gap, CTA
+    // row, and its top gap. If the budget is tight (long product
+    // title, short canvas) the quote drops to 1 line.
+    const quoteFontSize = isVertical ? 26 : 20;
+    const quoteLineH = Math.round(quoteFontSize * 1.22);
+    const reviewerFontSize = isVertical ? 18 : 15;
+    const reviewerLineH = Math.round(reviewerFontSize * 1.3);
+    const reviewerGap = 20;
+    const dividerGap = 18;
+    const ctaTopGap = 14;
+
+    const reservedBelowQuote =
+      reviewerGap + reviewerLineH + dividerGap + ctaTopGap + ctaH;
+    const availableForQuote = ctaBottomFloor - cursor - reservedBelowQuote - 4;
+    const maxQuoteLines = Math.max(1, Math.min(3, Math.floor(availableForQuote / quoteLineH)));
+
     ctx.save();
     ctx.globalAlpha = quoteT;
     ctx.fillStyle = rgba(colors.textPrimary, 0.98);
@@ -304,16 +320,7 @@ module.exports = {
     ctx.textBaseline = 'top';
     ctx.shadowColor = 'rgba(0,0,0,0.22)';
     ctx.shadowBlur = 10;
-
-    const quoteFontSize = isVertical ? 26 : 20;
     ctx.font = `italic 400 ${quoteFontSize}px "${fonts.quoteFamily}"`;
-    const quoteLineH = Math.round(quoteFontSize * 1.22);
-
-    const reviewerFontSize = isVertical ? 18 : 15;
-    const reviewerLineH = Math.round(reviewerFontSize * 1.3);
-    const dividerGap = 22;
-    const availableForQuote = bottomRowTop - cursor - reviewerLineH - dividerGap - 8;
-    const maxQuoteLines = Math.max(1, Math.min(3, Math.floor(availableForQuote / quoteLineH)));
     const quoteLines = wrapLines(ctx, `\u201C${quote}\u201D`, contentW, maxQuoteLines);
     const quoteYOffset = (1 - quoteT) * 10;
 
@@ -321,7 +328,7 @@ module.exports = {
       ctx.fillText(quoteLines[i], blockX, cursor + quoteYOffset + i * quoteLineH);
     }
     ctx.restore();
-    cursor += quoteLines.length * quoteLineH + 8;
+    cursor += quoteLines.length * quoteLineH + 6;
 
     // ── Reviewer attribution ────────────────────────────────────
     ctx.save();
@@ -332,22 +339,27 @@ module.exports = {
     ctx.textBaseline = 'top';
     ctx.fillText(`\u2014 ${reviewer}`, blockX, cursor + (1 - quoteT) * 10);
     ctx.restore();
+    cursor += reviewerLineH + reviewerGap;
 
     // ── Divider between content block and bottom row ────────────
-    const dividerY = bottomRowTop - 16;
     ctx.save();
     ctx.strokeStyle = rgba(colors.divider, 0.52);
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(blockX, dividerY);
-    ctx.lineTo(blockX + Math.min(contentW, Math.round(W * 0.66)), dividerY);
+    ctx.moveTo(blockX, cursor);
+    ctx.lineTo(blockX + Math.min(contentW, Math.round(W * 0.66)), cursor);
     ctx.stroke();
     ctx.restore();
+    cursor += dividerGap;
 
     // ── Bottom row: delivery line (left) + CTA (right) ──────────
-    // Both vertically centered on the CTA's midline. The delivery
-    // text is clipped to the space left of the CTA so it can't
-    // overlap even with very long delivery copy.
+    // Row flows immediately after the divider. If the flow would
+    // push the CTA past ctaBottomFloor, clamp upward — the quote
+    // budget above should have already avoided this.
+    const desiredCtaY = cursor + ctaTopGap;
+    const ctaY = Math.min(desiredCtaY, ctaBottomFloor - ctaH);
+    const bottomRowMid = ctaY + ctaH / 2;
+
     const deliveryMaxX = ctaX - 20;
     const iconSize = isVertical ? 18 : 14;
     ctx.save();
