@@ -150,12 +150,13 @@ router.patch('/:id', express.json(), async (req, res) => {
     const editable = ['name', 'websiteUrl', 'tagline', 'summary', 'logoUrl',
                       'primaryColor', 'secondaryColor', 'accentColor', 'fontColor',
                       'fontFamily', 'tone', 'hashtags', 'tags', 'demographics',
-                      'brandSafety', 'styleOverrides', 'styleScript', 'styleTheme'];
+                      'brandSafety', 'styleOverrides', 'styleScript',
+                      'styleScriptVertical', 'styleTheme'];
 
     // Entry log for style-related mutations so we can trace why a
     // Clear button isn't sticking. Non-noisy: only fires when one of
-    // the three style fields is present in the body.
-    const stylePayload = ['styleOverrides', 'styleScript', 'styleTheme']
+    // the style fields is present in the body.
+    const stylePayload = ['styleOverrides', 'styleScript', 'styleScriptVertical', 'styleTheme']
       .filter(k => Object.prototype.hasOwnProperty.call(req.body || {}, k))
       .map(k => {
         const v = req.body[k];
@@ -262,10 +263,16 @@ router.post('/:id/render-script', express.json(), async (req, res) => {
 // Renders a small handful of frames against a synthetic plate so the
 // operator can iterate on a canvas script (or theme) without waiting
 // for a real ad. Body:
-//   { script?: string }  — preview an unsaved custom renderer
-//   { theme?:  object }  — preview an unsaved theme against the canonical
-//   (both omitted)       — preview whichever of styleScript / styleTheme
-//                          is currently saved on the brand
+//   { script?: string, theme?: object, format?: 'vertical'|'feed' }
+//
+// Format defaults to 'feed' (1080×1350, 4:5). 'vertical' renders at
+// 1080×1920 (9:16). Selection of script/canonical follows the same
+// per-format ladder used at ad-render time:
+//   - explicit body.script wins
+//   - else explicit body.theme → canonical for the requested format
+//   - else brand.styleScript / styleScriptVertical (per format) → custom
+//   - else brand.styleTheme → canonical for the requested format
+//   - else 400
 router.post('/:id/preview-script', express.json(), async (req, res) => {
   const started = Date.now();
   try {
@@ -274,13 +281,9 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
 
     const bodyScript = req.body?.script ? String(req.body.script).trim() : null;
     const bodyTheme  = req.body?.theme && typeof req.body.theme === 'object' ? req.body.theme : null;
+    const format     = req.body?.format === 'vertical' ? 'vertical' : 'feed';
+    const brandScriptField = format === 'vertical' ? 'styleScriptVertical' : 'styleScript';
 
-    // Resolve which path we're previewing.
-    //   1. Explicit script in body → custom renderer preview.
-    //   2. Explicit theme in body → canonical + body theme.
-    //   3. brand.styleScript saved → custom renderer preview.
-    //   4. brand.styleTheme saved → canonical + saved theme.
-    //   5. Nothing → 400.
     let styleScript = null;
     let themeForPreview = null;
     let useCanonical = false;
@@ -289,14 +292,20 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
     } else if (bodyTheme) {
       useCanonical = true;
       themeForPreview = bodyTheme;
-    } else if (brand.styleScript && String(brand.styleScript).trim()) {
-      styleScript = brand.styleScript;
+    } else if (brand[brandScriptField] && String(brand[brandScriptField]).trim()) {
+      styleScript = brand[brandScriptField];
     } else if (brand.styleTheme && Object.keys(brand.styleTheme).length > 0) {
       useCanonical = true;
       themeForPreview = brand.styleTheme;
     } else {
       return res.status(400).json({ error: 'no script or theme — pass one in the body or save the brand first' });
     }
+
+    // Canvas dims per format. Feed default is 4:5 (matches Meta feed);
+    // vertical is 9:16 (Reels / Shorts / Stories).
+    const dims = format === 'vertical'
+      ? { width: 1080, height: 1920 }
+      : { width: 1080, height: 1350 };
 
     const totalFrames = 145;
     const previewIndices = [0, Math.floor(totalFrames / 2), totalFrames - 1];
@@ -325,7 +334,10 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
     const result = await previewBrandScript({
       styleScript,
       useCanonical,
+      canonicalFormat: format,
       meta,
+      width:           dims.width,
+      height:          dims.height,
       totalFrames,
       previewIndices,
       plateBackground: brand.primaryColor || '#3D3D3D',
@@ -566,10 +578,13 @@ router.get('/:id/generate-script/:jobId', async (req, res) => {
 });
 
 // GET /api/brand/:id/style
-// Returns the current per-brand video style state:
+// Returns the current per-brand video style state, dual-tracked by
+// format so the video card can render a tab per script slot:
 //   - overrides       — Brand.styleOverrides (JSON layout, enum-based)
 //   - fileStyle       — services/brandStyles/*.js (file-based enum layout)
-//   - script          — Brand.styleScript (canvas overlay JS source)
+//   - script          — Brand.styleScript (feed / 4:5,1:1)
+//   - scriptVertical  — Brand.styleScriptVertical (vertical / 9:16 Reels/Shorts/Stories)
+//   - theme           — Brand.styleTheme (shared palette + fonts for canonicals)
 //   - scriptTemplates — { <name>: <source> } seed scripts from
 //                        services/brandScripts/*.script.js so the UI
 //                        can offer "Load template" without a second
@@ -599,6 +614,7 @@ router.get('/:id/style', async (req, res) => {
       overrides:       brand.styleOverrides || null,
       fileStyle:       getFileStyle(brand),
       script:          brand.styleScript || null,
+      scriptVertical:  brand.styleScriptVertical || null,
       theme:           brand.styleTheme || null,
       scriptTemplates
     });

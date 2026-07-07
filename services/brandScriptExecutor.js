@@ -38,6 +38,19 @@ const FONTS_DIR   = path.join(__dirname, 'brandScripts', 'assets', 'fonts');
 // separately.
 const CHILD_TIMEOUT_MS = 5 * 60 * 1000;
 
+// ── Format classifier ──────────────────────────────────────────────
+//
+// Vertical formats (9:16) route to the top_scrim_editorial canonical;
+// everything else routes to the bottom-scrim canonical. Format ID
+// string is authoritative when present; aspectRatio is a fallback for
+// legacy ads whose platformFormat wasn't stamped.
+function isVerticalFormat(ad) {
+  const pf = String(ad?.platformFormat || '').toLowerCase();
+  if (/reels|shorts|stories|9_16/.test(pf)) return true;
+  if (String(ad?.aspectRatio || '') === '9:16') return true;
+  return false;
+}
+
 // ── Public API ─────────────────────────────────────────────────────
 
 // Run the brand's styleScript over a base video.
@@ -254,13 +267,19 @@ async function previewBrandScript({
   // Optional: when styleScript is falsy but useCanonical is true,
   // the preview loads the canonical renderer instead. Meta.theme
   // supplies the per-brand colors/fonts.
-  useCanonical = false
+  useCanonical = false,
+  // Which canonical variant to load when useCanonical is true.
+  // 'feed' (default) → canonical.script.js. 'vertical' →
+  // top_scrim_editorial.script.js.
+  canonicalFormat = 'feed'
 }) {
   // Resolve script source: caller-provided styleScript wins;
-  // otherwise pull the canonical (DB > file).
+  // otherwise pull the format-appropriate canonical (DB > file).
   if (!styleScript && useCanonical) {
-    const { getCanonicalScript } = require('./systemConfigService');
-    const { script } = await getCanonicalScript();
+    const { getCanonicalScript, getCanonicalScriptVertical } = require('./systemConfigService');
+    const { script } = canonicalFormat === 'vertical'
+      ? await getCanonicalScriptVertical()
+      : await getCanonicalScript();
     styleScript = script;
   }
   if (!styleScript) {
@@ -418,20 +437,43 @@ async function buildMetaForAd(ad, brand) {
   };
 }
 
-// Resolve which script source to run for a brand. Priority:
-//   1. brand.styleScript  — custom bespoke renderer (escape hatch)
-//   2. brand.styleTheme   — canonical shared renderer + theme injection
-//   3. no script          — caller falls back to HTML/Puppeteer
-async function resolveBrandRenderer(brand) {
-  if (brand?.styleScript && String(brand.styleScript).trim()) {
-    return { path: 'custom', script: brand.styleScript };
+// Resolve which script source to run for one ad. Format-aware — the
+// ad's platformFormat determines which brand slot and which canonical
+// variant apply. Per-format priority ladder:
+//
+//   vertical (9:16 — Reels, Shorts, Stories):
+//     1. brand.styleScriptVertical   (custom vertical override)
+//     2. canonicalScriptVertical     (top_scrim_editorial)   — requires styleTheme
+//     3. no chrome                   (raw Grok video ships as-is)
+//
+//   feed (4:5, 1:1):
+//     1. brand.styleScript           (custom feed override)
+//     2. canonicalScript             (canonical.script.js)   — requires styleTheme
+//     3. no chrome                   (raw Grok video ships as-is)
+//
+// Requiring styleTheme for the canonical tier keeps opt-in behavior:
+// brands that never set a theme opt out of chrome entirely rather than
+// getting a default palette that may not match their identity.
+async function resolveBrandRenderer(brand, ad) {
+  const vertical = isVerticalFormat(ad);
+  const format   = vertical ? 'vertical' : 'feed';
+  const brandField = vertical ? 'styleScriptVertical' : 'styleScript';
+
+  // 1. Custom per-format brand script
+  const brandScript = brand?.[brandField];
+  if (brandScript && String(brandScript).trim()) {
+    return { path: 'custom', script: brandScript, format };
   }
+  // 2. Canonical per-format (opt-in via styleTheme)
   if (brand?.styleTheme && Object.keys(brand.styleTheme).length > 0) {
-    const { getCanonicalScript } = require('./systemConfigService');
-    const { script, source } = await getCanonicalScript();
-    return { path: 'canonical', script, canonicalSource: source };
+    const { getCanonicalScript, getCanonicalScriptVertical } = require('./systemConfigService');
+    const { script, source } = vertical
+      ? await getCanonicalScriptVertical()
+      : await getCanonicalScript();
+    return { path: 'canonical', script, canonicalSource: source, format };
   }
-  return { path: null, script: null };
+  // 3. No chrome — ad ships as raw Grok video
+  return { path: null, script: null, format };
 }
 
 // End-to-end: render the brand's chosen path over the ad's Grok video,
@@ -440,11 +482,14 @@ async function resolveBrandRenderer(brand) {
 // swallow them, so both fatal (pipeline) and non-fatal (script preview)
 // call sites can choose behavior.
 async function renderBrandScriptAndSave({ ad, brand }) {
-  const renderer = await resolveBrandRenderer(brand);
+  const renderer = await resolveBrandRenderer(brand, ad);
   if (!renderer.script) {
-    const e = new Error('brand has no styleScript or styleTheme');
-    e.status = 400;
-    throw e;
+    // No chrome configured for this ad's format. Not an error — the ad
+    // ships with its raw Grok video as renderUrl (already stamped
+    // upstream at Stage 2.5). Return a skip marker so the caller can
+    // log the outcome without a try/catch.
+    console.log(`🎨 brandScript[ad=${ad._id}]: no chrome configured for format=${renderer.format} — ad ships as raw video`);
+    return { skipped: true, reason: 'no-chrome', format: renderer.format };
   }
   if (!ad?.veoVideoUrl) {
     const e = new Error('ad has no veoVideoUrl — Grok has not rendered yet');
@@ -453,7 +498,7 @@ async function renderBrandScriptAndSave({ ad, brand }) {
   }
 
   const meta = await buildMetaForAd(ad, brand);
-  console.log(`🎨 brandScript[ad=${ad._id}]: path=${renderer.path}${renderer.canonicalSource ? ` (canonical from ${renderer.canonicalSource})` : ''}`);
+  console.log(`🎨 brandScript[ad=${ad._id}]: path=${renderer.path} format=${renderer.format}${renderer.canonicalSource ? ` (canonical from ${renderer.canonicalSource})` : ''}`);
   const result = await renderBrandScript({
     videoUrl:    ad.veoVideoUrl,
     styleScript: renderer.script,
@@ -488,4 +533,4 @@ async function renderBrandScriptAndSave({ ad, brand }) {
   }
 }
 
-module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript, resolveBrandRenderer };
+module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript, resolveBrandRenderer, isVerticalFormat };

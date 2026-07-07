@@ -2,9 +2,9 @@
 // existing Ad with an operator-supplied refinement prompt threaded into
 // the relevant LLM(s).
 //
-// Three modes (chosen by routes/ads.js based on ad.kind + body.mode):
+// Two modes (chosen by routes/ads.js based on ad.kind):
 //
-//   image (image kind, only mode):
+//   image:
 //     1. Re-run aiCanvasHtmlGeneratorService.generateForArtifact with
 //        refresh:true + operatorPrompt — updates the AiCanvasArtifact's
 //        outputHtml.
@@ -12,23 +12,27 @@
 //     3. Upload to Cloudinary (overwrites previous publicId so the
 //        Ad's renderUrl stays stable across regens).
 //
-//   video LIGHT (video kind, mode='light' — DEFAULT for video):
-//     1. Re-run aiReelsChromeService.generateForAd with operatorPrompt
-//        — updates Ad.chromeHtml.
-//     2. Re-run aiReelsPuppeteerService.compositeForAd — re-captures
-//        chrome frames + re-runs ffmpeg composite over the EXISTING
-//        Veo video. Updates Ad.renderUrl.
-//
-//   video FULL (video kind, mode='full'):
-//     1. Re-run aiVideoReferenceService.generateForAd with
-//        operatorPrompt — generates a NEW Veo video. Updates
-//        Ad.veoVideoUrl.
-//     2. Same chrome + composite as LIGHT.
+//   video (always "full" — LIGHT mode was retired with the HTML/Puppeteer
+//   chrome pipeline; brand-script chrome is deterministic and cheap
+//   enough that separating chrome-only from video-only isn't worth the
+//   surface area. Chrome-only tweaks now happen at the template level
+//   via the Brand page video card).
+//     1. Storyboard regenerated with operatorPrompt threaded in.
+//     2. New Grok video via videoRouter.generateForAd.
+//     3. Brand-script canvas overlay via brandScriptExecutor.
+//        renderBrandScriptAndSave — resolver picks the right script by
+//        format; no chrome when brand has neither styleScript* nor
+//        styleTheme.
 //
 // State updates throughout: Ad.regenerationStage tracks progress so the
 // frontend's 5s poll can show stage labels ("Re-rolling video…",
-// "Generating chrome…", "Compositing…"). On completion, regenerating
-// flips false, stage clears, history gets the appended entry.
+// "Compositing…"). On completion, regenerating flips false, stage
+// clears, history gets the appended entry.
+//
+// The `mode` param on the API route is now advisory only for video
+// (always full); it's preserved for image ads (always full anyway) and
+// backward-compat with the current frontend UI that may still send
+// mode='light'.
 
 const fs        = require('fs');
 const fsp       = require('fs/promises');
@@ -42,9 +46,7 @@ const CatalogProduct        = require('../models/CatalogProduct');
 const Media                 = require('../models/Media');
 const Brand                 = require('../models/Brand');
 const htmlGen               = require('./aiCanvasHtmlGeneratorService');
-const chromeService         = require('./aiReelsChromeService');
 const veoService            = require('./videoRouter');
-const puppeteerComposite    = require('./aiReelsPuppeteerService');
 const brandScriptExecutor   = require('./brandScriptExecutor');
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
 const { canvasForPlatformFormat }  = require('./platformFormats');
@@ -85,7 +87,10 @@ async function preflight(adId, brandId) {
 async function regenerateAd({ ad, prompt, mode, requestedBy }) {
   const adId      = String(ad._id);
   const kind      = ad.kind || 'image';
-  const effMode   = kind === 'image' ? 'full' : (mode === 'full' ? 'full' : 'light');
+  // Video always regens fully (new Grok video + brand-script chrome).
+  // The `mode` argument is preserved for backward-compat with existing
+  // frontend clients that may still send 'light' — we normalize it here.
+  const effMode   = 'full';
   const startedAt = Date.now();
   const historyEntry = {
     prompt:      String(prompt || '').slice(0, 1000),
@@ -119,11 +124,7 @@ async function regenerateAd({ ad, prompt, mode, requestedBy }) {
 
   try {
     if (kind === 'video') {
-      if (effMode === 'full') {
-        await runVideoFull(adId, prompt);
-      } else {
-        await runVideoLight(adId, prompt);
-      }
+      await runVideoFull(adId, prompt);
     } else {
       await runImage(adId, prompt);
     }
@@ -140,25 +141,22 @@ async function regenerateAd({ ad, prompt, mode, requestedBy }) {
 
 // ── Per-mode workers ──────────────────────────────────────────────────
 
-// Resolve the brand doc + whether this ad should take the canvas
-// path. Cheap — one Media + one Brand lookup. Called once at the
-// top of each regen path so Stage 2's parallel dispatch can skip
-// chrome and Stage 3 can fork on the same signal.
-async function resolveBrandPath(adId) {
+// Load brand — one Media + one Brand lookup — with all fields the
+// brand-script executor's format-aware resolver needs.
+async function loadBrand(adId) {
   const ad = await Ad.findById(adId).select('mediaId').lean();
   const media = ad?.mediaId ? await Media.findById(ad.mediaId).select('brandId').lean() : null;
-  const brand = media?.brandId ? await Brand.findById(media.brandId).select('name styleScript styleTheme').lean() : null;
-  const useCanvasScript = !!(
-    (brand?.styleScript && String(brand.styleScript).trim()) ||
-    (brand?.styleTheme && Object.keys(brand.styleTheme).length > 0)
-  );
-  return { brand, useCanvasScript };
+  return media?.brandId
+    ? await Brand.findById(media.brandId).select('name styleScript styleScriptVertical styleTheme').lean()
+    : null;
 }
 
+// Video regen — always full. Regenerates the storyboard + Grok base
+// video, then applies brand-script chrome (or no chrome, per resolver).
 async function runVideoFull(adId, prompt) {
-  // Stage 1 — storyboard. Single creative director for both Grok motion
-  // and chrome text overlays. Generated once, then passed to both
-  // parallel renderers below.
+  // Stage 1 — storyboard. The operator's refinement prompt threads
+  // through here so the creative direction updates in step with the
+  // new video.
   await setStage(adId, 'veo');
   const ad1 = await Ad.findById(adId).lean();
   const { storyboard } = await veoService.prepareStoryboard({ ad: ad1, operatorPrompt: prompt });
@@ -167,73 +165,37 @@ async function runVideoFull(adId, prompt) {
     await Ad.updateOne({ _id: adId }, { $set: { veoStoryboard: storyboard, updatedAt: new Date() } });
   }
 
-  const { brand, useCanvasScript } = await resolveBrandPath(adId);
-
-  // Stage 2 — Grok motion always; chrome HTML only when the HTML
-  // pipeline will be used at Stage 3. When the brand opts into
-  // canvas script, chrome gen is skipped as wasted work.
-  const adForChrome = await Ad.findById(adId).lean();
-  const parallel = [veoService.generateForAd({ ad: ad1, operatorPrompt: prompt, storyboard })];
-  if (!useCanvasScript) {
-    parallel.push(chromeService.generateForAd({ ad: adForChrome, operatorPrompt: prompt, storyboard }));
-  }
-  const settled = await Promise.allSettled(parallel);
-  const veoSettled    = settled[0];
-  const chromeSettled = settled[1]; // undefined when canvas path is taken
-
-  if (veoSettled.status === 'rejected') throw veoSettled.reason;
-  const veoResult = veoSettled.value;
+  // Stage 2 — new Grok base video.
+  const veoResult = await veoService.generateForAd({ ad: ad1, operatorPrompt: prompt, storyboard });
   if (veoResult.skipped) throw new Error(`Veo skipped: ${veoResult.reason}`);
 
-  if (chromeSettled && chromeSettled.status === 'rejected') {
-    console.warn(`🔁 regenerate[ad=${adId}]: chrome failed (non-fatal) — ${chromeSettled.reason?.message || chromeSettled.reason}`);
-  }
-
-  // Stamp the raw render before composite so a composite failure leaves
-  // a viewable fallback (the bare Grok video).
+  // Stamp the raw render before chrome so a chrome failure still
+  // leaves a viewable fallback (the bare Grok video).
   await Ad.updateOne({ _id: adId }, {
     $set: {
       veoVideoUrl:    veoResult.videoUrl,
       veoAspectRatio: veoResult.aspectRatio || null,
       veoPrompt:      veoResult.prompt || null,
       veoStoryboard:  veoResult.storyboard || storyboard || null,
+      renderUrl:      veoResult.videoUrl,
       updatedAt:      new Date()
     }
   });
 
-  // Stage 3 — canvas overlay OR Puppeteer composite over the Grok base.
+  // Stage 3 — brand-script canvas overlay. Resolver picks the right
+  // script by format; returns skipped when no chrome is configured
+  // (raw Grok video stays as renderUrl in that case). Failure is
+  // non-fatal for the same reason.
   await setStage(adId, 'composite');
-  const adFinal = await Ad.findById(adId).lean();
-  if (useCanvasScript && brand) {
-    await brandScriptExecutor.renderBrandScriptAndSave({ ad: adFinal, brand });
-  } else {
-    if (!adFinal?.chromeHtml) throw new Error('chromeHtml missing after chrome regeneration');
-    await puppeteerComposite.compositeForAd({ ad: adFinal });
-  }
-}
-
-// LIGHT regen — Grok video is reused, only overlay re-runs. When the
-// brand has a styleScript, the canvas executor runs directly over the
-// existing Grok video with no chrome regen. Otherwise chrome HTML is
-// regenerated and Puppeteer composites over it.
-async function runVideoLight(adId, prompt) {
-  const { brand, useCanvasScript } = await resolveBrandPath(adId);
-
-  if (useCanvasScript && brand) {
-    await setStage(adId, 'composite');
+  const brand = await loadBrand(adId);
+  if (brand) {
     const adFinal = await Ad.findById(adId).lean();
-    await brandScriptExecutor.renderBrandScriptAndSave({ ad: adFinal, brand });
-    return;
+    try {
+      await brandScriptExecutor.renderBrandScriptAndSave({ ad: adFinal, brand });
+    } catch (scriptErr) {
+      console.warn(`🔁 regenerate[ad=${adId}]: brand-script failed (non-fatal) — ${scriptErr.message}`);
+    }
   }
-
-  await setStage(adId, 'chrome');
-  const ad = await Ad.findById(adId).lean();
-  await chromeService.generateForAd({ ad, operatorPrompt: prompt });
-
-  await setStage(adId, 'composite');
-  const adWithChrome = await Ad.findById(adId).lean();
-  if (!adWithChrome?.chromeHtml) throw new Error('chromeHtml missing after chrome regeneration');
-  await puppeteerComposite.compositeForAd({ ad: adWithChrome });
 }
 
 // IMAGE regeneration. Re-runs HTML Gen (forces refresh + threads

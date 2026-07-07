@@ -15,11 +15,17 @@ const systemConfigSchema = new mongoose.Schema({
   // Enforces the singleton via unique index. Only 'default' is valid.
   key: { type: String, required: true, unique: true, default: 'default' },
 
-  // Canonical brand-script (services/brandScripts/canonical.script.js
-  // shape). When null/empty, the executor falls back to loading the
-  // bundled file so a fresh deploy is usable even before an admin
-  // ever edits this via UI.
+  // Canonical brand-script for feed formats (4:5, 1:1). Sourced from
+  // services/brandScripts/canonical.script.js when unset — file fallback
+  // means a fresh deploy is usable before an admin edits this.
   canonicalScript: { type: String, default: null },
+
+  // Canonical brand-script for vertical formats (9:16 — Reels, Shorts,
+  // Stories). Sourced from services/brandScripts/top_scrim_editorial.script.js
+  // when unset. Kept separate from canonicalScript because vertical and
+  // feed have distinct design constraints (top-anchored editorial for
+  // vertical vs. bottom-scrim CTA composition for feed).
+  canonicalScriptVertical: { type: String, default: null },
 
   updatedAt: { type: Date, default: Date.now },
   updatedBy: { type: String, default: null }  // email of the last editor

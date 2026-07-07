@@ -37,16 +37,8 @@ function die(msg) { console.error(`\u274c ${msg}`); process.exit(1); }
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const adId = args.adId;
-  const scriptPath = args.scriptPath || 'services/brandScripts/top_scrim_editorial.script.js';
   if (!adId) die('Need --adId=<mongo id>');
   if (!process.env.MONGODB_URI) die('MONGODB_URI not set');
-
-  const absScript = path.isAbsolute(scriptPath)
-    ? scriptPath
-    : path.join(process.cwd(), scriptPath);
-  if (!fs.existsSync(absScript)) die(`Script not found: ${absScript}`);
-  const scriptContents = fs.readFileSync(absScript, 'utf8');
-  console.log(`\ud83d\udcdc Script: ${absScript} (${scriptContents.length} bytes)`);
 
   await mongoose.connect(process.env.MONGODB_URI);
 
@@ -56,8 +48,24 @@ async function main() {
   const brand = await Brand.findById(ad.brandId).lean();
   if (!brand) die(`Brand ${ad.brandId} not found`);
 
+  // Auto-derive the default script from the ad's format when the
+  // operator doesn't pass --scriptPath. Matches the ad-render-time
+  // resolver's format classifier.
+  const { isVerticalFormat } = require('../services/brandScriptExecutor');
+  const vertical = isVerticalFormat(ad);
+  const scriptPath = args.scriptPath || (vertical
+    ? 'services/brandScripts/top_scrim_editorial.script.js'
+    : 'services/brandScripts/canonical.script.js');
+  const absScript = path.isAbsolute(scriptPath)
+    ? scriptPath
+    : path.join(process.cwd(), scriptPath);
+  if (!fs.existsSync(absScript)) die(`Script not found: ${absScript}`);
+  const scriptContents = fs.readFileSync(absScript, 'utf8');
+  console.log(`\ud83d\udcdc Script: ${absScript} (${scriptContents.length} bytes)`);
+
   console.log(`\ud83d\udcfa Ad:       ${ad._id}`);
   console.log(`   Brand:    ${brand.name}`);
+  console.log(`   Format:   ${ad.platformFormat || '(none)'} → ${vertical ? 'vertical' : 'feed'}`);
   console.log(`   veoUrl:   ${ad.veoVideoUrl}`);
   console.log(`   currentRenderUrl (unchanged): ${ad.renderUrl || '(none)'}`);
   console.log();

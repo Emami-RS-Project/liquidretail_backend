@@ -232,16 +232,25 @@ const brandSchema = new mongoose.Schema({
   // renderer's own defaults absorb any missing keys.
   styleOverrides: { type: mongoose.Schema.Types.Mixed, default: null },
 
-  // Per-brand canvas overlay script. Raw JS source that exports a
-  // renderAll({ inputDir, outputDir, meta, fonts }) function. Run in
-  // a sandboxed child process by services/brandScriptExecutor.js
-  // after the base video finishes. Escape hatch for brands that want
-  // a fully bespoke renderer — most brands opt into styleTheme
-  // (below) + the shared canonical layout instead.
+  // Per-brand canvas overlay script for FEED formats (4:5, 1:1). Raw
+  // JS source exporting a renderFrame(frameIndex, ctx, plate, meta, h)
+  // function. Run in a sandboxed child process by
+  // services/brandScriptExecutor.js after the base video finishes.
+  // Escape hatch for brands that want a fully bespoke feed renderer —
+  // most brands opt into styleTheme + shared canonical instead.
   //
-  // Executor priority: styleScript > (canonical + styleTheme) >
-  // HTML/Puppeteer.
+  // Per-format executor priority (feed):
+  //   styleScript → (canonical feed + styleTheme) → no chrome
   styleScript: { type: String, default: null },
+
+  // Per-brand canvas overlay script for VERTICAL formats (9:16 — Reels,
+  // Shorts, Stories). Same shape as styleScript. Separate slot because
+  // vertical and feed have distinct design constraints and typical
+  // brands may customize one without the other.
+  //
+  // Per-format executor priority (vertical):
+  //   styleScriptVertical → (canonical vertical + styleTheme) → no chrome
+  styleScriptVertical: { type: String, default: null },
 
   // Per-brand theme JSON consumed by the shared canonical brand-script
   // renderer (services/brandScripts/canonical.script.js or the DB

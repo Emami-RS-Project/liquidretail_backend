@@ -29,8 +29,6 @@ const CampaignRun  = require('../models/CampaignRun');
 const { expandWizardJob, selectAdsForRun } = require('../services/campaignAdsGenerationService');
 const { renderCreative }        = require('../services/renderService');
 const { generateForAd: veoGenerateForAd, prepareStoryboard: veoPrepareStoryboard } = require('../services/videoRouter');
-const { generateForAd: chromeGenerateForAd } = require('../services/aiReelsChromeService');
-const { compositeForAd: reelsPuppeteerComposite } = require('../services/aiReelsPuppeteerService');
 const { deleteFromCloudinary } = require('../services/cloudinaryService');
 const { buildVideoCompositeUrl } = require('../services/videoCompositeService');
 const { buildPreviewHtmlForAd }  = require('../services/adPreviewPageService');
@@ -448,35 +446,18 @@ async function renderOne(run, job, adId, index, renderToken) {
         await Ad.updateOne({ _id: adId }, { $set: { veoStoryboard: storyboard, updatedAt: new Date() } });
       }
 
-      // Load brand once to decide which overlay path this ad takes.
-      // Canvas path fires when the brand has EITHER a bespoke
-      // styleScript OR a styleTheme (which uses the shared canonical
-      // renderer). Either way, chrome HTML gen is wasted work — skip
-      // it in the parallel dispatch below.
+      // Load brand once so the post-Grok brand-script step can resolve
+      // the right chrome renderer for this ad's format.
       const brandMedia = await Media.findById(ad.mediaId).select('brandId').lean();
       const brandDoc   = brandMedia?.brandId
-        ? await Brand.findById(brandMedia.brandId).select('name styleScript styleTheme').lean()
+        ? await Brand.findById(brandMedia.brandId).select('name styleScript styleScriptVertical styleTheme').lean()
         : null;
-      const useCanvasScript = !!(
-        (brandDoc?.styleScript && String(brandDoc.styleScript).trim()) ||
-        (brandDoc?.styleTheme && Object.keys(brandDoc.styleTheme).length > 0)
-      );
 
-      // Stage 2 — fire Grok + chrome in parallel. Chrome is skipped
-      // when the brand opts into the canvas path. Composite still has
-      // to wait for Grok (it needs the base video), but chrome HTML
-      // (when used) is ready by then.
-      const adForChrome = await Ad.findById(adId).lean();
-      const parallel = [veoGenerateForAd({ ad, storyboard })];
-      if (!useCanvasScript) {
-        parallel.push(chromeGenerateForAd({ ad: adForChrome, storyboard }));
-      }
-      const settled = await Promise.allSettled(parallel);
-      const veoResultSettled = settled[0];
-      const chromeSettled    = settled[1]; // may be undefined when canvas path is taken
-
-      if (veoResultSettled.status === 'rejected') throw veoResultSettled.reason;
-      const veoResult = veoResultSettled.value;
+      // Stage 2 — generate the base video. HTML/Puppeteer chrome has
+      // been retired in favor of the brand-script canvas overlay, so
+      // Grok is the only thing running here. Chrome (if any) runs
+      // after Grok completes in Stage 3.
+      const veoResult = await veoGenerateForAd({ ad, storyboard });
       if (veoResult.skipped) {
         await CampaignRun.updateOne({ _id: run._id }, { $inc: { skipped: 1 } });
         await Ad.updateOne(
@@ -484,9 +465,6 @@ async function renderOne(run, job, adId, index, renderToken) {
           { $set: { status: 'queued', updatedAt: new Date() } }  // re-queues for next run when Veo is enabled
         );
         return;
-      }
-      if (chromeSettled && chromeSettled.status === 'rejected') {
-        console.warn(`⚠️ reelsChrome[ad=${adId}]: failed (non-fatal) — ${chromeSettled.reason?.message || chromeSettled.reason}`);
       }
 
       // Veo-fallback Ad state. Done BEFORE composite so a composite failure
@@ -517,28 +495,19 @@ async function renderOne(run, job, adId, index, renderToken) {
         }
       );
 
-      // Stage 3 — final overlay + composite. Two paths:
-      //   canvas — brand-owned styleScript (sandboxed child, direct
-      //            frame-level draws with @napi-rs/canvas). Overwrites
-      //            renderUrl on success.
-      //   HTML   — legacy Puppeteer capture + ffmpeg overlay of
-      //            chrome PNGs onto Grok video. Overwrites
-      //            renderUrl/posterUrl/cloudinaryPublicId on success.
-      // Either failure is non-fatal — Ad.renderUrl already carries
-      // the raw Grok video from the Stage 2.5 update above.
+      // Stage 3 — brand-script canvas overlay. Resolver picks the right
+      // script based on the ad's format (vertical vs feed) and the
+      // brand's per-format opt-ins. When no chrome is configured for
+      // this format, the resolver returns cleanly and the raw Grok
+      // video (already stamped as renderUrl in Stage 2.5) is the final
+      // output. Failure is non-fatal for the same reason.
       const adFinal = await Ad.findById(adId).lean();
-      if (useCanvasScript && brandDoc) {
+      if (brandDoc) {
         try {
           const { renderBrandScriptAndSave } = require('../services/brandScriptExecutor');
           await renderBrandScriptAndSave({ ad: adFinal, brand: brandDoc });
         } catch (scriptErr) {
           console.warn(`⚠️ brandScript[ad=${adId}]: failed (non-fatal) — ${scriptErr.message}`);
-        }
-      } else if (adFinal?.chromeHtml) {
-        try {
-          await reelsPuppeteerComposite({ ad: adFinal });
-        } catch (puppeteerErr) {
-          console.warn(`⚠️ reelsPuppeteer[ad=${adId}]: failed (non-fatal) — ${puppeteerErr.message}`);
         }
       }
 
