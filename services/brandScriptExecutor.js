@@ -355,29 +355,28 @@ async function buildMetaForAd(ad, brand) {
     } catch { /* optional */ }
   }
 
-  const rating      = layoutInput?.social_proof?.rating      ?? catalogProduct?.rating      ?? null;
-  const reviewCount = layoutInput?.social_proof?.review_count ?? catalogProduct?.reviewCount ?? null;
+  // LayoutInputArtifact wraps its data under `.input` (that's what
+  // layoutInputService.assembleInput persists). Every read below MUST
+  // go through this alias, not layoutInput directly, or nothing lands.
+  const li = layoutInput?.input || null;
 
-  const ctaText = ad.copy?.cta_text || layoutInput?.copy?.cta_text || 'SHOP NOW';
+  const rating      = li?.social_proof?.rating_value  ?? catalogProduct?.rating      ?? null;
+  const reviewCount = li?.social_proof?.review_count  ?? catalogProduct?.reviewCount ?? null;
+
+  const ctaText = ad.copy?.cta_text || li?.cta?.text || li?.copy?.cta_text || 'SHOP NOW';
 
   // Reviewer attribution — read from the winning quote's author_name
-  // (that's what layoutInputService writes). The phantom
-  // `reviewer_label` field never existed; this used to always fall to
-  // the default 'Verified customer'.
-  const reviewer = layoutInput?.social_proof?.primary_quote?.author_name
-                || layoutInput?.social_proof?.primary_quote?.author
+  // (that's what layoutInputService writes).
+  const reviewer = li?.social_proof?.primary_quote?.author_name
+                || li?.social_proof?.primary_quote?.author
                 || 'Verified customer';
 
-  // Delivery line — this slot is a versatile "promotional callout".
-  // Priority: an active promotional offer wins (from the creative-
-  // director LLM copy or the CTA offer_text), then falls back to a
-  // secondary product badge (badges[0] is already used by the top
-  // BESTSELLER pill; badges[1] is the natural second slot), then to
-  // the brand's tagline, then a generic default.
-  const badges = layoutInput?.product?.badges || [];
+  // Delivery line — versatile "promotional callout" slot.
+  // Priority: promotional offer text > secondary badge > brand tagline.
+  const badges = li?.product?.badges || [];
   const deliveryLine =
        ad.copy?.offer_text
-    || layoutInput?.cta?.offer_text
+    || li?.cta?.offer_text
     || badges[1]
     || brand?.tagline
     || 'Ships free';
@@ -388,15 +387,15 @@ async function buildMetaForAd(ad, brand) {
     // ── Text used by the canonical renderer + most custom scripts ──
     brandName:          brand?.name || null,
     badgeText,
-    productName:        ad.copy?.productName  || layoutInput?.product?.name     || catalogProduct?.title || null,
-    productDescription: layoutInput?.product?.description || catalogProduct?.description || null,
-    price:              ad.copy?.productPrice || layoutInput?.product?.price    || catalogProduct?.price || null,
-    benefits:           layoutInput?.product?.benefits || [],
-    badges:             layoutInput?.product?.badges   || [],
-    headline:           ad.copy?.headline    || layoutInput?.copy?.headline     || null,
+    productName:        ad.copy?.productName  || li?.product?.name     || catalogProduct?.title || null,
+    productDescription: li?.product?.description || catalogProduct?.description || null,
+    price:              ad.copy?.productPrice || li?.product?.price    || catalogProduct?.price || null,
+    benefits:           li?.product?.short_benefits || li?.product?.benefits || [],
+    badges,
+    headline:           ad.copy?.headline    || li?.copy?.headline     || null,
     // primary_quote is an OBJECT { text, author_name, source, verified } —
     // pull .text so meta.quote is a string the canvas script can render.
-    quote:              ad.copy?.quote       || layoutInput?.social_proof?.primary_quote?.text || null,
+    quote:              ad.copy?.quote       || li?.social_proof?.primary_quote?.text || null,
     reviewer,
     deliveryLine,
     ctaText,
@@ -408,7 +407,7 @@ async function buildMetaForAd(ad, brand) {
     // stars themselves — always populated.
     reviewsText:        reviewCount != null ? `${reviewCount} review${reviewCount === 1 ? '' : 's'}`
                        : '53 reviews',
-    likes:              layoutInput?.social_proof?.likes || 572,
+    likes:              li?.performance?.engagement?.likes || 572,
 
     // ── Theme (canonical path) ─────────────────────────────────────
     // Colors + font families that Claude / an operator picks per
