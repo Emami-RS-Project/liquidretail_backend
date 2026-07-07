@@ -41,6 +41,24 @@ const SHOPIFY_ACTOR = process.env.APIFY_SHOPIFY_ACTOR || 'webdatalabs/shopify-pr
 const IG_LIMIT      = Math.max(1, parseInt(process.env.APIFY_IG_LIMIT, 10)      || 50);
 const SHOPIFY_LIMIT = Math.max(1, parseInt(process.env.APIFY_SHOPIFY_LIMIT, 10) || 200);
 
+// Proxy group used by both actors. Options (per Apify):
+//   ''             — Apify's default (datacenter). Cheapest, blocked
+//                     by anti-scrape firewalls on some Shopify stores
+//                     and IG sometimes.
+//   RESIDENTIAL    — real-user IPs; bypasses most firewalls / IG
+//                     blocks. 5-10x more expensive per GB.
+//   AUTO           — actor picks based on target hostname.
+//   Any actor-specific group the user's Apify account has enabled.
+// Leave APIFY_PROXY_GROUP unset for the default; set to 'RESIDENTIAL'
+// on brands whose stores 403 the datacenter proxy.
+const APIFY_PROXY_GROUP = process.env.APIFY_PROXY_GROUP || '';
+
+function proxyConfig() {
+  const cfg = { useApifyProxy: true };
+  if (APIFY_PROXY_GROUP) cfg.apifyProxyGroups = [APIFY_PROXY_GROUP];
+  return cfg;
+}
+
 // Apify's sync-run endpoint blocks for up to 5 min. Our HTTP client
 // caps at 5 min + 15s slack so we always see the actor error, not an
 // axios timeout, when Apify itself is slow.
@@ -72,10 +90,11 @@ async function pullInstagramPosts(handle, { limit } = {}) {
   const resultsLimit = Math.max(1, Math.min(parseInt(limit, 10) || IG_LIMIT, IG_LIMIT));
 
   const input = {
-    directUrls:   [`https://www.instagram.com/${cleanHandle}/`],
-    resultsType:  'posts',
+    directUrls:         [`https://www.instagram.com/${cleanHandle}/`],
+    resultsType:        'posts',
     resultsLimit,
-    addParentData: false
+    addParentData:      false,
+    proxyConfiguration: proxyConfig()
   };
   const items = await runActorSync(IG_ACTOR, input);
   return items.map(normalizeIgPost).filter(Boolean);
@@ -124,7 +143,7 @@ async function pullShopifyProducts(shopUrl, { limit } = {}) {
     maxStores:          1,
     maxPages:           10,
     category:           '',
-    proxyConfiguration: { useApifyProxy: true }
+    proxyConfiguration: proxyConfig()
   };
   const items = await runActorSync(SHOPIFY_ACTOR, input);
   return items.map(normalizeShopifyProduct).filter(Boolean);
