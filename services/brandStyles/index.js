@@ -11,9 +11,9 @@
 //   centerMaxWidthRatio: number, 0–1 (default 0.80)
 //   cornerMaxWidthRatio: number, 0–1 (default 0.30)
 //
-// All overrides are partial — chromeRendererService merges each brand's
-// values over its own defaults, so a brand can override just one enum
-// value if that's all it needs.
+// All overrides are partial — each brand's values merge over the
+// module's own defaults, so a brand can override just one enum value
+// if that's all it needs.
 //
 // Lookup by brand.name (slugified: lowercase, non-alphanumeric → _).
 // Multiple aliases per style are supported so different brand-name

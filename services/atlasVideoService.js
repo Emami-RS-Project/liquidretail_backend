@@ -166,9 +166,9 @@ function buildBadgeList(proofBadges, productBadges) {
 }
 
 // Cloudinary ar_ param mapping for the eager transform on upload.
-// Must match aiReelsPuppeteerService.arParamForAspect — these are the
-// same derivative URL the composite stage will request, and we want
-// Cloudinary to start pre-generating it the moment we upload.
+// The downstream brand-script composite requests this derivative URL;
+// pre-generating it at upload time saves a transcode round-trip on the
+// first read.
 function arParamForAspect(aspectRatio) {
   const a = String(aspectRatio || '').trim();
   if (a === '9:16')   return 'ar_9:16';

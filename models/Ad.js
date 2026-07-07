@@ -232,7 +232,12 @@ const adSchema = new mongoose.Schema({
   // hardcoded storyboard instead). Stored as Mixed so the shape can
   // evolve without a migration.
   veoStoryboard:      { type: mongoose.Schema.Types.Mixed, default: null },
-  chromeHtml:         { type: String, default: null },  // GPT-generated transparent overlay HTML
+  // chromeHtml + chromeVersion held the HTML/Puppeteer overlay from the
+  // retired chrome pipeline. Kept nullable + read-only for legacy ads
+  // rendered before the brand-script system landed; no code writes them
+  // anymore. Safe to drop in a schema-migration pass once no ads with
+  // populated values remain in active campaigns.
+  chromeHtml:         { type: String, default: null },
   chromeVersion:      { type: String, default: null },
   renderUrl:          { type: String, default: null },
   posterUrl:          { type: String, default: null },

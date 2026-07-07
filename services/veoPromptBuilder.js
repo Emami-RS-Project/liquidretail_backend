@@ -7,8 +7,9 @@
 //
 // The storyboard (from veoStoryboardService) is the single source of
 // truth: this builder consumes beats[] + camera + audio + vibe +
-// strategy_arc; aiReelsChromeService consumes text_beats[]. Both
-// renderers obey the same script.
+// strategy_arc; the brand-script overlay (via brandScriptExecutor)
+// consumes text_beats[] through meta.storyboard. Both renderers obey
+// the same script.
 
 // Aspect-ratio resolution lives in services/platformFormats.js — the
 // canonical capability table for every platformFormat. Re-exported here
