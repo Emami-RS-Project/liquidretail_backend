@@ -27,10 +27,19 @@ const APIFY_API_ROOT = 'https://api.apify.com/v2';
 const IG_ACTOR      = process.env.APIFY_IG_ACTOR      || 'apify/instagram-scraper';
 const SHOPIFY_ACTOR = process.env.APIFY_SHOPIFY_ACTOR || 'webdatalabs/shopify-product-scraper';
 
-// Per-source hard limits. Kept modest by default; a demo doesn't need
-// 500 posts. Bump via .env if Sales asks for more.
-const IG_LIMIT      = Math.max(1, parseInt(process.env.APIFY_IG_LIMIT, 10)      || 10);
-const SHOPIFY_LIMIT = Math.max(1, parseInt(process.env.APIFY_SHOPIFY_LIMIT, 10) || 50);
+// Per-source result-count ceilings. Env-overridable; defaults land in
+// the sweet spot for demo-brand ad generation:
+//   IG=50    — enough post variety for concept selection without
+//              hitting apify/instagram-scraper's flakiness ramp at
+//              ~100+ posts. Cost ~$0.20 per pull.
+//   Shopify=200 — deep enough for most brand catalogs to seed real
+//              product-driven ad concepts. Sits well under the
+//              maxPages=10 × ~30-50 products/page hard ceiling
+//              (~300-500 from the actor side). Cost ~$0.15 per pull;
+//              downstream enrichment (~$0.05-0.12/product) is where
+//              real spend lands (~$10-24 first-run).
+const IG_LIMIT      = Math.max(1, parseInt(process.env.APIFY_IG_LIMIT, 10)      || 50);
+const SHOPIFY_LIMIT = Math.max(1, parseInt(process.env.APIFY_SHOPIFY_LIMIT, 10) || 200);
 
 // Apify's sync-run endpoint blocks for up to 5 min. Our HTTP client
 // caps at 5 min + 15s slack so we always see the actor error, not an
