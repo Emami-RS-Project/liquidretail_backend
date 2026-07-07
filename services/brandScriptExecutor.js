@@ -359,9 +359,30 @@ async function buildMetaForAd(ad, brand) {
   const reviewCount = layoutInput?.social_proof?.review_count ?? catalogProduct?.reviewCount ?? null;
 
   const ctaText = ad.copy?.cta_text || layoutInput?.copy?.cta_text || 'SHOP NOW';
-  const reviewerLabel = layoutInput?.social_proof?.reviewer_label || 'Verified customer';
-  const deliveryLine = layoutInput?.product?.delivery_line || (brand?.tagline || 'Ships free');
-  const badgeText = (layoutInput?.product?.badges?.[0]) || 'Bestseller';
+
+  // Reviewer attribution — read from the winning quote's author_name
+  // (that's what layoutInputService writes). The phantom
+  // `reviewer_label` field never existed; this used to always fall to
+  // the default 'Verified customer'.
+  const reviewer = layoutInput?.social_proof?.primary_quote?.author_name
+                || layoutInput?.social_proof?.primary_quote?.author
+                || 'Verified customer';
+
+  // Delivery line — this slot is a versatile "promotional callout".
+  // Priority: an active promotional offer wins (from the creative-
+  // director LLM copy or the CTA offer_text), then falls back to a
+  // secondary product badge (badges[0] is already used by the top
+  // BESTSELLER pill; badges[1] is the natural second slot), then to
+  // the brand's tagline, then a generic default.
+  const badges = layoutInput?.product?.badges || [];
+  const deliveryLine =
+       ad.copy?.offer_text
+    || layoutInput?.cta?.offer_text
+    || badges[1]
+    || brand?.tagline
+    || 'Ships free';
+
+  const badgeText = badges[0] || 'Bestseller';
 
   return {
     // ── Text used by the canonical renderer + most custom scripts ──
@@ -374,7 +395,7 @@ async function buildMetaForAd(ad, brand) {
     badges:             layoutInput?.product?.badges   || [],
     headline:           ad.copy?.headline    || layoutInput?.copy?.headline     || null,
     quote:              ad.copy?.quote       || layoutInput?.social_proof?.primary_quote || null,
-    reviewer:           reviewerLabel,
+    reviewer,
     deliveryLine,
     ctaText,
     cta:                ctaText, // legacy alias — some scripts still read meta.cta

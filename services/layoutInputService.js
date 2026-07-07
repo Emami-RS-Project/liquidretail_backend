@@ -59,6 +59,7 @@ const ProductMatchArtifact   = require('../models/ProductMatchArtifact');
 const OverlayZoneArtifact    = require('../models/OverlayZoneArtifact');
 const LayoutInputArtifact    = require('../models/LayoutInputArtifact');
 const CatalogProduct         = require('../models/CatalogProduct');
+const Category               = require('../models/Category');
 const Comment                = require('../models/Comment');
 const { findBrandByName }    = require('./brandCatalogService');
 const { placeOverlays }      = require('./overlayPlacementService');
@@ -309,7 +310,7 @@ async function buildLayoutInput({ mediaId, template, aspectRatio, options = {}, 
   }
 
   const derivation = await runDerivation(ctx, effectiveTemplate, aspectRatio, { ...options, overlayBoxes });
-  const input = assembleInput(ctx, effectiveTemplate, aspectRatio, options, derivation, precomputedPlacement);
+  const input = await assembleInput(ctx, effectiveTemplate, aspectRatio, options, derivation, precomputedPlacement);
 
   await LayoutInputArtifact.findOneAndReplace(
     {
@@ -390,7 +391,7 @@ async function getCandidatesForMedia(mediaId, aspectRatio) {
     // Per-template try/catch so one bad assembly (e.g. a new template
     // missing a derivation field) doesn't 500 the whole candidates list.
     try {
-      const input = assembleInput(ctx, tmpl.template_id, aspectRatio, {}, stubDerivation);
+      const input = await assembleInput(ctx, tmpl.template_id, aspectRatio, {}, stubDerivation);
       results.push(registry.validateInputAgainstTemplate(input, tmpl.template_id));
     } catch (err) {
       console.warn(`   ⚠️  candidate preflight failed for ${tmpl.template_id}: ${err.message}`);
@@ -1171,6 +1172,128 @@ function templateIntent(template) {
 }
 
 // If Gemini returned zero quotes but the review summary is present, carve a
+// ── Quote selection: universal scorer + tiered pool ──────────────
+//
+// Scores a candidate quote for "sentiment magnitude + specificity"
+// using cross-vertical structural signals — no product/brand keyword
+// lists, so this works identically for skincare, apparel, flowers,
+// gear, etc. Higher = better.
+//
+// Signals (all additive except for penalties):
+//   Length in the 60-140 char goldilocks zone      +3
+//   Length in the 40-180 char acceptable zone      +1
+//   Contains a digit (specific claim)              +1
+//   Contains a time/duration reference             +1
+//   Contains a first-person-experience verb        +1
+//   Universal positive-sentiment words             +1 per hit, capped
+//   Universal enthusiasm phrases                   +2 per hit, capped
+//
+// Penalties:
+//   Too short (<25 chars) or too long (>220)       -3
+//   Fewer than 5 words                             -3
+//   More than 40 words (rambling)                  -2
+//   ALL CAPS (6+ chars)                            -2
+//   Contains a URL                                 -5
+//   Short + only positive tokens (generic praise)  -2
+const STRONG_POSITIVE = /\b(love[ds]?|loving|adore[ds]?|adoring|obsess(ed|ion)|amazing|incredible|unbelievable|phenomenal|extraordinary|exceptional|outstanding|perfect|flawless|immaculate|impeccable|pristine|best|greatest|finest|premier|favou?rite|stunning|gorgeous|beautiful|exquisite|elegant|superb|magnificent|splendid|marvel(l)?ous|worth|worthy|fantastic|fabulous|wonderful|delightful|delighted|brilliant|terrific|essential|staple|thrill(ed|ing)|ecstatic|impressed|impressive|premium|luxurious|game[- ]?chang(er|ing)|life[- ]?chang(er|ing)|life[- ]?sav(er|ing)|must[- ]?have|go[- ]?to)\b/gi;
+
+const MODERATE_POSITIVE = /\b(great|excellent|high[- ]?quality|top[- ]?notch|first[- ]?rate|solid|dependable|reliable|sturdy|durable|comfortable|cozy|effective|efficient|recommend(ed|ing|ation)?|happy|satisfied|pleased|smooth|reliable|noticeable|convenient|handy|well[- ]?made|thoughtful|beautifully|nicely)\b/gi;
+
+const PHRASE_STRONG = /\b(worth every penny|worth the money|worth it|highly recommend|would recommend|five stars?|5[- ]?stars?|10\/10|hands down|blown away|blew me away|exceeded (my )?expectations|pleasantly surprised|fell in love|in love with|couldn't be happier|couldn'?t be more pleased|better than expected)\b/gi;
+
+const EXPERIENCE_VERB = /\b(bought|purchas(ed|ing)|got|use[ds]?|using|wore|wearing|wear|tr(ied|ying)|ordered|received|installed|took|been (using|wearing|loving)|have had|had (this|it|them)|own(ed)?|opened|unboxed)\b/i;
+
+const DURATION_REF = /\b(week|weeks|month|months|day|days|hour|hours|year|years|minute|minutes|second|seconds|since|for months|for years|for weeks|all day|every day)\b/i;
+
+function scoreQuote(text) {
+  const s = String(text || '').trim();
+  if (!s) return -Infinity;
+  const len = s.length;
+  const words = s.split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
+
+  let score = 0;
+
+  // Length band
+  if (len >= 60 && len <= 140)      score += 3;
+  else if (len >= 40 && len <= 180) score += 1;
+  else if (len < 25 || len > 220)   score -= 3;
+
+  // Sentiment magnitude — capped so a review can't win purely by piling on
+  // superlatives; the specificity signals below break ties for lived-experience quotes.
+  const strongHits   = (s.match(STRONG_POSITIVE)   || []).length;
+  const moderateHits = (s.match(MODERATE_POSITIVE) || []).length;
+  const phraseHits   = (s.match(PHRASE_STRONG)     || []).length;
+  score += Math.min(strongHits * 1.5 + phraseHits * 2 + moderateHits, 5);
+
+  // Specificity signals
+  if (/\d/.test(s))            score += 1;
+  if (DURATION_REF.test(s))    score += 1;
+  if (EXPERIENCE_VERB.test(s)) score += 1;
+
+  // Penalties
+  if (/^[A-Z\s!?.]{6,}$/.test(s))                       score -= 2;
+  if (/https?:\/\/|www\./i.test(s))                     score -= 5;
+  if (wordCount < 5)                                    score -= 3;
+  if (wordCount > 40)                                   score -= 2;
+  // Generic praise (short + only positive tokens, no lived-experience signals)
+  if (wordCount <= 6 && (strongHits + moderateHits + phraseHits) >= 1 && !/\d/.test(s) && !DURATION_REF.test(s) && !EXPERIENCE_VERB.test(s)) {
+    score -= 2;
+  }
+  // Trailing without terminator on longer quotes suggests truncation
+  if (/[a-z]$/i.test(s) && !/[.!?]$/.test(s) && wordCount > 8) score -= 1;
+
+  return score;
+}
+
+// Pick the highest-scoring quote from a candidate array. Returns
+// { text, author_name, source } shape or null when the array is empty
+// or nothing scores above the floor.
+function pickStrongestQuote(candidates) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  let best = null;
+  let bestScore = -Infinity;
+  for (const q of candidates) {
+    if (!q?.text) continue;
+    const score = scoreQuote(q.text);
+    if (score > bestScore) {
+      bestScore = score;
+      best = q;
+    }
+  }
+  return best;
+}
+
+// Normalize a raw quote object from any tier into the shape the
+// layout-input artifact expects: { text, author_name, source }.
+function normalizeQuote(q) {
+  if (!q?.text) return null;
+  return {
+    text:        String(q.text).trim(),
+    author_name: q.author_name || q.author || q.source || 'Verified buyer',
+    source:      q.source || undefined,
+    verified:    q.verified !== undefined ? q.verified : true
+  };
+}
+
+// Load categoryReviews for the ad's matched category. Uses the same
+// Category-collection first, categoryRef-then-categoryId fallback
+// that categoryReviewsService uses. Returns { quotes: [], ... } or
+// null on miss. Best-effort — never throws.
+async function loadCategoryReviewsForMatch(match) {
+  try {
+    const categoryRef =
+      match?.identification?.details?.categoryRef ||
+      match?.categoryId ||
+      null;
+    if (!categoryRef) return null;
+    const cat = await Category.findById(categoryRef).select('categoryReviews').lean();
+    return cat?.categoryReviews || null;
+  } catch {
+    return null;
+  }
+}
+
 // short primary quote from its first sentence. Keeps hero zones populated in
 // the low-signal case. Never invents text — only surfaces what Gemini
 // already wrote in the review-summary step.
@@ -1314,7 +1437,7 @@ function truncateToBudget(text, maxChars) {
   return cut.replace(/[\s,.;:–—-]+$/, '');
 }
 
-function assembleInput(ctx, template, aspectRatio, options, derivation, precomputedPlacement) {
+async function assembleInput(ctx, template, aspectRatio, options, derivation, precomputedPlacement) {
   const { media, detection, match, brand } = ctx;
   const ident   = match?.identification || {};
   const details = ident.details || {};
@@ -1373,44 +1496,42 @@ function assembleInput(ctx, template, aspectRatio, options, derivation, precompu
   const creatorMedia   = pickCreatorMedia(ctx);
   const ugcMedia       = creatorMedia;  // detect uploads == creator post asset
 
-  // Quote source priority — real reviews first, LLM-authored next,
-  // synthesis last. Real quotes (cached productReviews + brandReviews
-  // for brand_match outcomes) are higher-trust than anything the
-  // LLM generates, so they win the primary-quote slot. LLM quotes
-  // fill secondaries and supply additional perspectives. Synthesis
-  // from review summary is a last resort for blank-zone prevention.
-  const realQuotes = [];
+  // Quote selection — 4-tier priority with universal scorer inside
+  // each tier so the STRONGEST candidate wins primary, not just the
+  // first one. See scoreQuote() for the heuristic.
+  //
+  //   Tier 1: productReviews.quotes[]         (SKU-specific, highest trust)
+  //   Tier 2: category.categoryReviews.quotes (same category on this brand)
+  //   Tier 3: brand.brandReviews.quotes[]     (brand-level, always available)
+  //   Tier 4: LLM-authored derivation.quotes  (Gemini-generated)
+  //   Tier 5: synthesizeQuoteFromReviewSummary (last-resort blank prevention)
+  //
+  // First non-empty tier's best-scoring quote wins the primary slot.
+  // Everything else across all tiers goes to secondary_quotes so the
+  // renderer can rotate through them.
+  const tierProduct = (details.productReviews?.quotes || []).map(normalizeQuote).filter(Boolean);
+  const catReviewsForMatch = await loadCategoryReviewsForMatch(ctx.match);
+  const tierCategory = (catReviewsForMatch?.quotes || []).map(normalizeQuote).filter(Boolean);
+  const tierBrand    = (ctx.match?.brandReviews?.quotes || ctx.brand?.brandReviews?.quotes || []).map(normalizeQuote).filter(Boolean);
+  const tierLlm      = (Array.isArray(derivation.quotes) ? derivation.quotes : []).map(normalizeQuote).filter(Boolean);
 
-  const productQuotes = details.productReviews?.quotes;
-  if (Array.isArray(productQuotes) && productQuotes.length) {
-    for (const q of productQuotes) {
-      if (q?.text) realQuotes.push({ text: q.text, author_name: q.author || q.source || 'Verified buyer' });
-    }
-  }
+  let primaryQuote =
+       pickStrongestQuote(tierProduct)
+    || pickStrongestQuote(tierCategory)
+    || pickStrongestQuote(tierBrand)
+    || pickStrongestQuote(tierLlm)
+    || null;
 
-  // Brand-level review quotes when the matching service couldn't
-  // identify a specific product but did pull brand sentiment.
-  if (ctx.match?.outcome === 'brand_match' && Array.isArray(ctx.match?.brandReviews?.quotes)) {
-    for (const q of ctx.match.brandReviews.quotes) {
-      if (q?.text) realQuotes.push({ text: q.text, author_name: q.author || q.source || 'Verified buyer' });
-    }
-  }
-
-  const llmQuotes = Array.isArray(derivation.quotes) ? derivation.quotes.slice() : [];
-
-  // Real first, LLM second.
-  const quotes = [...realQuotes, ...llmQuotes];
-
-  // Last-resort synthesis when both real and LLM came up empty but
-  // a review summary exists — carve the first sentence out so hero
-  // zones aren't blank. Cheap, deterministic, and clearly grounded.
-  if (quotes.length === 0) {
+  if (!primaryQuote) {
     const syn = synthesizeQuoteFromReviewSummary(ctx);
-    if (syn) quotes.push(syn);
+    if (syn) primaryQuote = normalizeQuote(syn);
   }
 
-  const primaryQuote = quotes[0] ? { ...quotes[0] } : null;
-  const secondaryQuotes = quotes.slice(1).map(q => ({ ...q }));
+  // Secondaries: every other quote from every tier, minus the primary.
+  const allQuotes = [...tierProduct, ...tierCategory, ...tierBrand, ...tierLlm];
+  const secondaryQuotes = primaryQuote
+    ? allQuotes.filter(q => q.text !== primaryQuote.text).map(q => ({ ...q }))
+    : allQuotes.map(q => ({ ...q }));
 
   const rightsApproved = !!media.rights?.approved;
   const brandName = ident.brand || media.metadata?.brand || brand?.name || null;
