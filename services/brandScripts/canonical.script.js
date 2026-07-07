@@ -342,22 +342,30 @@ module.exports = {
     cursor += reviewerLineH + reviewerGap;
 
     // ── Divider between content block and bottom row ────────────
+    // Distribute any leftover vertical slack — the gap between the
+    // natural end-of-content position and the safe-area floor — by
+    // pushing the divider + CTA row DOWN by half of it. That closes
+    // the dead-space at the bottom when content is short (e.g. a
+    // 1-line quote) while still leaving the quote room to grow when
+    // it's longer. When content is at maximum height, slack is 0 and
+    // the row sits right below the divider as before.
+    const naturalDividerY = cursor;
+    const naturalCtaY = naturalDividerY + dividerGap + ctaTopGap;
+    const slack = Math.max(0, (ctaBottomFloor - ctaH) - naturalCtaY);
+    const pushDown = Math.floor(slack / 2);
+    const dividerY = naturalDividerY + pushDown;
+    const ctaY = naturalCtaY + pushDown;
+
     ctx.save();
     ctx.strokeStyle = rgba(colors.divider, 0.52);
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(blockX, cursor);
-    ctx.lineTo(blockX + Math.min(contentW, Math.round(W * 0.66)), cursor);
+    ctx.moveTo(blockX, dividerY);
+    ctx.lineTo(blockX + Math.min(contentW, Math.round(W * 0.66)), dividerY);
     ctx.stroke();
     ctx.restore();
-    cursor += dividerGap;
 
     // ── Bottom row: delivery line (left) + CTA (right) ──────────
-    // Row flows immediately after the divider. If the flow would
-    // push the CTA past ctaBottomFloor, clamp upward — the quote
-    // budget above should have already avoided this.
-    const desiredCtaY = cursor + ctaTopGap;
-    const ctaY = Math.min(desiredCtaY, ctaBottomFloor - ctaH);
     const bottomRowMid = ctaY + ctaH / 2;
 
     const deliveryMaxX = ctaX - 20;
