@@ -51,11 +51,14 @@ async function main() {
   // Auto-derive the default script from the ad's format when the
   // operator doesn't pass --scriptPath. Matches the ad-render-time
   // resolver's format classifier.
-  const { isVerticalFormat } = require('../services/brandScriptExecutor');
-  const vertical = isVerticalFormat(ad);
-  const scriptPath = args.scriptPath || (vertical
-    ? 'services/brandScripts/top_scrim_editorial.script.js'
-    : 'services/brandScripts/canonical.script.js');
+  const { classifyFormat } = require('../services/brandScriptExecutor');
+  const format = classifyFormat(ad);
+  const defaultsByFormat = {
+    vertical:  'services/brandScripts/top_scrim_editorial.script.js',
+    landscape: 'services/brandScripts/local_scrim_landscape.script.js',
+    feed:      'services/brandScripts/canonical.script.js'
+  };
+  const scriptPath = args.scriptPath || defaultsByFormat[format];
   const absScript = path.isAbsolute(scriptPath)
     ? scriptPath
     : path.join(process.cwd(), scriptPath);
@@ -65,7 +68,7 @@ async function main() {
 
   console.log(`\ud83d\udcfa Ad:       ${ad._id}`);
   console.log(`   Brand:    ${brand.name}`);
-  console.log(`   Format:   ${ad.platformFormat || '(none)'} → ${vertical ? 'vertical' : 'feed'}`);
+  console.log(`   Format:   ${ad.platformFormat || '(none)'} → ${format}`);
   console.log(`   veoUrl:   ${ad.veoVideoUrl}`);
   console.log(`   currentRenderUrl (unchanged): ${ad.renderUrl || '(none)'}`);
   console.log();

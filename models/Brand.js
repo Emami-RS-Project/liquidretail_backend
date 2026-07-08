@@ -252,6 +252,16 @@ const brandSchema = new mongoose.Schema({
   //   styleScriptVertical → (canonical vertical + styleTheme) → no chrome
   styleScriptVertical: { type: String, default: null },
 
+  // Per-brand canvas overlay script for LANDSCAPE formats (16:9 — Google
+  // Performance Max, YouTube pre-roll, Meta feed 16:9). Same shape as
+  // styleScript. Uses the local-scrim editorial layout by default —
+  // content pinned to the left column with per-element scrims instead
+  // of a single large gradient scrim.
+  //
+  // Per-format executor priority (landscape):
+  //   styleScriptLandscape → (canonical landscape + styleTheme) → no chrome
+  styleScriptLandscape: { type: String, default: null },
+
   // Per-brand theme JSON consumed by the shared canonical brand-script
   // renderer (services/brandScripts/canonical.script.js or the DB
   // SystemConfig override). Colors, font families, and specific text

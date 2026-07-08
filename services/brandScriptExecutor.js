@@ -40,16 +40,40 @@ const CHILD_TIMEOUT_MS = 5 * 60 * 1000;
 
 // ── Format classifier ──────────────────────────────────────────────
 //
-// Vertical formats (9:16) route to the top_scrim_editorial canonical;
-// everything else routes to the bottom-scrim canonical. Format ID
-// string is authoritative when present; aspectRatio is a fallback for
-// legacy ads whose platformFormat wasn't stamped.
+// Three format buckets:
+//   vertical   — 9:16 (Reels, Shorts, Stories)   → top_scrim_editorial
+//   landscape  — 16:9 (pmax, YouTube pre-roll)   → local_scrim_landscape
+//   feed       — 4:5 / 1:1 (Meta feed, catchall) → canonical
+//
+// Format ID string is authoritative when present; aspectRatio is a
+// fallback for legacy ads whose platformFormat wasn't stamped.
 function isVerticalFormat(ad) {
   const pf = String(ad?.platformFormat || '').toLowerCase();
   if (/reels|shorts|stories|9_16/.test(pf)) return true;
   if (String(ad?.aspectRatio || '') === '9:16') return true;
   return false;
 }
+
+function isLandscapeFormat(ad) {
+  const pf = String(ad?.platformFormat || '').toLowerCase();
+  if (/pmax|preroll|youtube|16_9/.test(pf)) return true;
+  if (String(ad?.aspectRatio || '') === '16:9') return true;
+  return false;
+}
+
+function classifyFormat(ad) {
+  if (isVerticalFormat(ad))  return 'vertical';
+  if (isLandscapeFormat(ad)) return 'landscape';
+  return 'feed';
+}
+
+// Which Brand field holds the per-format custom script. One row per
+// format so adding a fourth is one line.
+const BRAND_SCRIPT_FIELD = {
+  vertical:  'styleScriptVertical',
+  landscape: 'styleScriptLandscape',
+  feed:      'styleScript'
+};
 
 // ── Public API ─────────────────────────────────────────────────────
 
@@ -276,10 +300,17 @@ async function previewBrandScript({
   // Resolve script source: caller-provided styleScript wins;
   // otherwise pull the format-appropriate canonical (DB > file).
   if (!styleScript && useCanonical) {
-    const { getCanonicalScript, getCanonicalScriptVertical } = require('./systemConfigService');
-    const { script } = canonicalFormat === 'vertical'
-      ? await getCanonicalScriptVertical()
-      : await getCanonicalScript();
+    const {
+      getCanonicalScript,
+      getCanonicalScriptVertical,
+      getCanonicalScriptLandscape
+    } = require('./systemConfigService');
+    const getter = {
+      vertical:  getCanonicalScriptVertical,
+      landscape: getCanonicalScriptLandscape,
+      feed:      getCanonicalScript
+    }[canonicalFormat] || getCanonicalScript;
+    const { script } = await getter();
     styleScript = script;
   }
   if (!styleScript) {
@@ -442,22 +473,26 @@ async function buildMetaForAd(ad, brand) {
 // variant apply. Per-format priority ladder:
 //
 //   vertical (9:16 — Reels, Shorts, Stories):
-//     1. brand.styleScriptVertical   (custom vertical override)
-//     2. canonicalScriptVertical     (top_scrim_editorial)   — requires styleTheme
-//     3. no chrome                   (raw Grok video ships as-is)
+//     1. brand.styleScriptVertical    (custom vertical override)
+//     2. canonicalScriptVertical      (top_scrim_editorial)   — requires styleTheme
+//     3. no chrome                    (raw Grok video ships as-is)
+//
+//   landscape (16:9 — pmax, YouTube pre-roll):
+//     1. brand.styleScriptLandscape   (custom landscape override)
+//     2. canonicalScriptLandscape     (local_scrim_landscape) — requires styleTheme
+//     3. no chrome
 //
 //   feed (4:5, 1:1):
-//     1. brand.styleScript           (custom feed override)
-//     2. canonicalScript             (canonical.script.js)   — requires styleTheme
-//     3. no chrome                   (raw Grok video ships as-is)
+//     1. brand.styleScript            (custom feed override)
+//     2. canonicalScript              (canonical.script.js)   — requires styleTheme
+//     3. no chrome
 //
 // Requiring styleTheme for the canonical tier keeps opt-in behavior:
 // brands that never set a theme opt out of chrome entirely rather than
 // getting a default palette that may not match their identity.
 async function resolveBrandRenderer(brand, ad) {
-  const vertical = isVerticalFormat(ad);
-  const format   = vertical ? 'vertical' : 'feed';
-  const brandField = vertical ? 'styleScriptVertical' : 'styleScript';
+  const format     = classifyFormat(ad);
+  const brandField = BRAND_SCRIPT_FIELD[format];
 
   // 1. Custom per-format brand script
   const brandScript = brand?.[brandField];
@@ -466,10 +501,17 @@ async function resolveBrandRenderer(brand, ad) {
   }
   // 2. Canonical per-format (opt-in via styleTheme)
   if (brand?.styleTheme && Object.keys(brand.styleTheme).length > 0) {
-    const { getCanonicalScript, getCanonicalScriptVertical } = require('./systemConfigService');
-    const { script, source } = vertical
-      ? await getCanonicalScriptVertical()
-      : await getCanonicalScript();
+    const {
+      getCanonicalScript,
+      getCanonicalScriptVertical,
+      getCanonicalScriptLandscape
+    } = require('./systemConfigService');
+    const getter = {
+      vertical:  getCanonicalScriptVertical,
+      landscape: getCanonicalScriptLandscape,
+      feed:      getCanonicalScript
+    }[format];
+    const { script, source } = await getter();
     return { path: 'canonical', script, canonicalSource: source, format };
   }
   // 3. No chrome — ad ships as raw Grok video
@@ -533,4 +575,4 @@ async function renderBrandScriptAndSave({ ad, brand }) {
   }
 }
 
-module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript, resolveBrandRenderer, isVerticalFormat };
+module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript, resolveBrandRenderer, isVerticalFormat, isLandscapeFormat, classifyFormat };

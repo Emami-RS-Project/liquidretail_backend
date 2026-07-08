@@ -27,6 +27,13 @@ const systemConfigSchema = new mongoose.Schema({
   // vertical vs. bottom-scrim CTA composition for feed).
   canonicalScriptVertical: { type: String, default: null },
 
+  // Canonical brand-script for landscape formats (16:9 — Google
+  // Performance Max, YouTube pre-roll). Sourced from
+  // services/brandScripts/local_scrim_landscape.script.js when unset.
+  // Uses a left-column editorial layout with per-element local scrims
+  // so the video breathes through the remaining two-thirds of the frame.
+  canonicalScriptLandscape: { type: String, default: null },
+
   updatedAt: { type: Date, default: Date.now },
   updatedBy: { type: String, default: null }  // email of the last editor
 });
