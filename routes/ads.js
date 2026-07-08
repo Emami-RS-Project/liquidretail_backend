@@ -435,9 +435,9 @@ async function renderOne(run, job, adId, index, renderToken) {
   // ── Veo render path ────────────────────────────────────────────────
   if (ad.renderRoute === 'veo') {
     try {
-      // Stage 1 — generate the storyboard ONCE. It's the single source of
-      // truth: beats/camera/audio feed the Grok prompt; text_beats feed
-      // chrome. Both renderers then run in parallel against the same script.
+      // Stage 1 — generate the storyboard ONCE. It directs Grok's motion
+      // via beats/camera/audio/vibe. The brand-script overlay downstream
+      // handles on-screen text independently from ad.copy + layoutInput.
       const { storyboard } = await veoPrepareStoryboard({ ad });
 
       // Stamp the storyboard early so chrome can read it from ad.veoStoryboard

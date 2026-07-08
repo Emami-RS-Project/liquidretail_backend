@@ -4,13 +4,12 @@
 // (xai/grok-imagine-video/reference-to-video). Grok accepts 1–7
 // reference images and costs ~$0.50/sec. The model produces a motion-
 // only base video; all text overlays (headline, CTA, quote, brand mark)
-// are composited downstream by the chrome HTML + Puppeteer + ffmpeg
-// pipeline driven by the same storyboard's text_beats[].
+// are composited downstream by the canonical brand-script overlay
+// (brandScriptExecutor + brandScripts/*.script.js).
 //
 // Reuses the existing prompt + storyboard pipeline (veoPromptBuilder +
-// veoStoryboardService). Storyboard is the single source of truth: this
-// service consumes beats[]/camera/audio for the Grok prompt; the chrome
-// service consumes text_beats[] in parallel.
+// veoStoryboardService). The storyboard directs Grok motion —
+// camera/audio/beats/vibe — and nothing else.
 //
 // Atlas API: 3-step async flow
 //   1. POST /model/generateVideo → { data: { id } }
@@ -63,8 +62,8 @@ function enabled() {
 //   paramShape         → which body fields Atlas expects for this provider
 //
 // Every model emits motion-only video. Text is composited downstream
-// by the chrome pipeline. The storyboard's text_beats[] feed chrome;
-// the storyboard's beats/camera/audio feed the prompt builder here.
+// by the brand-script overlay. The storyboard's beats/camera/audio
+// feed the prompt builder here.
 const MODEL_CAPS = {
   'xai/grok-imagine-video/reference-to-video': {
     minDuration: 1, maxDuration: 10,
@@ -96,75 +95,6 @@ function capsFor(model) {
 // reference images at the resolved aspect so the seed composition and
 // the model output are consistent — preventing the "seed framed for 4:5,
 // output rendered at 3:4" mismatch that would otherwise crop content.
-// ── Copy-bundle formatters ────────────────────────────────────────────
-//
-// Convert raw product/proof data into ready-to-render strings the
-// storyboard can pick verbatim for text_beats[]. Centralized here so
-// the rating glyph format, price currency rules, and badge dedup logic
-// stay consistent across runs.
-
-// Format a numeric rating (0–5) as a display string the storyboard can
-// render verbatim. Returns null when no rating data is available.
-// Examples:
-//   buildRatingString(4.5, null, null)   → "★★★★★ 4.5"
-//   buildRatingString(null, 4.2, 1234)   → "★★★★★ 4.2 (1,234 reviews)"
-//   buildRatingString(null, null, null)  → null
-function buildRatingString(layoutRating, productRating, reviewCount) {
-  const value = layoutRating ?? productRating;
-  if (value == null || isNaN(value)) return null;
-  const rounded = Math.round(value * 10) / 10;
-  // 5 filled stars regardless of fractional value — the numeric digit
-  // does the precision. Visually cleaner than half-star glyphs which
-  // many fonts handle poorly.
-  const stars = '★★★★★';
-  if (reviewCount && reviewCount > 0) {
-    const formattedCount = reviewCount >= 1000
-      ? `${Math.round(reviewCount / 100) / 10}k`
-      : String(reviewCount);
-    return `${stars} ${rounded} (${formattedCount} reviews)`;
-  }
-  return `${stars} ${rounded}`;
-}
-
-// Format a price as a display string. Prefers layoutInput.product.price
-// (LLM-derived, may include sale formatting) over CatalogProduct.price
-// (raw). Returns null when no price is available.
-function buildPriceString(layoutPrice, layoutCurrency, productPrice) {
-  // layoutInput sometimes pre-formats the price as a string ("$60 / $80")
-  // — pass through if so.
-  if (typeof layoutPrice === 'string' && layoutPrice.trim()) return layoutPrice.trim();
-  const price = layoutPrice ?? productPrice;
-  if (price == null || isNaN(price)) return null;
-  const currency = (layoutCurrency || 'USD').toUpperCase();
-  const symbol = ({ USD: '$', GBP: '£', EUR: '€', CAD: 'C$', AUD: 'A$' })[currency] || '';
-  // Whole numbers render without decimals; fractional render with cents.
-  const formatted = Number.isInteger(price)
-    ? `${price}`
-    : price.toFixed(2);
-  return symbol ? `${symbol}${formatted}` : `${formatted} ${currency}`;
-}
-
-// Deduplicate + lowercase-trim badges from social_proof.proof_badges
-// (trust signals: "Best Seller", "Award Winner") and product.badges
-// (catalog-side: "New", "Sale"). Cap at 4 — more than that is poster wall.
-function buildBadgeList(proofBadges, productBadges) {
-  const seen = new Set();
-  const out = [];
-  for (const arr of [proofBadges, productBadges]) {
-    if (!Array.isArray(arr)) continue;
-    for (const raw of arr) {
-      if (!raw) continue;
-      const text = String(raw).trim();
-      const key  = text.toLowerCase();
-      if (!text || seen.has(key)) continue;
-      seen.add(key);
-      out.push(text);
-      if (out.length >= 4) return out;
-    }
-  }
-  return out;
-}
-
 // Cloudinary ar_ param mapping for the eager transform on upload.
 // The downstream brand-script composite requests this derivative URL;
 // pre-generating it at upload time saves a transcode round-trip on the
@@ -505,9 +435,8 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
     ad.productId ? CatalogProduct.findById(ad.productId).lean() : null,
     LayoutInputArtifact.findOne({ mediaId: media._id, productId: ad.productId || null })
       .sort({ createdAt: -1 }).lean(),
-    ad.campaignId ? Campaign.findById(ad.campaignId).select('creativeBrief kind').lean() : null
+    ad.campaignId ? Campaign.findById(ad.campaignId).select('kind').lean() : null
   ]);
-  const brief = campaign?.creativeBrief || null;
 
   let concept = null;
   if (ad.conceptId && ad.conceptArtifactId) {
@@ -515,16 +444,10 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
     concept = direction?.concepts?.find(c => c.concept_id === ad.conceptId) || null;
   }
 
-  // Video pipeline previously skipped layoutInput derivation, so
-  // products that hadn't been through the image-gen pipeline arrived
-  // here with no derived rating/price/benefits/badges/proof data —
-  // collapsing every ad to the concept.copy_picks fallback shape.
-  // Trigger derivation now if the artifact is missing or empty. The
-  // builder caches per (mediaId, template, aspectRatio, productId,
-  // variantKind, campaignContextHash) — so subsequent runs hit the
-  // cache instead of re-deriving. Non-fatal: if derivation fails
-  // (e.g. Gemini credits exhausted), we fall back to whatever data
-  // was already on the artifact / CatalogProduct.
+  // Derive layoutInput if missing — the brand-script overlay downstream
+  // reads its copy/proof/product/theme fields directly. Cached per
+  // (mediaId, template, aspectRatio, productId, variantKind,
+  // campaignContextHash). Non-fatal on failure.
   let layoutInput = layoutInputInitial;
   const lpEmpty = !layoutInput?.input || Object.keys(layoutInput.input || {}).length === 0;
   if (lpEmpty && ad.productId) {
@@ -556,39 +479,6 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
   const lpSrcMedia = lpInput?.source_media || null;
   const subject    = resolveSubject({ layoutInput: lpInput, sourceMedia: lpSrcMedia, media });
 
-  const layoutCopy  = lpInput?.copy || {};
-  const layoutProof = lpInput?.social_proof || {};
-  const layoutProd  = lpInput?.product || {};
-  const conceptCopy = concept?.copy_picks || {};
-  const adCopy      = ad.copy || {};
-
-  // Compose ready-to-render content strings for the storyboard. Every
-  // string here is a candidate the storyboard's text_beats[] can pick
-  // verbatim. Sources, in priority order:
-  //   1. Ad-level cached copy (rerolls)
-  //   2. layoutInput.copy / .social_proof / .product (LLM-derived)
-  //   3. concept.copy_picks (V2 director output)
-  //   4. CatalogProduct + Brand (raw catalog data)
-  //
-  // New as of this commit: rating, price, benefits, badges, highlight,
-  // secondary_quote_* — unlock social-proof-led and promotional concepts
-  // to actually look different from editorial.
-  const copy = {
-    headline:    adCopy.headline    || layoutCopy.headline    || layoutCopy.headline_main || conceptCopy.headline    || brand?.tagline || product?.title || null,
-    subheadline: adCopy.subheadline || layoutCopy.subheadline || conceptCopy.subheadline || null,
-    eyebrow:     layoutCopy.eyebrow || layoutCopy.headline_lead || conceptCopy.eyebrow || null,
-    cta_text:    adCopy.cta_text    || ad.ctaText || layoutCopy.cta_text || conceptCopy.cta || 'Shop Now',
-    primary_quote: layoutProof?.primary_quote || null,
-    brand_name:  brand?.name || null,
-    product_name: layoutProd?.name || product?.title || null,
-    highlight:   layoutCopy.highlight_text || null,
-    rating:      buildRatingString(layoutProof?.rating_value, product?.rating, product?.reviewCount),
-    price:       buildPriceString(layoutProd?.price, layoutProd?.currency, product?.price),
-    benefits:    Array.isArray(layoutProd?.short_benefits) ? layoutProd.short_benefits.slice(0, 3) : [],
-    badges:      buildBadgeList(layoutProof?.proof_badges, layoutProd?.badges),
-    secondary_quotes: Array.isArray(layoutProof?.secondary_quotes) ? layoutProof.secondary_quotes.slice(0, 2) : []
-  };
-
   const storyboard = await generateStoryboard({
     concept, brand, product,
     layoutInput:  lpInput,
@@ -597,25 +487,8 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
     aspectRatio,
     operatorPrompt,
     brandId:   media.brandId,
-    productId: ad.productId || null,
-    copy,
-    brief
+    productId: ad.productId || null
   });
-
-  // Attach the copy bundle + concept metadata to the storyboard so
-  // downstream chrome normalization can (a) verify each text_beat's
-  // text is verbatim from the supplied copy (drop 4.1 hallucinations),
-  // (b) inject required role beats based on concept style + available
-  // content. Fields prefixed with underscore so they're clearly
-  // "meta" — not part of the storyboard schema, just piggyback data.
-  if (storyboard) {
-    storyboard._copy = copy;
-    storyboard._concept = concept ? {
-      creative_style:    concept.creative_style || null,
-      social_proof_type: concept.social_proof_type || null,
-      archetype:         concept.archetype || null
-    } : null;
-  }
 
   return { storyboard, aspectRatio };
 }
@@ -642,7 +515,7 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     ad.productId ? CatalogProduct.findById(ad.productId).lean() : null,
     LayoutInputArtifact.findOne({ mediaId: media._id, productId: ad.productId || null })
       .sort({ createdAt: -1 }).lean(),
-    ad.campaignId ? Campaign.findById(ad.campaignId).select('creativeBrief kind').lean() : null,
+    ad.campaignId ? Campaign.findById(ad.campaignId).select('kind').lean() : null,
     ad.productId
       ? Media.find({
           source: 'catalog-product',
@@ -650,7 +523,6 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
         }).select('_id fileUrl classification adSuitability metadata').lean()
       : []
   ]);
-  const brief = campaign?.creativeBrief || null;
 
   let concept = null;
   if (ad.conceptId && ad.conceptArtifactId) {
@@ -699,28 +571,9 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   const lpSrcMedia = lpInput?.source_media || null;
   const subject    = resolveSubject({ layoutInput: lpInput, sourceMedia: lpSrcMedia, media });
 
-  // Assemble copy strings the storyboard generator + prompt builder
-  // need to choreograph in-frame text. Priority order:
-  //   1. ad.copy (cached at render time — present on regens)
-  //   2. layoutInput.copy + layoutInput.social_proof (canonical source)
-  //   3. concept.copy_picks (V2 concept-driven path)
-  //   4. brand defaults (tagline, name)
-  const layoutCopy = lpInput?.copy || {};
-  const layoutProof = lpInput?.social_proof || {};
-  const conceptCopy = concept?.copy_picks || {};
-  const adCopy = ad.copy || {};
-  const copy = {
-    headline:    adCopy.headline    || layoutCopy.headline    || layoutCopy.headline_main || conceptCopy.headline    || brand?.tagline || product?.title || null,
-    subheadline: adCopy.subheadline || layoutCopy.subheadline || conceptCopy.subheadline || null,
-    eyebrow:     layoutCopy.eyebrow || layoutCopy.headline_lead || conceptCopy.eyebrow || null,
-    cta_text:    adCopy.cta_text    || ad.ctaText || layoutCopy.cta_text || conceptCopy.cta || 'Shop Now',
-    primary_quote: layoutProof?.primary_quote || null,
-    brand_name:  brand?.name || null
-  };
-
   // Storyboard may be supplied by the caller (orchestrator generated it
-  // once so it can be shared with the parallel chrome generator). Falls
-  // back to generating locally for legacy callers.
+  // via prepareStoryboard). Falls back to generating locally for legacy
+  // callers.
   const storyboard = precomputedStoryboard || await generateStoryboard({
     concept, brand, product,
     layoutInput:  lpInput,
@@ -729,13 +582,11 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     aspectRatio,
     operatorPrompt,
     brandId:   media.brandId,
-    productId: ad.productId || null,
-    copy,
-    brief
+    productId: ad.productId || null
   });
 
-  // Motion-only prompt — text choreography is composited downstream by
-  // the chrome service consuming the same storyboard's text_beats[].
+  // Motion-only prompt — the canonical brand-script overlay composites
+  // all on-screen text downstream from ad.copy + LayoutInputArtifact.
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
   const prompt = buildVeoPrompt({
     concept, brand, product, media,

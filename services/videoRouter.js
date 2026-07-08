@@ -8,10 +8,10 @@
 //     prompt, storyboard, elapsedMs, model }
 //
 // Every provider emits a motion-only video. Text overlays are
-// composited downstream by the chrome HTML + Puppeteer + ffmpeg
-// pipeline driven by the storyboard's text_beats[]. Storyboard is the
-// single creative director; chrome and Grok are parallel renderers
-// reading different lanes of the same script.
+// composited downstream by the canonical brand-script overlay
+// (brandScriptExecutor) reading ad.copy + LayoutInputArtifact +
+// Brand.styleTheme. The storyboard directs Grok motion only —
+// camera/audio/beats/vibe.
 //
 // Provider selection (env-driven for now; per-brand override is a
 // future extension via Brand.videoProvider):

@@ -2,14 +2,14 @@
 // Atlas, or Veo via Vertex). The prompt directs MOTION, CAMERA, AUDIO,
 // and PRODUCT/PHYSICAL fidelity. It contains NO text choreography —
 // every on-screen overlay (headline, CTA, quote, brand mark) is
-// composited downstream by the chrome HTML + Puppeteer + ffmpeg
-// pipeline, driven by the same storyboard's text_beats[].
+// composited downstream by the canonical brand-script overlay
+// (brandScriptExecutor + brandScripts/*.script.js), which reads its
+// text from ad.copy + LayoutInputArtifact + Brand.styleTheme.
 //
-// The storyboard (from veoStoryboardService) is the single source of
-// truth: this builder consumes beats[] + camera + audio + vibe +
-// strategy_arc; the brand-script overlay (via brandScriptExecutor)
-// consumes text_beats[] through meta.storyboard. Both renderers obey
-// the same script.
+// When veoStoryboardService is enabled it directs motion here: this
+// builder consumes storyboard.beats[] + camera + audio + vibe. When
+// the storyboard is null this builder falls back to a hardcoded
+// 3-beat template.
 
 // Aspect-ratio resolution lives in services/platformFormats.js — the
 // canonical capability table for every platformFormat. Re-exported here
@@ -203,8 +203,8 @@ function buildOverlayIntent({ concept, hasHeadline, hasCta }) {
 // storyboard (optional) — structured { camera, audio, beats[], vibe } from
 // veoStoryboardService. When provided, the camera move + time-coded beats
 // section is rendered from the storyboard instead of the hardcoded
-// 3-beat template. text_beats[] is IGNORED here (chrome consumes it).
-// When null, behavior falls back to the hardcoded 3-beat template.
+// 3-beat template. When null, behavior falls back to the hardcoded
+// 3-beat template.
 function buildVeoPrompt({
   concept,
   brand,
