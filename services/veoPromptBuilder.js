@@ -231,7 +231,10 @@ function buildVeoPrompt({
     );
   }
 
-  lines.push(`8-second premium cinematic product commercial. Animate the scene in the reference image.`);
+  lines.push(
+    `8-second editorial lifestyle short — documentary observation of the scene in the reference image, ` +
+    `as if shot on a mirrorless camera in the real environment. Animate what is already present; do not restage.`
+  );
 
   const sceneDesc = buildSceneDescription({ layoutInput, sourceMedia });
   const lighting  = buildLightingDescription({ layoutInput, sourceMedia });
@@ -274,7 +277,8 @@ function buildVeoPrompt({
     lines.push(`8-second storyboard: ${beatLines}`);
     lines.push(
       `Camera: ${storyboard.camera}. ` +
-      `High-end lifestyle commercial color grading, photorealistic, 8K resolution.`
+      `Natural editorial color, true-to-scene white balance, sensor-level photoreal detail. ` +
+      `No commercial LUT, no upscaled hyperrealism, no cinematic gloss that departs from the reference.`
     );
     if (storyboard.vibe)  lines.push(`Vibe: ${storyboard.vibe}.`);
     if (storyboard.audio) lines.push(`AUDIO: ${storyboard.audio}.`);
@@ -282,15 +286,16 @@ function buildVeoPrompt({
     const motionBeat = buildMotionBeat(subject);
     lines.push(
       `8-second storyboard: ` +
-      `0:00–0:02: Establish the scene exactly as composed in the reference image — soft diffused cinematic lighting, ` +
-      `natural shallow depth of field, pristine clean background. ` +
+      `0:00–0:02: Establish the scene exactly as composed in the reference image — soft diffused natural light, ` +
+      `shallow natural depth of field, clean background exactly as shown. ` +
       motionBeat + ` ` +
       `0:05–0:08: The camera executes a slow, elegant z-axis forward push-in with micro-handheld Y/X axis drift ` +
       `and organic jitter, settling into a clean hold with razor-sharp focus on the primary subject.`
     );
     lines.push(
       `Camera: slow z-axis push-in with organic handheld micro-movements. ` +
-      `High-end lifestyle commercial color grading, photorealistic, 8K resolution.`
+      `Natural editorial color, true-to-scene white balance, sensor-level photoreal detail. ` +
+      `No commercial LUT, no upscaled hyperrealism, no cinematic gloss that departs from the reference.`
     );
   }
 
@@ -316,29 +321,38 @@ function buildVeoPrompt({
   }
 
   lines.push(
-    `PHYSICAL ACCURACY: Every person, hand, or face rendered MUST be anatomically correct. ` +
-    `Hands have exactly 5 fingers with natural length and joint placement (no extra digits, no fused fingers, no impossible bends). ` +
-    `Faces have 2 symmetric eyes with matching color and size, natural skin texture, normal tooth count, no warped features. ` +
-    `Body proportions follow real human anatomy — no extra limbs, no impossible angles. ` +
-    `If the reference image shows a person, preserve THEIR face, hair, skin tone, and identity throughout — do not morph them into a different person mid-shot.`
+    `PHYSICAL ACCURACY: Any person rendered must be anatomically correct — 5-fingered hands, symmetric matching eyes, ` +
+    `natural skin texture, real body proportions. No extra digits, warped features, or impossible angles. ` +
+    `If the reference shows a person, preserve their face, hair, skin tone, and identity throughout — no morphing mid-shot.`
   );
   if (hasProductReference) {
     lines.push(
-      `PRODUCT FIDELITY: A separate REFERENCE IMAGE of the actual catalog product is attached. ` +
-      `Treat that reference as the ABSOLUTE source of truth for the product's shape, color, label text, ` +
-      `packaging, and proportions — every frame of the video must show a product matching that reference exactly. ` +
-      `If the primary scene image and the reference image disagree on any product detail (label position, ` +
-      `color shade, bottle shape, etc.), the REFERENCE image wins. Do NOT reinterpret, do NOT shift colors, ` +
-      `do NOT generate a similar-but-different product variant — render exactly what the reference shows.`
+      `PRODUCT FIDELITY: A separate REFERENCE IMAGE of the catalog product is attached. It is the ABSOLUTE source of truth ` +
+      `for shape, color, label text, packaging, and proportions. If the scene image and this reference disagree, the REFERENCE wins. ` +
+      `Do NOT reinterpret, shift colors, or generate a similar-but-different variant — render exactly what the reference shows.`
     );
   } else {
     lines.push(
       `PRODUCT FIDELITY: The product in the reference image is the actual catalog product. ` +
-      `Preserve its exact shape, color, label text, packaging, and proportions throughout the entire 8 seconds. ` +
-      `Do NOT reinterpret the label, do NOT shift colors, do NOT generate a similar-but-different product variant. ` +
-      `The product is the source of truth.`
+      `Preserve its exact shape, color, label text, packaging, and proportions throughout. ` +
+      `Do NOT reinterpret the label, shift colors, or generate a similar-but-different variant.`
     );
   }
+
+  lines.push(
+    `PRODUCT VIEWS: Show only product angles, orientations, and faces visible in the references. ` +
+    `Do NOT rotate, tilt, unwrap, or reveal unseen sides. The product is observed as a static object, not showcased.`
+  );
+
+  lines.push(
+    `MOTION LIMITS: No product rotation or orbit. No dolly moves exposing new product faces. ` +
+    `No zoom past the reference composition. No fantasy motion — no sparkles, particles, lens flares, floating props, morphing, or dissolves.`
+  );
+
+  lines.push(
+    `NO STYLIZATION: Documentary capture, not a stylized ad. Prohibited: CGI-glossy surfaces, volumetric fog beams, ` +
+    `unrealistic bokeh, animated logos, magical highlights not in the seed, product colors differing from the reference.`
+  );
 
   return lines.join(' ');
 }
