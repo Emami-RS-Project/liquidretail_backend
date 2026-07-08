@@ -84,7 +84,7 @@ module.exports = {
     const fonts = {
       sans:  theme.sansFontFamily || 'Inter',
       serif: theme.serifFontFamily || 'Lora',
-      productFamily: theme.productFontFamily || 'Cormorant Garamond',
+      productFamily: theme.productFontFamily || 'Cormorant',
       productWeight: theme.productFontWeight || 600,
       quoteFamily:   theme.quoteFontFamily || theme.serifFontFamily || 'Lora'
     };
@@ -172,7 +172,15 @@ module.exports = {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
 
-    const badgeW = ctx.measureText(badgeText).width + 34;
+    // Include letter-spacing in the width so the pill's padding stays
+    // symmetric across the tracked text (drawTrackedText spreads chars
+    // by `tracking` px beyond the measureText result).
+    const badgeTracking = 0.8;
+    const badgeCharCount = Array.from(badgeText).length;
+    const badgeTrackedW =
+      ctx.measureText(badgeText).width +
+      Math.max(0, badgeCharCount - 1) * badgeTracking;
+    const badgeW = badgeTrackedW + 34;
     const badgeH = 40;
     const badgeYOffset = (1 - badgeT) * 10;
 
@@ -186,7 +194,7 @@ module.exports = {
     ctx.shadowBlur = 0;
     ctx.shadowOffsetY = 0;
     ctx.fillStyle = rgba(colors.badgeText, 1);
-    drawTrackedText(ctx, badgeText, blockX + 18, cursor + badgeH / 2 + badgeYOffset + 1, 0.8, 'left');
+    drawTrackedText(ctx, badgeText, blockX + 18, cursor + badgeH / 2 + badgeYOffset + 1, badgeTracking, 'left');
     ctx.restore();
 
     cursor += badgeH + rowGap;

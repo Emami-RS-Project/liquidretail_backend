@@ -150,7 +150,7 @@ module.exports = {
         theme.productFontFamily ||
         theme.headingFontFamily ||
         theme.serifFontFamily ||
-        'Cormorant Garamond',
+        'Cormorant',
 
       productWeight:
         theme.productFontWeight ||
@@ -251,10 +251,16 @@ module.exports = {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
 
+      // Include letter-spacing (tracking) in the width so the pill's
+      // padding stays symmetric across the tracked text.
+      const badgeTracking = 1;
+      const badgeCharCount = Array.from(badgeText).length;
+      const trackedTextW =
+        ctx.measureText(badgeText).width +
+        Math.max(0, badgeCharCount - 1) * badgeTracking;
       const badgeW = Math.min(
         contentMaxW,
-        ctx.measureText(badgeText).width +
-          badgePadX * 2
+        trackedTextW + badgePadX * 2
       );
 
       ctx.shadowColor = 'rgba(0,0,0,0.20)';
@@ -290,7 +296,7 @@ module.exports = {
         badgeText,
         leftPad + badgePadX + xOffset,
         cursorY + badgeH / 2 + 1,
-        1,
+        badgeTracking,
         'left'
       );
 

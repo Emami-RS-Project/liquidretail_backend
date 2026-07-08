@@ -96,7 +96,7 @@ module.exports = {
         theme.sansFontFamily || theme.bodyFontFamily || 'Inter',
       product:
         theme.productFontFamily || theme.headingFontFamily ||
-        theme.serifFontFamily || 'Cormorant Garamond',
+        theme.serifFontFamily || 'Cormorant',
       productWeight:
         theme.productFontWeight || theme.headingFontWeight || 600,
       quote:
@@ -145,9 +145,17 @@ module.exports = {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
 
+      // Include letter-spacing (tracking) in the width calc so the pill
+      // has symmetric padding — without this, drawTrackedText's added
+      // gaps push the trailing char past the intended right-side pad.
+      const badgeTracking = 1;
+      const badgeCharCount = Array.from(badgeText).length;
+      const trackedTextW =
+        ctx.measureText(badgeText).width +
+        Math.max(0, badgeCharCount - 1) * badgeTracking;
       const badgeW = Math.min(
         contentMaxW,
-        ctx.measureText(badgeText).width + badgePadX * 2
+        trackedTextW + badgePadX * 2
       );
 
       ctx.shadowColor = 'rgba(0,0,0,0.20)';
@@ -165,35 +173,35 @@ module.exports = {
         ctx, badgeText,
         leftPad + badgePadX + xOffset,
         cursorY + badgeH / 2 + 1,
-        1, 'left'
+        badgeTracking, 'left'
       );
 
       ctx.restore();
       cursorY += badgeH + rowGap;
     }
 
-    // ── 2. Product name with local scrim ───────────────────────────
+    // ── 2. Product name with local scrim (2-line wrap) ─────────────
+    // Wraps to two lines at a fixed larger size rather than shrinking
+    // to fit one line — long product names ("Mako Deep Sea 19\" -
+    // Pacific Rim") stay readable and don't collapse to the min font
+    // size when the font fallback measures wider than intended.
     ctx.save();
     ctx.globalAlpha = productT;
 
-    const preferredProductSize = clamp(Math.round(H * 0.038), 40, 60);
-    const minimumProductSize   = clamp(Math.round(H * 0.024), 26, 40);
-
-    const productFontSize = fitFontSize(
-      ctx, productName,
-      contentMaxW - scrimPadX * 2,
-      preferredProductSize, minimumProductSize,
-      fonts.product, fonts.productWeight
-    );
-
+    const productFontSize = clamp(Math.round(H * 0.038), 40, 60);
     ctx.font = `${fonts.productWeight} ${productFontSize}px "${fonts.product}"`;
-    const fittedProductName = fitText(
-      ctx, productName, contentMaxW - scrimPadX * 2
-    );
-    const productTextW = ctx.measureText(fittedProductName).width;
+    const productWrapW = contentMaxW - scrimPadX * 2;
+    const productLines = wrapLines(ctx, productName, productWrapW, 2);
+    const productLineH = Math.round(productFontSize * 1.14);
 
-    const productBoxW = productTextW + scrimPadX * 2;
-    const productBoxH = productFontSize * 1.14 + scrimPadY * 2;
+    let widestProductLine = 0;
+    for (const line of productLines) {
+      const w = ctx.measureText(line).width;
+      if (w > widestProductLine) widestProductLine = w;
+    }
+
+    const productBoxW = widestProductLine + scrimPadX * 2;
+    const productBoxH = productLines.length * productLineH + scrimPadY * 2;
     const productXOffset = (1 - productT) * -20;
     const productBoxX = leftPad + productXOffset;
     const productBoxY = cursorY;
@@ -205,15 +213,17 @@ module.exports = {
 
     ctx.fillStyle = rgba(colors.textPrimary, 1);
     ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
+    ctx.textBaseline = 'top';
     ctx.shadowColor = 'rgba(0,0,0,0.28)';
     ctx.shadowBlur = 8;
     ctx.shadowOffsetY = 2;
-    ctx.fillText(
-      fittedProductName,
-      productBoxX + scrimPadX,
-      productBoxY + productBoxH - scrimPadY - productFontSize * 0.18
-    );
+    for (let i = 0; i < productLines.length; i++) {
+      ctx.fillText(
+        productLines[i],
+        productBoxX + scrimPadX,
+        productBoxY + scrimPadY + i * productLineH
+      );
+    }
     ctx.restore();
 
     cursorY += productBoxH + rowGap;
@@ -284,31 +294,33 @@ module.exports = {
 
     cursorY += ratingBoxH + rowGap;
 
-    // ── 4. Quote with local scrim ──────────────────────────────────
+    // ── 4. Quote with local scrim (2-line wrap) ────────────────────
+    // Reserve a fixed 2-line block so the reviewer scrim below doesn't
+    // shift when the quote is short. Word-boundary wrap; ellipsis if
+    // still overflowing on the second line.
+    const QUOTE_LINES_FIXED = 2;
     if (meta.showQuote !== false && quote) {
       ctx.save();
       ctx.globalAlpha = quoteT;
 
-      const quoteMarkSize     = clamp(Math.round(H * 0.036), 40, 64);
-      const preferredQuoteSize = clamp(Math.round(H * 0.022), 22, 36);
-      const minimumQuoteSize   = clamp(Math.round(H * 0.016), 16, 26);
+      const quoteMarkSize = clamp(Math.round(H * 0.036), 40, 64);
+      const quoteFontSize = clamp(Math.round(H * 0.022), 22, 36);
+      const quoteLineH   = Math.round(quoteFontSize * 1.22);
 
       const quoteMarkGap = Math.round(W * 0.014);
       const quoteMarkW   = quoteMarkSize * 0.58;
       const maxQuoteTextW = contentMaxW - quoteMarkW - quoteMarkGap - scrimPadX * 2;
 
-      const quoteFontSize = fitFontSize(
-        ctx, quote, maxQuoteTextW,
-        preferredQuoteSize, minimumQuoteSize,
-        fonts.quote, `italic ${fonts.quoteWeight}`
-      );
-
       ctx.font = `italic ${fonts.quoteWeight} ${quoteFontSize}px "${fonts.quote}"`;
-      const fittedQuote = fitText(ctx, quote, maxQuoteTextW);
-      const quoteTextW = ctx.measureText(fittedQuote).width;
+      const quoteLines = wrapLines(ctx, quote, maxQuoteTextW, QUOTE_LINES_FIXED);
+      let widestQuoteLine = 0;
+      for (const line of quoteLines) {
+        const w = ctx.measureText(line).width;
+        if (w > widestQuoteLine) widestQuoteLine = w;
+      }
 
-      const quoteBoxW = quoteMarkW + quoteMarkGap + quoteTextW + scrimPadX * 2;
-      const quoteBoxH = Math.max(quoteMarkSize * 0.88, quoteFontSize * 1.22) + scrimPadY * 2;
+      const quoteBoxW = quoteMarkW + quoteMarkGap + Math.max(widestQuoteLine, maxQuoteTextW * 0.5) + scrimPadX * 2;
+      const quoteBoxH = Math.max(quoteMarkSize * 0.88, QUOTE_LINES_FIXED * quoteLineH) + scrimPadY * 2;
       const quoteXOffset = (1 - quoteT) * -20;
       const quoteBoxX = leftPad + quoteXOffset;
       const quoteBoxY = cursorY;
@@ -318,7 +330,7 @@ module.exports = {
         scrimRadius, rgba(colors.scrim, quoteScrimOpacity), scrimShadowBlur
       );
 
-      // Decorative quote mark
+      // Decorative opening quote mark, vertically centered in the box.
       ctx.font = `700 ${quoteMarkSize}px "${fonts.quote}"`;
       ctx.fillStyle = rgba(colors.quoteMark, 0.98);
       ctx.textAlign = 'left';
@@ -329,13 +341,18 @@ module.exports = {
         quoteBoxY + quoteBoxH / 2 + quoteMarkSize * 0.08
       );
 
+      // Quote lines, top-anchored inside the box.
       const quoteTextX = quoteBoxX + scrimPadX + quoteMarkW + quoteMarkGap;
+      const quoteTextY0 = quoteBoxY + scrimPadY;
       ctx.font = `italic ${fonts.quoteWeight} ${quoteFontSize}px "${fonts.quote}"`;
       ctx.fillStyle = rgba(colors.textPrimary, 1);
+      ctx.textBaseline = 'top';
       ctx.shadowColor = 'rgba(0,0,0,0.24)';
       ctx.shadowBlur = 7;
       ctx.shadowOffsetY = 1;
-      ctx.fillText(fittedQuote, quoteTextX, quoteBoxY + quoteBoxH / 2 + 1);
+      for (let i = 0; i < quoteLines.length; i++) {
+        ctx.fillText(quoteLines[i], quoteTextX, quoteTextY0 + i * quoteLineH);
+      }
 
       ctx.restore();
       cursorY += quoteBoxH + Math.round(H * 0.008);
@@ -442,11 +459,47 @@ function fitFontSize(ctx, text, maxWidth, preferredSize, minimumSize, fontFamily
 function fitText(ctx, text, maxWidth) {
   const value = String(text || '').trim();
   if (ctx.measureText(value).width <= maxWidth) return value;
-  let output = value;
+  const words = value.split(/\s+/);
+  while (words.length > 1) {
+    words.pop();
+    const candidate = words.join(' ') + '\u2026';
+    if (ctx.measureText(candidate).width <= maxWidth) return candidate;
+  }
+  let output = words[0] || value;
   while (output.length > 3 && ctx.measureText(`${output}\u2026`).width > maxWidth) {
     output = output.slice(0, -1);
   }
   return `${output.trim()}\u2026`;
+}
+
+// Wrap text into up to `maxLines` lines at word boundaries. The last
+// line is ellipsis-truncated (word-boundary) if the remaining words
+// don't fit.
+function wrapLines(ctx, text, maxWidth, maxLines = 2) {
+  const words = String(text || '')
+    .replace(/\n/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const test = line ? `${line} ${word}` : word;
+    if (ctx.measureText(test).width > maxWidth && line) {
+      lines.push(line);
+      line = word;
+      if (lines.length === maxLines - 1) {
+        const remaining = [line, ...words.slice(i + 1)].join(' ');
+        lines.push(fitText(ctx, remaining, maxWidth));
+        return lines;
+      }
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, maxLines);
 }
 
 function normalizeQuote(value) {
