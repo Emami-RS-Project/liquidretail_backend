@@ -164,32 +164,11 @@ function buildMotionBeat(subject) {
   );
 }
 
-function buildOverlayIntent({ concept, hasHeadline, hasCta }) {
-  const proofType = concept?.social_proof_type;
-  const overlayElements = [];
-
-  if (proofType && proofType !== 'none' && proofType !== 'absent') {
-    if (proofType === 'testimonial' || proofType === 'review') {
-      overlayElements.push('rotating customer review quotes animating in and out in a social-native style');
-    } else if (proofType === 'rating') {
-      overlayElements.push('animated star rating and review count callout');
-    } else if (proofType === 'creator') {
-      overlayElements.push('creator handle and social proof badge animating in');
-    } else if (proofType === 'stat') {
-      overlayElements.push('animated social proof statistics cycling in and out');
-    }
-  }
-  if (hasHeadline) overlayElements.push('animated headline text');
-  if (hasCta)      overlayElements.push('CTA button fading in');
-
-  const elementsList = overlayElements.length
-    ? overlayElements.join(', ')
-    : 'animated brand copy and a CTA';
-
-  return (
-    `COMPOSITING CONTEXT — this visual base will have animated text overlays composited on top after generation. ` +
-    `The overlay will include: ${elementsList}. ${archetypeNegativeSpaceGuidance(concept?.archetype)}`
-  );
+function buildOverlayIntent({ concept }) {
+  // The canonical brand-script overlay composites deterministic text
+  // downstream. Grok only needs to know: (a) text will land, (b) where
+  // to keep negative space open for it.
+  return `COMPOSITING CONTEXT: Text overlays composited downstream. ${archetypeNegativeSpaceGuidance(concept?.archetype)}`;
 }
 
 // Main export. Builds the motion-only video prompt for the AI model.
@@ -299,18 +278,12 @@ function buildVeoPrompt({
     );
   }
 
-  // NO TEXT — chrome composites every overlay downstream.
-  lines.push(buildOverlayIntent({
-    concept,
-    hasHeadline: !!(product?.title || brand?.tagline),
-    hasCta: true
-  }));
+  // NO TEXT — the brand-script overlay composites downstream.
+  lines.push(buildOverlayIntent({ concept }));
 
   lines.push(
-    `CRITICAL: DO NOT render any text, typography, logos, badges, watermarks, captions, or graphic chrome anywhere in the video. ` +
-    `The frame must be visually clean — product and scene only. ` +
-    `All text overlays, animated review quotes, headlines, CTAs, and logos are added in a separate compositing step. ` +
-    `Generating ANY text in the video itself will cause rejection.`
+    `CRITICAL: Do NOT render any text, typography, logos, badges, watermarks, or captions. ` +
+    `Product and scene only — all text is composited downstream. Any text in the video causes rejection.`
   );
 
   if (seedHasText) {
@@ -354,7 +327,48 @@ function buildVeoPrompt({
     `unrealistic bokeh, animated logos, magical highlights not in the seed, product colors differing from the reference.`
   );
 
-  return lines.join(' ');
+  // Atlas rejects prompts > 4096 bytes with a hard 400. Real prod
+  // traffic (long product descriptions, verbose storyboards, subject
+  // framing lines) can exceed even after the tightened blocks. When
+  // over budget, drop optional context lines in defined priority order.
+  // Directive blocks (fidelity / no-text / motion-limits / etc.) are
+  // never dropped — they're the load-bearing part of the prompt.
+  return enforceByteCap(lines);
+}
+
+const GROK_BYTE_CAP     = 4096;
+const GROK_BYTE_TARGET  = 4000;   // 96-byte safety margin
+const DROP_PRIORITY = [
+  /^Mood: /,
+  /^Vibe: /,
+  /^Brand essence: /,
+  /^Energy and feel: /,
+  /^Visual treatment: /,
+  /^Brand voice: /
+];
+
+function enforceByteCap(lines) {
+  let prompt = lines.join(' ');
+  let bytes  = Buffer.byteLength(prompt, 'utf8');
+  if (bytes <= GROK_BYTE_TARGET) return prompt;
+
+  const dropped = [];
+  for (const pattern of DROP_PRIORITY) {
+    if (bytes <= GROK_BYTE_TARGET) break;
+    const idx = lines.findIndex(l => pattern.test(l));
+    if (idx < 0) continue;
+    dropped.push(lines[idx].split(':')[0]);
+    lines.splice(idx, 1);
+    prompt = lines.join(' ');
+    bytes  = Buffer.byteLength(prompt, 'utf8');
+  }
+
+  if (bytes > GROK_BYTE_CAP) {
+    console.warn(`⚠️  veoPrompt: ${bytes} bytes still exceeds Grok cap (4096) after dropping [${dropped.join(', ')}] — Atlas will reject`);
+  } else if (dropped.length) {
+    console.log(`ℹ️  veoPrompt: dropped [${dropped.join(', ')}] to fit under ${GROK_BYTE_TARGET} bytes (final=${bytes})`);
+  }
+  return prompt;
 }
 
 module.exports = {
