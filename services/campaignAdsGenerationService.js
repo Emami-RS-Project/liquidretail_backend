@@ -50,6 +50,7 @@ const ProductMatchArtifact  = require('../models/ProductMatchArtifact');
 const Ad                    = require('../models/Ad');
 const registry                       = require('./templateRegistry');
 const { aspectRatioForPlatformFormat } = require('./veoPromptBuilder');
+const { rankByShotType }              = require('./shotTypeRank');
 
 // Cast a string/ObjectId to ObjectId. Required when querying
 // metadata.catalogProductId (Mixed type) — Mongoose doesn't auto-cast
@@ -1066,25 +1067,7 @@ async function seedsFromProduct(brandId, productId, opts = {}) {
 // Within a rank, prefer imageRole='hero' (the merchant's primary
 // listing). Returns a sorted array (best first); empty when input is.
 function rankCatalogMediasForHero(medias) {
-  if (!Array.isArray(medias) || !medias.length) return [];
-  const RANK = {
-    lifestyle:    1,
-    on_model:     2,
-    flat_lay:     3,
-    unknown:      4,
-    product_only: 5,
-    detail:       6,
-    packaging:    7
-  };
-  return medias.slice().sort((a, b) => {
-    const ra = RANK[a.classification?.shotType] ?? RANK.unknown;
-    const rb = RANK[b.classification?.shotType] ?? RANK.unknown;
-    if (ra !== rb) return ra - rb;
-    // Tiebreak: merchant's primary listing wins
-    const ahero = (a.metadata?.imageRole === 'hero') ? 0 : 1;
-    const bhero = (b.metadata?.imageRole === 'hero') ? 0 : 1;
-    return ahero - bhero;
-  });
+  return rankByShotType(medias);
 }
 
 // Back-compat shim — older callers (if any survive) still call

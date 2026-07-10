@@ -67,6 +67,7 @@ const registry               = require('./templateRegistry');
 const { hydrateMatch }       = require('./productMatchHydration');
 const { computeSlotBudgets } = require('./slotBudget');
 const { displayNormalizeTitle } = require('../utils/titleNormalize');
+const { extractSnippet }        = require('./quoteSnippetService');
 
 const GEMINI_MODEL    = process.env.GEMINI_SEARCH_MODEL || 'gemini-2.5-pro';
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -1276,6 +1277,45 @@ function normalizeQuote(q) {
   };
 }
 
+// Load brand-scoped Instagram/TikTok comments as quote-pool candidates.
+// Comments are ranked by likeCount desc then recency; filtered to a
+// reasonable length window (skip "🔥"-only replies and walls of text).
+// Returns an array of already-normalized quote objects — safe to
+// concatenate directly into the pool without a further normalizeQuote pass.
+async function loadBrandCommentsForQuotePool(ctx) {
+  try {
+    const brandId = ctx.media?.brandId || null;
+    if (!brandId) return [];
+    const comments = await Comment.find({ brandId })
+      .select('text authorUsername likeCount postedAt createdAt')
+      .lean();
+
+    const filtered = comments.filter(c => {
+      const t = String(c.text || '').trim();
+      return t.length >= 20 && t.length <= 300;
+    });
+
+    filtered.sort((a, b) => {
+      const la = a.likeCount ?? 0;
+      const lb = b.likeCount ?? 0;
+      if (la !== lb) return lb - la;
+      const ta = a.postedAt || a.createdAt || 0;
+      const tb = b.postedAt || b.createdAt || 0;
+      return new Date(tb).getTime() - new Date(ta).getTime();
+    });
+
+    return filtered.slice(0, 10).map(c => normalizeQuote({
+      text:        c.text,
+      author_name: c.authorUsername || 'Instagram commenter',
+      source:      'social_comment',
+      verified:    false
+    })).filter(Boolean);
+  } catch (err) {
+    console.warn(`quotePool: comment tier load failed (${err.message})`);
+    return [];
+  }
+}
+
 // Load categoryReviews for the ad's matched category. Uses the same
 // Category-collection first, categoryRef-then-categoryId fallback
 // that categoryReviewsService uses. Returns { quotes: [], ... } or
@@ -1496,15 +1536,16 @@ async function assembleInput(ctx, template, aspectRatio, options, derivation, pr
   const creatorMedia   = pickCreatorMedia(ctx);
   const ugcMedia       = creatorMedia;  // detect uploads == creator post asset
 
-  // Quote selection — 4-tier priority with universal scorer inside
+  // Quote selection — 6-tier priority with universal scorer inside
   // each tier so the STRONGEST candidate wins primary, not just the
   // first one. See scoreQuote() for the heuristic.
   //
   //   Tier 1: productReviews.quotes[]         (SKU-specific, highest trust)
   //   Tier 2: category.categoryReviews.quotes (same category on this brand)
   //   Tier 3: brand.brandReviews.quotes[]     (brand-level, always available)
-  //   Tier 4: LLM-authored derivation.quotes  (Gemini-generated)
-  //   Tier 5: synthesizeQuoteFromReviewSummary (last-resort blank prevention)
+  //   Tier 4: brand-scoped social comments    (Instagram / TikTok, real user language)
+  //   Tier 5: LLM-authored derivation.quotes  (Gemini-generated)
+  //   Tier 6: synthesizeQuoteFromReviewSummary (last-resort blank prevention)
   //
   // First non-empty tier's best-scoring quote wins the primary slot.
   // Everything else across all tiers goes to secondary_quotes so the
@@ -1513,16 +1554,19 @@ async function assembleInput(ctx, template, aspectRatio, options, derivation, pr
   const catReviewsForMatch = await loadCategoryReviewsForMatch(ctx.match);
   const tierCategory = (catReviewsForMatch?.quotes || []).map(normalizeQuote).filter(Boolean);
   const tierBrand    = (ctx.match?.brandReviews?.quotes || ctx.brand?.brandReviews?.quotes || []).map(normalizeQuote).filter(Boolean);
+  const tierComment  = await loadBrandCommentsForQuotePool(ctx);
   const tierLlm      = (Array.isArray(derivation.quotes) ? derivation.quotes : []).map(normalizeQuote).filter(Boolean);
 
   const pickedProduct  = pickStrongestQuote(tierProduct);
   const pickedCategory = pickedProduct  ? null : pickStrongestQuote(tierCategory);
   const pickedBrand    = pickedProduct || pickedCategory ? null : pickStrongestQuote(tierBrand);
-  const pickedLlm      = pickedProduct || pickedCategory || pickedBrand ? null : pickStrongestQuote(tierLlm);
-  let primaryQuote = pickedProduct || pickedCategory || pickedBrand || pickedLlm || null;
-  let quoteTier = pickedProduct ? 'product'
+  const pickedComment  = pickedProduct || pickedCategory || pickedBrand ? null : pickStrongestQuote(tierComment);
+  const pickedLlm      = pickedProduct || pickedCategory || pickedBrand || pickedComment ? null : pickStrongestQuote(tierLlm);
+  let primaryQuote = pickedProduct || pickedCategory || pickedBrand || pickedComment || pickedLlm || null;
+  let quoteTier = pickedProduct  ? 'product'
                 : pickedCategory ? 'category'
                 : pickedBrand    ? 'brand'
+                : pickedComment  ? 'comment'
                 : pickedLlm      ? 'llm'
                 :                  null;
 
@@ -1531,17 +1575,29 @@ async function assembleInput(ctx, template, aspectRatio, options, derivation, pr
     if (syn) { primaryQuote = normalizeQuote(syn); quoteTier = 'synth'; }
   }
 
+  // Snippet extraction — a ≤50-char punchy version of the winning quote,
+  // for the 3-second proof overlay in the vertical DR video template.
+  // Extractive; falls back to mechanical word-boundary truncation if the
+  // LLM is unavailable or returns something non-verbatim.
+  if (primaryQuote) {
+    const snippet = await extractSnippet(primaryQuote.text, {
+      brandId:   ctx.media?.brandId || null,
+      productId: ctx.match?.identification?.details?.catalogProductId || null
+    });
+    if (snippet && snippet !== primaryQuote.text) primaryQuote.snippet = snippet;
+  }
+
   // Observability — show tier counts + which tier won so a bad
   // primary_quote is diagnosable from Render logs without a DB query.
   console.log(
     `📐 quote pool[media=${media._id}] ` +
     `product=${tierProduct.length} category=${tierCategory.length} ` +
-    `brand=${tierBrand.length} llm=${tierLlm.length} ` +
-    `→ winner=${quoteTier || 'none'}${primaryQuote ? ` "${primaryQuote.text.slice(0, 60)}${primaryQuote.text.length > 60 ? '…' : ''}"` : ''}`
+    `brand=${tierBrand.length} comment=${tierComment.length} llm=${tierLlm.length} ` +
+    `→ winner=${quoteTier || 'none'}${primaryQuote ? ` "${(primaryQuote.snippet || primaryQuote.text).slice(0, 60)}${(primaryQuote.snippet || primaryQuote.text).length > 60 ? '…' : ''}"` : ''}`
   );
 
   // Secondaries: every other quote from every tier, minus the primary.
-  const allQuotes = [...tierProduct, ...tierCategory, ...tierBrand, ...tierLlm];
+  const allQuotes = [...tierProduct, ...tierCategory, ...tierBrand, ...tierComment, ...tierLlm];
   const secondaryQuotes = primaryQuote
     ? allQuotes.filter(q => q.text !== primaryQuote.text).map(q => ({ ...q }))
     : allQuotes.map(q => ({ ...q }));

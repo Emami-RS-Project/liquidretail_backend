@@ -5,24 +5,30 @@
 // One Director call per product per format consumes this; concepts then
 // declare which subset of the universe they actually use.
 //
-// Priority order (top → bottom; capped at topN):
-//   1. catalog_hero          — the rank-0 catalog Media (hero shot)
-//   2. catalog_alt           — every other catalog Media, ranked by
-//                              rankCatalogMediasForHero
-//   3. ugc_product_match     — UGC media that matched THIS SKU directly
-//                              (Tier 1)
-//   4. ugc_product_category  — UGC media that matched the product's class
-//                              (Tier 2; opt-in via includeCategoryMatched)
-//   5. ugc_brand_match       — UGC media attributed to the brand only
-//                              (Tier 3; opt-in via includeBrandMatched)
+// Ranking model: catalog and UGC are merged into a SINGLE pool and
+// ranked by classification.shotType (lifestyle → on_model → flat_lay →
+// product_only → detail → packaging → unknown). Source is preserved
+// as a role tag on each entry (catalog / ugc_product_match /
+// ugc_product_category / ugc_brand_match) for downstream diagnostics
+// and director-side provenance, but does NOT gate order. A UGC
+// lifestyle post ranks equal to a catalog lifestyle shot.
+//
+// Within a shot-type tier, tiebreaks in order:
+//   1. burned-text penalty (only when wantsVideo — Grok bakes any
+//      captions / stickers / watermarks into the generated video)
+//   2. imageRole='hero'          — merchant's primary listing (catalog only)
+//   3. platformStats.engagement  — likes + comments signal (UGC only)
+//   4. createdAt desc            — recency
+//
+// UGC tier 2 (product_category) and tier 3 (brand_match) are still
+// opt-in via `includeCategoryMatched` / `includeBrandMatched` flags,
+// and still have their cross-product guards (tier 2 drops different-SKU
+// posts, tier 3 drops any product-visible posts). Once eligible, they
+// join the merged pool and compete on shotType alongside catalog.
 //
 // `seedUniverseHash` is sha256 of the top-5 mediaIds joined. It's
 // surfaced for diagnostics ("seed universe drifted since last round")
-// — NOT part of the Director cache key (rounds are append-only by
-// roundIndex, not looked up by hash).
-//
-// This service has zero callers at land time. Phase A5 wires it into
-// expandWizardJob behind AI_CONCEPT_DRIVEN.
+// — NOT part of the Director cache key.
 
 const crypto   = require('crypto');
 const mongoose = require('mongoose');
@@ -30,22 +36,9 @@ const mongoose = require('mongoose');
 const Media                = require('../models/Media');
 const CatalogProduct       = require('../models/CatalogProduct');
 const ProductMatchArtifact = require('../models/ProductMatchArtifact');
+const { SHOT_TYPE_RANK: CATALOG_SHOT_RANK } = require('./shotTypeRank');
 
 const DEFAULT_TOP_N = 10;
-
-// Same shot-type ranking the legacy seedsFromProduct uses
-// (rankCatalogMediasForHero in campaignAdsGenerationService). Kept in
-// sync intentionally; if either copy moves to a shared helper module,
-// update both.
-const CATALOG_SHOT_RANK = {
-  lifestyle:    1,
-  on_model:     2,
-  flat_lay:     3,
-  unknown:      4,
-  product_only: 5,
-  detail:       6,
-  packaging:    7
-};
 
 // Content-nature gate — same threshold as campaignAdsGenerationService.
 // Drops time-bound posts (promotional / announcement) above 0.7
@@ -72,58 +65,36 @@ function hasVisibleUnmatchedProduct(media) {
   return !hasIdentifiedSpecificProduct(media);
 }
 
-function rankCatalogMedias(medias) {
-  if (!Array.isArray(medias) || !medias.length) return [];
-  return medias.slice().sort((a, b) => {
-    // Primary: shot-type quality (lifestyle > on_model > flat_lay > ...)
-    const ra = CATALOG_SHOT_RANK[a.classification?.shotType] ?? CATALOG_SHOT_RANK.unknown;
-    const rb = CATALOG_SHOT_RANK[b.classification?.shotType] ?? CATALOG_SHOT_RANK.unknown;
-    if (ra !== rb) return ra - rb;
-    // Secondary: adSuitability score DESC. When shot types tie (e.g. 4
-    // on_model shots for one product), the classifier's ad-suitability
-    // signal is the strongest available quality proxy — better than the
-    // Shopify hero/alt distinction, since Shopify heroes are frequently
-    // the plainest cutout images while more compelling styled shots
-    // land in the alt slots (observed on Pelagic: hero adSuit=3.7 while
-    // alts scored 7.3+).
-    const sa = a.adSuitability?.score ?? -1;
-    const sb = b.adSuitability?.score ?? -1;
-    if (sa !== sb) return sb - sa;
-    // Tertiary: hero over alt. Only used when shotType AND adSuit tie —
-    // preserves the previous behavior for the (rare) case where nothing
-    // else distinguishes two candidates.
-    const ahero = (a.metadata?.imageRole === 'hero') ? 0 : 1;
-    const bhero = (b.metadata?.imageRole === 'hero') ? 0 : 1;
-    return ahero - bhero;
-  });
-}
-
 function hasBurnedText(media) {
   return Array.isArray(media?.text) && media.text.length > 0;
 }
 
-function rankUgcMedias(medias, { wantsVideo = false } = {}) {
-  // adSuitability.score is the canonical 0..1 ranking signal; nulls
-  // sort last. Tiebreak by engagement signal when present.
-  //
-  // wantsVideo bias: when the run will feed Veo's image-to-video mode,
-  // text-burned candidates (captions / stickers / watermarks detected by
-  // OCR in the detect pipeline) get pushed BELOW text-free candidates
-  // regardless of score. Veo bakes overlay text into the generated
-  // video; once it's there we can't remove it. Text-free seeds always
-  // preferred; text-burned only used when nothing else exists.
-  return medias.slice().sort((a, b) => {
+// Rank a merged pool of catalog + UGC candidates by shotType, with
+// role-aware tiebreaks. Entries are wrapped { media, role } so we can
+// preserve source provenance without gating order on it.
+function rankMergedPool(entries, { wantsVideo = false } = {}) {
+  return entries.slice().sort((a, b) => {
+    const ra = CATALOG_SHOT_RANK[a.media.classification?.shotType] ?? CATALOG_SHOT_RANK.unknown;
+    const rb = CATALOG_SHOT_RANK[b.media.classification?.shotType] ?? CATALOG_SHOT_RANK.unknown;
+    if (ra !== rb) return ra - rb;
+
     if (wantsVideo) {
-      const ta = hasBurnedText(a) ? 1 : 0;
-      const tb = hasBurnedText(b) ? 1 : 0;
-      if (ta !== tb) return ta - tb;             // 0 (no text) wins
+      const ta = hasBurnedText(a.media) ? 1 : 0;
+      const tb = hasBurnedText(b.media) ? 1 : 0;
+      if (ta !== tb) return ta - tb;
     }
-    const sa = a.adSuitability?.score ?? -1;
-    const sb = b.adSuitability?.score ?? -1;
-    if (sa !== sb) return sb - sa;
-    const ea = a.platformStats?.engagement ?? -1;
-    const eb = b.platformStats?.engagement ?? -1;
-    return eb - ea;
+
+    const ahero = a.media.metadata?.imageRole === 'hero' ? 0 : 1;
+    const bhero = b.media.metadata?.imageRole === 'hero' ? 0 : 1;
+    if (ahero !== bhero) return ahero - bhero;
+
+    const ae = a.media.platformStats?.engagement ?? -1;
+    const be = b.media.platformStats?.engagement ?? -1;
+    if (ae !== be) return be - ae;
+
+    const at = a.media.createdAt ? new Date(a.media.createdAt).getTime() : 0;
+    const bt = b.media.createdAt ? new Date(b.media.createdAt).getTime() : 0;
+    return bt - at;
   });
 }
 
@@ -143,9 +114,7 @@ function projectEntry(media, role) {
     url:       media.fileUrl || null,
     fileType:  media.fileType || null,
     role,
-    metadata:  {
-      adSuitability: media.adSuitability?.score ?? null
-    }
+    metadata:  {}
   };
   if (role === 'catalog' || role === 'catalog_hero' || role === 'catalog_alt') {
     out.metadata.imageRole = media.metadata?.imageRole || null;
@@ -200,55 +169,35 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
   const topN = opts.topN ?? DEFAULT_TOP_N;
   const includeCategoryMatched = opts.includeCategoryMatched === true;
   const includeBrandMatched    = opts.includeBrandMatched    === true;
-  // wantsVideo flips rankUgcMedias' text-presence penalty — burned-in
-  // text candidates rank below text-free for Veo image-to-video seeds.
+  // wantsVideo activates the burned-text penalty in rankMergedPool —
+  // captions / stickers / watermarks push a candidate below text-free
+  // peers within its shot-type tier when Grok image-to-video is next.
   const wantsVideo = opts.wantsVideo === true;
 
-  const universe = [];
   const counts = {
     catalog: 0,
-    // Legacy keys kept zeroed for any caller that still reads them; the
-    // catalog count lives on `counts.catalog` now that hero/alt is flattened.
+    // Legacy keys kept zeroed for any caller that still reads them.
     catalog_hero: 0, catalog_alt: 0,
     ugc_product_match: 0, ugc_product_category: 0, ugc_brand_match: 0
   };
 
-  // ── Catalog (hero + alts) ──────────────────────────────────────
+  // ── Catalog media ──────────────────────────────────────────────
   const productOid = toObjectId(productId);
   const catalogMedias = productOid ? await Media.find({
     source: 'catalog-product',
     'metadata.catalogProductId': productOid
-  }).select('_id fileType fileUrl adSuitability classification metadata').lean() : [];
+  }).select('_id fileType fileUrl createdAt classification metadata text').lean() : [];
 
-  // Flatten the catalog-hero / catalog-alt split to a single `catalog`
-  // role. The deterministic "first ranked image = the hero" labeling was
-  // biasing the Director toward the same image every run for hero-anchored
-  // concepts (full_bleed_hero_bottom_panel, hero_quote_overlay, etc.).
-  // Ranked order is preserved so the array still presents the best photo
-  // first, but the LLM picks based on actual content rather than the label.
-  const rankedCatalog = rankCatalogMedias(catalogMedias);
-  rankedCatalog.forEach((m) => {
-    universe.push(projectEntry(m, 'catalog'));
-    counts.catalog++;
-  });
-
-  // ── UGC tier 1 (product_match) ─────────────────────────────────
-  // Read from the denormalized CatalogProduct.matchedMedia mirror —
-  // same source the legacy seedsFromProduct uses. PMA is authoritative
-  // but matchedMedia is fine for product_match (it IS PMA's projection
-  // for that tier).
+  // ── UGC candidate IDs by tier ──────────────────────────────────
   const product = await CatalogProduct.findById(productId).select('matchedMedia').lean();
   const mmEntries = Array.isArray(product?.matchedMedia) ? product.matchedMedia : [];
 
-  // Gather candidate UGC media IDs by tier.
   const tier1Ids = mmEntries
     .filter(mm => mm.matchTier === 'product_match')
     .map(mm => String(mm.mediaId));
   const tier2Ids = includeCategoryMatched
     ? mmEntries.filter(mm => mm.matchTier === 'product_category').map(mm => String(mm.mediaId))
     : [];
-
-  // ── UGC tier 3 (brand_match, opt-in) ───────────────────────────
   let tier3Ids = [];
   if (includeBrandMatched) {
     const brandMatches = await ProductMatchArtifact.find({
@@ -261,47 +210,45 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
   const allUgcIds = Array.from(new Set([...tier1Ids, ...tier2Ids, ...tier3Ids]));
   const ugcMedias = allUgcIds.length ? await Media.find({
     _id: { $in: allUgcIds }
-  }).select('_id fileType fileUrl source adSuitability classification metadata platformStats matchedProducts refinedProducts text').lean() : [];
+  }).select('_id fileType fileUrl source createdAt classification metadata platformStats matchedProducts refinedProducts text').lean() : [];
   const ugcById = new Map(ugcMedias.map(m => [String(m._id), m]));
 
-  // Tier 1 — apply content-nature gate; no cross-product guard (the
-  // post matched THIS SKU directly, so visibility checks are moot).
-  const tier1Medias = tier1Ids
-    .map(id => ugcById.get(id))
-    .filter(m => m && isContentNatureEligible(m));
-  rankUgcMedias(tier1Medias, { wantsVideo }).forEach(m => {
-    universe.push(projectEntry(m, 'ugc_product_match'));
+  // ── Assemble the merged pool with role tags ────────────────────
+  const pool = [];
+
+  catalogMedias.forEach(m => { pool.push({ media: m, role: 'catalog' }); counts.catalog++; });
+
+  // Tier 1 — apply content-nature gate; no cross-product guard.
+  tier1Ids.forEach(id => {
+    const m = ugcById.get(id);
+    if (!m || !isContentNatureEligible(m)) return;
+    pool.push({ media: m, role: 'ugc_product_match' });
     counts.ugc_product_match++;
   });
 
-  // Tier 2 — opt-in. Cross-product guard: drop posts that visibly
-  // show ANOTHER identified SKU (would contradict the seed product).
-  if (tier2Ids.length) {
-    const tier2Medias = tier2Ids
-      .map(id => ugcById.get(id))
-      .filter(m => m && isContentNatureEligible(m) && !hasIdentifiedSpecificProduct(m));
-    rankUgcMedias(tier2Medias, { wantsVideo }).forEach(m => {
-      universe.push(projectEntry(m, 'ugc_product_category'));
-      counts.ugc_product_category++;
-    });
-  }
+  // Tier 2 — cross-product guard: drop posts showing another identified SKU.
+  tier2Ids.forEach(id => {
+    const m = ugcById.get(id);
+    if (!m || !isContentNatureEligible(m) || hasIdentifiedSpecificProduct(m)) return;
+    pool.push({ media: m, role: 'ugc_product_category' });
+    counts.ugc_product_category++;
+  });
 
-  // Tier 3 — opt-in. Stricter guard: drop posts with ANY product
-  // visibility, identified or not (CPG label-mismatch risk).
-  if (tier3Ids.length) {
-    const tier3Medias = tier3Ids
-      .map(id => ugcById.get(id))
-      .filter(m => m
-        && isContentNatureEligible(m)
-        && !hasIdentifiedSpecificProduct(m)
-        && !hasVisibleUnmatchedProduct(m));
-    rankUgcMedias(tier3Medias, { wantsVideo }).forEach(m => {
-      universe.push(projectEntry(m, 'ugc_brand_match'));
-      counts.ugc_brand_match++;
-    });
-  }
+  // Tier 3 — stricter guard: drop posts with any product visibility.
+  tier3Ids.forEach(id => {
+    const m = ugcById.get(id);
+    if (!m
+        || !isContentNatureEligible(m)
+        || hasIdentifiedSpecificProduct(m)
+        || hasVisibleUnmatchedProduct(m)) return;
+    pool.push({ media: m, role: 'ugc_brand_match' });
+    counts.ugc_brand_match++;
+  });
 
-  // Cap to topN — priority order is preserved (catalog before UGC).
+  // ── Rank the merged pool by shotType, then project ─────────────
+  const ranked = rankMergedPool(pool, { wantsVideo });
+  const universe = ranked.map(x => projectEntry(x.media, x.role));
+
   const trimmed = universe.slice(0, topN);
   const seedUniverseHash = computeSeedUniverseHash(trimmed, 5);
 
@@ -311,8 +258,7 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
 module.exports = {
   buildSeededUniverse,
   computeSeedUniverseHash,
-  // Exposed for testing / reuse by adjacent services in later phases.
-  rankCatalogMedias,
-  rankUgcMedias,
+  // Exposed for testing / reuse by adjacent services.
+  rankMergedPool,
   isContentNatureEligible
 };
