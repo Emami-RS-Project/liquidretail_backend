@@ -7,15 +7,29 @@ const fs   = require('fs');
 const path = require('path');
 const SystemConfig = require('../models/SystemConfig');
 
-const CANONICAL_FEED_FILE      = path.join(__dirname, 'brandScripts', 'canonical.script.js');
-const CANONICAL_VERTICAL_FILE  = path.join(__dirname, 'brandScripts', 'top_scrim_editorial.script.js');
-const CANONICAL_LANDSCAPE_FILE = path.join(__dirname, 'brandScripts', 'local_scrim_landscape.script.js');
+const CANONICAL_FEED_FILE            = path.join(__dirname, 'brandScripts', 'canonical.script.js');
+const CANONICAL_VERTICAL_FILE        = path.join(__dirname, 'brandScripts', 'top_scrim_editorial.script.js');
+const CANONICAL_VERTICAL_DR_V1_FILE  = path.join(__dirname, 'brandScripts', 'canonical_dr_v1_vertical.script.js');
+const CANONICAL_LANDSCAPE_FILE       = path.join(__dirname, 'brandScripts', 'local_scrim_landscape.script.js');
+
+// Which file backs the vertical canonical. The DR-v1 template is the
+// new default when CANONICAL_DR_V1=true — a three-phase overlay (hook
+// / proof / product endcard) that pairs with the fixed lifestyle beat
+// template Grok now generates. The legacy top_scrim_editorial file
+// stays on disk so the operator can revert via DB override without a
+// redeploy.
+function verticalCanonicalFile() {
+  return String(process.env.CANONICAL_DR_V1 || '').toLowerCase() === 'true'
+    ? CANONICAL_VERTICAL_DR_V1_FILE
+    : CANONICAL_VERTICAL_FILE;
+}
 
 // One row per format: which DB field holds the override, which file
-// backs the fallback. Adding a fourth format is a one-line addition.
+// backs the fallback. `file` may be a resolver function when the file
+// picked depends on runtime state (env flag for vertical).
 const CANONICAL_TABLE = {
   feed:      { dbField: 'canonicalScript',          file: CANONICAL_FEED_FILE },
-  vertical:  { dbField: 'canonicalScriptVertical',  file: CANONICAL_VERTICAL_FILE },
+  vertical:  { dbField: 'canonicalScriptVertical',  file: verticalCanonicalFile },
   landscape: { dbField: 'canonicalScriptLandscape', file: CANONICAL_LANDSCAPE_FILE }
 };
 
@@ -40,10 +54,11 @@ async function loadCanonical(format) {
   if (dbValue && String(dbValue).trim()) {
     return { source: 'db', script: dbValue };
   }
+  const filePath = typeof entry.file === 'function' ? entry.file() : entry.file;
   try {
-    return { source: 'file', script: fs.readFileSync(entry.file, 'utf8') };
+    return { source: 'file', script: fs.readFileSync(filePath, 'utf8') };
   } catch (err) {
-    const e = new Error(`canonical script (${format}) not found in DB or at ${entry.file}: ${err.message}`);
+    const e = new Error(`canonical script (${format}) not found in DB or at ${filePath}: ${err.message}`);
     e.status = 500;
     throw e;
   }
@@ -101,7 +116,9 @@ module.exports = {
   setCanonicalScriptLandscape,
   CANONICAL_FEED_FILE,
   CANONICAL_VERTICAL_FILE,
+  CANONICAL_VERTICAL_DR_V1_FILE,
   CANONICAL_LANDSCAPE_FILE,
+  verticalCanonicalFile,
   // Deprecated alias for the feed-only constant — kept for callers that
   // still reference it. New code should use CANONICAL_FEED_FILE.
   CANONICAL_FILE: CANONICAL_FEED_FILE

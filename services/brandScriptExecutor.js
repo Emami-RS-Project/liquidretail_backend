@@ -119,11 +119,32 @@ async function renderBrandScript({ videoUrl, styleScript, meta, adId, brandName 
     const { width, height } = await probeImage(path.join(plateDir, plateFiles[0]));
     console.log(`🎨 brandScript[ad=${adId}]: extracted ${plateFiles.length} plates @ ${width}×${height} (${timings.extractMs}ms)`);
 
+    // 2b. Download the product-only image (endcard asset) into tempDir
+    // when meta carries a URL. Rewriting meta so the child only sees
+    // a local file path — the child runs with a scrubbed env and has
+    // no network access. Non-fatal: if download fails, canonical
+    // scripts degrade to a text-only endcard.
+    const runtimeMeta = { ...(meta || {}) };
+    if (runtimeMeta.productOnlyImageUrl) {
+      try {
+        const ext = extForImageUrl(runtimeMeta.productOnlyImageUrl);
+        const productImagePath = path.join(tempDir, `product_only${ext}`);
+        await downloadToFile(runtimeMeta.productOnlyImageUrl, productImagePath);
+        runtimeMeta.productOnlyImagePath = productImagePath;
+        console.log(`🎨 brandScript[ad=${adId}]: product-only image downloaded → ${path.basename(productImagePath)}`);
+      } catch (err) {
+        console.warn(`⚠️  brandScript[ad=${adId}]: product-only image download failed (${err.message}) — endcard will render text-only`);
+      }
+      // Never pass the URL to the sandboxed child; the child couldn't
+      // fetch it anyway and leaving it in meta is confusing at review.
+      delete runtimeMeta.productOnlyImageUrl;
+    }
+
     // 3. Run child renderer.
     t = Date.now();
     const childReport = await runChild({
       styleScript,
-      meta:      meta || {},
+      meta:      runtimeMeta,
       plateDir,
       outDir,
       fontsDir:  FONTS_DIR,
@@ -205,6 +226,16 @@ async function downloadToFile(url, filepath) {
     out.on('error', reject);
     res.data.on('error', reject);
   });
+}
+
+// Best-effort file extension picker for a URL — used when downloading
+// the product-only image so canvas.loadImage can dispatch on suffix.
+// Defaults to .jpg for anything ambiguous (Cloudinary /image/upload/
+// URLs may omit a trailing extension when transforms are chained).
+function extForImageUrl(url) {
+  const m = String(url || '').match(/\.(png|jpg|jpeg|webp|avif)(?:$|\?)/i);
+  if (m) return `.${m[1].toLowerCase()}`;
+  return '.jpg';
 }
 
 // ── Child process wrangling ────────────────────────────────────────
@@ -401,8 +432,24 @@ async function buildMetaForAd(ad, brand) {
   if (ad.productId) {
     try {
       const CatalogProduct = require('../models/CatalogProduct');
-      catalogProduct = await CatalogProduct.findById(ad.productId).select('title description price rating reviewCount').lean();
+      catalogProduct = await CatalogProduct.findById(ad.productId).select('title description price rating reviewCount imageUrl').lean();
     } catch { /* optional */ }
+  }
+
+  // Catalog media list — used by pickProductOnlyUrl to resolve the
+  // product-only image for the endcard overlay. Same shape the
+  // atlasVideoService pulls when building Grok references.
+  let productOnlyImageUrl = null;
+  if (ad.productId) {
+    try {
+      const Media = require('../models/Media');
+      const catalogMedias = await Media.find({
+        source: 'catalog-product',
+        'metadata.catalogProductId': ad.productId
+      }).select('_id fileUrl classification metadata').lean();
+      const { pickProductOnlyUrl } = require('./atlasVideoService');
+      productOnlyImageUrl = pickProductOnlyUrl(catalogMedias, catalogProduct);
+    } catch { /* optional — endcard degrades to text-only */ }
   }
 
   // LayoutInputArtifact wraps its data under `.input` (that's what
@@ -433,6 +480,24 @@ async function buildMetaForAd(ad, brand) {
 
   const badgeText = badges[0] || 'Bestseller';
 
+  // Promo callout — DR-v1 endcard's optional pill at 0:06-0:08. Uses
+  // the same priority ladder as deliveryLine but leaves it null (not
+  // "Ships free") when no promotional signal exists, so the canonical
+  // renderer can skip the pill entirely.
+  const promoText =
+       ad.copy?.offer_text
+    || li?.cta?.offer_text
+    || li?.copy?.highlight_text
+    || null;
+
+  // Punchy ≤50-char quote snippet extracted upstream by quoteSnippetService.
+  // Falls back to the full quote text when no snippet exists (older
+  // artifacts pre-snippet, or the winning quote was already short).
+  const quoteSnippet =
+       li?.social_proof?.primary_quote?.snippet
+    || li?.social_proof?.primary_quote?.text
+    || null;
+
   return {
     // ── Text used by the canonical renderer + most custom scripts ──
     brandName:          brand?.name || null,
@@ -458,6 +523,17 @@ async function buildMetaForAd(ad, brand) {
     reviewsText:        reviewCount != null ? `${reviewCount} review${reviewCount === 1 ? '' : 's'}`
                        : '53 reviews',
     likes:              li?.performance?.engagement?.likes || 572,
+
+    // ── DR-v1 template fields (canonical_dr_v1_vertical.script.js) ─
+    // quoteSnippet is a punchy ≤50-char version of `quote` for the
+    // 3-second proof overlay. productOnlyImageUrl is the endcard
+    // image the parent downloads to a local file and re-exposes as
+    // productOnlyImagePath before spawning the child. promoText is
+    // null when no promotional signal exists — the canonical script
+    // skips the pill entirely in that case.
+    quoteSnippet,
+    promoText,
+    productOnlyImageUrl,
 
     // ── Theme (canonical path) ─────────────────────────────────────
     // Colors + font families that Claude / an operator picks per
