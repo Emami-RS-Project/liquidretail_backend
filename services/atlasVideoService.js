@@ -176,68 +176,49 @@ function cropImageUrlForAspect(originalUrl, aspectRatio) {
 
 // ── Reference image set ──────────────────────────────────────────────
 //
-// Grok accepts up to 7 reference images and weights earlier ones more
-// heavily as the "scene anchor". Pack order:
-//   1. Seed media (Director's media_picks[0])           — position 0
-//   2. Up to 2 on_model catalog shots                   — positions 1-2
-//   3. Up to 2 product_only catalog shots               — positions 3-4
-//   4. Up to 2 detail catalog shots                     — positions 5-6
+// Minimalist 2-reference stack for Grok:
+//   Position 0: seed media (scene anchor — Director's pick, weights heaviest)
+//   Position 1: product_only image (fidelity anchor — locks the SKU's look)
 //
-// Total up to 7 (1 seed + 6 catalog). The 3-category × 2 spread gives
-// the model a person-wearing-it view, a clean-form view, and a
-// closeup — enough to lock product fidelity without softening the seed's
-// scene control. Categories with fewer than 2 available shots contribute
-// what they have; empty categories are skipped.
-//
-// Falls back to CatalogProduct.imageUrl (the standalone product image
-// tied to the catalog doc) when catalog media docs aren't available —
-// defensive for products that haven't been through the detect pipeline.
-const REF_SHOT_TYPES     = ['on_model', 'product_only', 'detail'];
-const REF_PER_SHOT_TYPE  = 2;
+// Rationale: earlier stacks (up to 7 refs) diluted Grok's position-0
+// signal and occasionally caused the model to blend shot-type variants
+// into the generated video. A clean seed + one product-fidelity anchor
+// gives Grok exactly what it needs: what scene to animate, and what
+// the product looks like inside that scene. See the PR-2 canonical DR
+// design for the wider motivation.
 
-function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio, max = 7 }) {
+// Return the fileUrl for the product-only reference — the first
+// product_only-classified catalog Media (already ordered by recency
+// upstream), falling back to CatalogProduct.imageUrl when no catalog
+// Media is classified. Returns null when neither is available; caller
+// logs and degrades gracefully (seed-only stack).
+function pickProductOnlyUrl(catalogMedias, product) {
+  const first = (catalogMedias || []).find(
+    m => m?.classification?.shotType === 'product_only' && m?.fileUrl
+  );
+  if (first?.fileUrl) return first.fileUrl;
+  if (product?.imageUrl) return product.imageUrl;
+  return null;
+}
+
+function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio }) {
   const urls = [];
-  const seenUrls    = new Set();
-  const seenMediaIds = new Set();
+  const seen = new Set();
 
-  // 1. Seed media (scene anchor — Grok weights position 0 most)
-  const seedSource = media?.fileUrl;
+  const seedSource  = media?.fileUrl;
   const seedCropped = cropImageUrlForAspect(seedSource, aspectRatio);
   if (seedCropped) {
     urls.push(seedCropped);
-    if (seedSource) seenUrls.add(seedSource);
-    if (media?._id) seenMediaIds.add(String(media._id));
+    if (seedSource) seen.add(seedSource);
   }
 
-  // 2. Category-diversified catalog refs. Iterate categories in the
-  //    prompt-friendly order (person → form → detail). Within a category,
-  //    higher adSuitability wins.
-  for (const shotType of REF_SHOT_TYPES) {
-    if (urls.length >= max) break;
-    const bucket = catalogMedias
-      .filter(m => m.classification?.shotType === shotType)
-      .filter(m => m.fileUrl && !seenUrls.has(m.fileUrl) && !seenMediaIds.has(String(m._id)))
-      .sort((a, b) => (b.adSuitability?.score ?? -1) - (a.adSuitability?.score ?? -1))
-      .slice(0, REF_PER_SHOT_TYPE);
-    for (const m of bucket) {
-      if (urls.length >= max) break;
-      const cropped = cropImageUrlForAspect(m.fileUrl, aspectRatio);
-      if (!cropped) continue;
-      urls.push(cropped);
-      seenUrls.add(m.fileUrl);
-      seenMediaIds.add(String(m._id));
-    }
-  }
-
-  // 3. Fallback: standalone CatalogProduct.imageUrl. Only used when the
-  //    catalog-media path yielded nothing beyond the seed — otherwise
-  //    the shot-type-diverse set is strictly richer.
-  if (urls.length < 2 && product?.imageUrl && !seenUrls.has(product.imageUrl)) {
-    const cropped = cropImageUrlForAspect(product.imageUrl, aspectRatio);
+  const productOnlyUrl = pickProductOnlyUrl(catalogMedias, product);
+  if (productOnlyUrl && !seen.has(productOnlyUrl)) {
+    const cropped = cropImageUrlForAspect(productOnlyUrl, aspectRatio);
     if (cropped) urls.push(cropped);
   }
 
-  return urls.slice(0, max);
+  return urls;
 }
 
 // ── Polling ───────────────────────────────────────────────────────────
@@ -585,6 +566,26 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     productId: ad.productId || null
   });
 
+  // Build the reference stack first so buildVeoPrompt knows whether a
+  // product-fidelity anchor actually landed (rare gap: no product_only
+  // catalog Media AND no CatalogProduct.imageUrl).
+  const imageUrls = buildReferenceImages({
+    media, product, catalogMedias, aspectRatio
+  });
+  if (!imageUrls.length) throw new Error(`atlasVideo[ad=${ad._id}]: no reference images available`);
+
+  const hasProductAnchor = imageUrls.length >= 2;
+  if (!hasProductAnchor) {
+    console.warn(
+      `⚠️  atlasVideo[ad=${ad._id}]: no product_only reference found ` +
+      `(catalog product_only Media missing AND CatalogProduct.imageUrl null) — shipping with seed only`
+    );
+  }
+  console.log(
+    `🎬 atlasVideo[ad=${ad._id}]: model=${model} aspect=${aspectRatio} ` +
+    `refs=${imageUrls.length} (seed + ${hasProductAnchor ? 'product_only' : 'no-anchor'}) submitting...`
+  );
+
   // Motion-only prompt — the canonical brand-script overlay composites
   // all on-screen text downstream from ad.copy + LayoutInputArtifact.
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
@@ -594,32 +595,10 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     sourceMedia:  lpSrcMedia,
     aspectRatio,
     seedHasText,
-    hasProductReference: !!product?.imageUrl,
+    hasProductReference: hasProductAnchor,
     operatorPrompt,
     storyboard
   });
-
-  const imageUrls = buildReferenceImages({
-    media, product, catalogMedias, aspectRatio, max: caps.maxReferenceImages
-  });
-  if (!imageUrls.length) throw new Error(`atlasVideo[ad=${ad._id}]: no reference images available`);
-
-  // Log the shot-type breakdown for post-hoc auditing — helps confirm
-  // the diversified ref set is populating buckets as expected.
-  const refBreakdown = { seed: 1, on_model: 0, product_only: 0, detail: 0, fallback: 0 };
-  const seedUrl = media?.fileUrl ? cropImageUrlForAspect(media.fileUrl, aspectRatio) : null;
-  for (const url of imageUrls) {
-    if (url === seedUrl) continue;
-    const cm = catalogMedias.find(m => cropImageUrlForAspect(m.fileUrl, aspectRatio) === url);
-    if (!cm) { refBreakdown.fallback++; continue; }
-    const st = cm.classification?.shotType;
-    if (st === 'on_model' || st === 'product_only' || st === 'detail') refBreakdown[st]++;
-    else refBreakdown.fallback++;
-  }
-  console.log(
-    `🎬 atlasVideo[ad=${ad._id}]: model=${model} aspect=${aspectRatio} ` +
-    `refs=${imageUrls.length} (${JSON.stringify(refBreakdown)}) submitting...`
-  );
 
   const t0 = Date.now();
   const predictionId = await submitGeneration({ model, prompt, imageUrls, aspectRatio, caps });
@@ -689,5 +668,6 @@ module.exports = {
   capsFor,
   imageDimsForAspect,
   cropImageUrlForAspect,
-  buildReferenceImages
+  buildReferenceImages,
+  pickProductOnlyUrl
 };

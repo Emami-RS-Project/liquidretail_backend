@@ -1,14 +1,15 @@
-// GPT-composed motion director for an 8-second AI-generated video ad.
-// Emits a concise script — camera + audio + beats + vibe — that feeds
-// the Grok image-to-video prompt via veoPromptBuilder.
+// GPT-composed variance knobs for the fixed 8-second lifestyle video
+// template. Emits camera + audio + vibe strings that veoPromptBuilder
+// splices into the fixed beat template. Only these three per-ad
+// variance fields flow to Grok; beat structure itself is fixed.
 //
 // Text overlays are NOT choreographed here. The canonical brand-script
 // overlay (brandScriptExecutor + brandScripts/*.script.js) handles all
 // on-screen text using ad.copy + LayoutInputArtifact + Brand.styleTheme.
 //
 // Off by default — flip VEO_USE_GPT_STORYBOARD=true to enable. When off
-// or the GPT call fails, veoPromptBuilder falls back to its hardcoded
-// 3-beat template so the render path stays unblocked.
+// or the GPT call fails, veoPromptBuilder falls back to safe defaults
+// for camera / audio / vibe so the render path stays unblocked.
 
 const OpenAI = require('openai');
 const { trackLlmCall } = require('./costTracker');
@@ -18,7 +19,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const MODEL_ID    = process.env.VEO_STORYBOARD_MODEL_ID || 'gpt-4.1';
 const TEMPERATURE = 0.85;
-const MAX_TOKENS  = 700;
+const MAX_TOKENS  = 200;
 
 function enabled() {
   return String(process.env.VEO_USE_GPT_STORYBOARD || '').toLowerCase() === 'true';
@@ -30,7 +31,7 @@ const RESPONSE_SCHEMA = {
   schema: {
     type: 'object',
     additionalProperties: false,
-    required: ['camera', 'audio', 'vibe', 'beats'],
+    required: ['camera', 'audio', 'vibe'],
     properties: {
       camera: {
         type:        'string',
@@ -38,25 +39,11 @@ const RESPONSE_SCHEMA = {
       },
       audio: {
         type:        'string',
-        description: 'One line of audio direction — natural ambience + optional musical or sonic cue. No voices, no dialogue, no narration.'
+        description: 'One line of audio direction — natural ambience + optional subtle sonic cue. No voices, no dialogue, no narration, no music with vocals.'
       },
       vibe: {
         type:        'string',
         description: '2–4 words capturing the energy — e.g. "editorial, warm, quiet".'
-      },
-      beats: {
-        type:     'array',
-        minItems: 2,
-        maxItems: 4,
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['time', 'description'],
-          properties: {
-            time:        { type: 'string', description: 'Time range like "0:00–0:03". Beats span 0:00 to 0:08. Each beat MUST have a non-zero duration (end > start by at least 1 second).' },
-            description: { type: 'string', description: 'Sensory motion direction. Present-tense, physical, evocative — describe what the camera does, what the subject does, what the light does. Example: "Slow push-in begins; petals stir softly as if touched by a light breeze, warm late-morning light drifts across the blooms" rather than "Establish bouquet, gentle motion." Avoid clinical verbs like "showcase" / "highlight" / "establish." No text-overlay direction — motion only.' }
-          }
-        }
       }
     }
   }
@@ -64,21 +51,13 @@ const RESPONSE_SCHEMA = {
 
 function buildSystemPrompt() {
   return [
-    'You are a motion director scripting an 8-second AI-generated product video ad. Your script feeds Grok\'s image-to-video model as MOTION direction — camera, subject motion, light, and audio ambience. Text and graphic overlays are composited downstream by a separate system; you do not choreograph any copy.',
+    'You are directing the per-ad variance knobs for an 8-second AI-generated lifestyle product video. The beat structure is FIXED downstream (a lifestyle arc that stills into a hold at 0:06 for an endcard overlay); you pick the camera move, the audio ambience, and a short vibe descriptor.',
     '',
     'HARD RULES:',
-    '- Single continuous shot. No cuts. Total runtime 8 seconds. beats[] span 0:00–0:08.',
-    '- Motion stays subtle — premium product video, not a dynamic montage. Over-driving motion warps products.',
-    '- Audio: ambience + at most one subtle musical/sonic cue. NEVER voices, dialogue, or narration.',
+    '- Single continuous shot. No cuts. Total runtime 8 seconds.',
+    '- Motion stays subtle — this is premium lifestyle, not a montage.',
+    '- Audio: ambience + at most one subtle sonic cue. NEVER voices, dialogue, or narration.',
     '- Camera is ONE move for the full shot.',
-    '- Every beat MUST have a non-zero duration. A "0:08–0:08" slot is invalid.',
-    '',
-    'MOTION BEAT WRITING (beats[]):',
-    '- Sensory, physical, present-tense. Describe what the camera does, what the subject does, what the light does.',
-    '- Good: "Slow push-in begins; petals stir softly as if touched by a light breeze, warm late-morning light drifts across the blooms; faint dust motes float in the rim light."',
-    '- Bad:  "Establish bouquet, gentle motion."  (clinical, lifeless)',
-    '- Avoid: "showcase", "highlight", "feature", "demonstrate" — these are deck verbs, not direction.',
-    '- A typical arc: an opening hero beat → 1–2 evolving beats → a settling beat that lands at 0:08.',
     '',
     'OUTPUT a JSON object matching the provided schema.'
   ].join('\n');
@@ -203,8 +182,8 @@ async function generateStoryboard({
     const parsed = JSON.parse(raw);
     const elapsedMs = Date.now() - t0;
     console.log(
-      `🎬 veoStoryboard: camera="${parsed.camera}" beats=${parsed.beats?.length || 0} ` +
-      `vibe="${parsed.vibe}" took=${elapsedMs}ms`
+      `🎬 veoStoryboard: camera="${parsed.camera}" vibe="${parsed.vibe}" ` +
+      `audio="${(parsed.audio || '').slice(0, 40)}${(parsed.audio || '').length > 40 ? '…' : ''}" took=${elapsedMs}ms`
     );
     return parsed;
   } catch (err) {

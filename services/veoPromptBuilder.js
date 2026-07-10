@@ -6,10 +6,12 @@
 // (brandScriptExecutor + brandScripts/*.script.js), which reads its
 // text from ad.copy + LayoutInputArtifact + Brand.styleTheme.
 //
-// When veoStoryboardService is enabled it directs motion here: this
-// builder consumes storyboard.beats[] + camera + audio + vibe. When
-// the storyboard is null this builder falls back to a hardcoded
-// 3-beat template.
+// Beat structure is FIXED — a canonical 3-part lifestyle arc (0-3s
+// lifestyle motion, 3-6s continued motion, 6-8s stills into a hold
+// for the endcard overlay). veoStoryboardService still directs
+// camera / audio / vibe per-ad for variance; storyboard.beats is
+// no longer consumed. When the storyboard is null, safe defaults
+// cover camera / audio / vibe.
 
 // Aspect-ratio resolution lives in services/platformFormats.js — the
 // canonical capability table for every platformFormat. Re-exported here
@@ -143,27 +145,6 @@ function buildSubjectFramingInstruction(subject) {
   return `Keep the ${label}${posText} clearly visible and well-lit for the full 8 seconds.`;
 }
 
-// Generates the 0:02–0:05 motion beat. Person subjects get a natural
-// micro-action; product-only scenes get physics-based sway.
-function buildMotionBeat(subject) {
-  const combined = `${subject?.label || ''} ${subject?.richDesc || ''}`.toLowerCase();
-  const isPerson  = ['person', 'florist', 'model', 'creator', 'wearing', 'holding', 'smiling']
-    .some(kw => combined.includes(kw));
-
-  if (isPerson) {
-    return (
-      `0:02–0:05: Gentle organic motion. The product elements sway slightly with realistic wind physics. ` +
-      `The ${subject.label} makes extremely subtle hand or body micro-movements — ` +
-      `as if naturally shifting or making a small adjustment — remaining calm and anchored in the composition.`
-    );
-  }
-
-  return (
-    `0:02–0:05: Subtle organic motion — gentle natural sway and surface contact with realistic physics, ` +
-    `slight simulated handheld Y/X axis micro-drift.`
-  );
-}
-
 function buildOverlayIntent({ concept }) {
   // The canonical brand-script overlay composites deterministic text
   // downstream. Grok only needs to know: (a) text will land, (b) where
@@ -179,11 +160,10 @@ function buildOverlayIntent({ concept }) {
 // data). sourceMedia is layoutInput.input.source_media from the detect
 // pipeline (richer bbox data when available). Both are optional.
 //
-// storyboard (optional) — structured { camera, audio, beats[], vibe } from
-// veoStoryboardService. When provided, the camera move + time-coded beats
-// section is rendered from the storyboard instead of the hardcoded
-// 3-beat template. When null, behavior falls back to the hardcoded
-// 3-beat template.
+// storyboard (optional) — structured { camera, audio, vibe } from
+// veoStoryboardService. Only these three fields flow into the prompt
+// (per-ad camera / audio / vibe variance). The beat structure itself
+// is fixed. When storyboard is null, safe defaults cover all three.
 function buildVeoPrompt({
   concept,
   brand,
@@ -247,36 +227,28 @@ function buildVeoPrompt({
   const subjectLine = buildSubjectFramingInstruction(subject);
   if (subjectLine) lines.push(subjectLine);
 
-  if (storyboard && Array.isArray(storyboard.beats) && storyboard.beats.length > 0) {
-    // GPT-composed storyboard. Camera + beats + audio are all directed
-    // per-ad rather than locked to the legacy 3-beat template.
-    const beatLines = storyboard.beats
-      .map(b => `${b.time}: ${b.description}`)
-      .join(' ');
-    lines.push(`8-second storyboard: ${beatLines}`);
-    lines.push(
-      `Camera: ${storyboard.camera}. ` +
-      `Natural editorial color, true-to-scene white balance, sensor-level photoreal detail. ` +
-      `No commercial LUT, no upscaled hyperrealism, no cinematic gloss that departs from the reference.`
-    );
-    if (storyboard.vibe)  lines.push(`Vibe: ${storyboard.vibe}.`);
-    if (storyboard.audio) lines.push(`AUDIO: ${storyboard.audio}.`);
-  } else {
-    const motionBeat = buildMotionBeat(subject);
-    lines.push(
-      `8-second storyboard: ` +
-      `0:00–0:02: Establish the scene exactly as composed in the reference image — soft diffused natural light, ` +
-      `shallow natural depth of field, clean background exactly as shown. ` +
-      motionBeat + ` ` +
-      `0:05–0:08: The camera executes a slow, elegant z-axis forward push-in with micro-handheld Y/X axis drift ` +
-      `and organic jitter, settling into a clean hold with razor-sharp focus on the primary subject.`
-    );
-    lines.push(
-      `Camera: slow z-axis push-in with organic handheld micro-movements. ` +
-      `Natural editorial color, true-to-scene white balance, sensor-level photoreal detail. ` +
-      `No commercial LUT, no upscaled hyperrealism, no cinematic gloss that departs from the reference.`
-    );
-  }
+  // Fixed 3-part lifestyle arc — the canonical DR video template.
+  // Lifestyle motion for the first 6 seconds; the frame stills into a
+  // hold at 0:06 so the brand-script endcard overlay can dominate. GPT
+  // storyboard still directs camera / audio / vibe per-ad (variety
+  // knob); the beat structure is fixed.
+  lines.push(
+    `8-second storyboard: ` +
+    `0:00–0:03: Lifestyle motion of the scene in the reference image — subtle organic movement, natural light play, subject anchored. ` +
+    `0:03–0:06: The lifestyle continues; light and subject settle slightly, the camera holds steady. ` +
+    `0:06–0:08: The scene decays into a calm still frame — motion fades to a hold, ready for a downstream endcard overlay.`
+  );
+
+  const camera = storyboard?.camera || 'slow dolly-in with subtle organic handheld micro-movements';
+  const audio  = storyboard?.audio  || 'natural ambience matching the scene; no music, no dialogue';
+  const vibe   = storyboard?.vibe   || null;
+  lines.push(
+    `Camera: ${camera}. ` +
+    `Natural editorial color, true-to-scene white balance, sensor-level photoreal detail. ` +
+    `No commercial LUT, no upscaled hyperrealism, no cinematic gloss that departs from the reference.`
+  );
+  if (vibe) lines.push(`Vibe: ${vibe}.`);
+  lines.push(`AUDIO: ${audio}.`);
 
   // NO TEXT — the brand-script overlay composites downstream.
   lines.push(buildOverlayIntent({ concept }));
@@ -298,15 +270,21 @@ function buildVeoPrompt({
     `natural skin texture, real body proportions. No extra digits, warped features, or impossible angles. ` +
     `If the reference shows a person, preserve their face, hair, skin tone, and identity throughout — no morphing mid-shot.`
   );
+  // Reference position 1 is a product-only shot of the exact catalog SKU,
+  // guaranteed by buildReferenceImages (falls back to CatalogProduct.imageUrl
+  // when catalog Media lacks a product_only classification). hasProductReference
+  // reflects whether that guarantee held — false only when both sources are
+  // missing (rare data hole; logged as a warning upstream).
   if (hasProductReference) {
     lines.push(
-      `PRODUCT FIDELITY: A separate REFERENCE IMAGE of the catalog product is attached. It is the ABSOLUTE source of truth ` +
-      `for shape, color, label text, packaging, and proportions. If the scene image and this reference disagree, the REFERENCE wins. ` +
-      `Do NOT reinterpret, shift colors, or generate a similar-but-different variant — render exactly what the reference shows.`
+      `PRODUCT FIDELITY: Reference image #2 (position 1) is a product-only shot of the exact catalog SKU. ` +
+      `It is the ABSOLUTE source of truth for shape, color, label text, packaging, and proportions. ` +
+      `If the scene image (position 0) and this product reference disagree on any product detail, the PRODUCT reference wins. ` +
+      `Do NOT reinterpret, shift colors, or generate a similar-but-different variant — render exactly what the product reference shows.`
     );
   } else {
     lines.push(
-      `PRODUCT FIDELITY: The product in the reference image is the actual catalog product. ` +
+      `PRODUCT FIDELITY: The product visible in the scene image is the catalog product. ` +
       `Preserve its exact shape, color, label text, packaging, and proportions throughout. ` +
       `Do NOT reinterpret the label, shift colors, or generate a similar-but-different variant.`
     );
