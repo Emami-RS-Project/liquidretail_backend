@@ -34,14 +34,16 @@ const N_CANDIDATES_DEFAULT = 2;        // HTML output is ~3-5× longer than JSON
 const MAX_TOKENS          = 12000;     // animated video-overlay HTML with cycling reviews can exceed 8K chars
 const HTML_SCHEMA_VERSION = '2.4.0';  // 2.4: video-overlay animation unlock — CSS @keyframes allowed, cycling reviews, 5s timing context. MAX_TOKENS raised to 12000. 2.3: JSON Gen retirement (AI_LAYOUT_DIRECT_HTML flag). Response schema gains a `copy_picks` object so HTML Gen owns the final headline/eyebrow/cta/subheadline strings; persisted on AiCanvasArtifact.copyPicks for downstream consumers (Image Ref) that previously read pickCopyFromSpec(canvasSpec). Also handles canvasSpec=null gracefully: videoMode derives from sourceMedia.fileType alone, mediaRect defaults to the full canvas (so video bleeds edge-to-edge when no zones[] is available to declare a slot rect). 2.2: platform-format-aware Phase 4 — passes platformFormat into validateCandidate so the new safe_area_violation HARD rule catches chrome that intrudes Reels reserved bands. Pairs with the JSON Gen's FORMAT CONSTRAINTS section (SPEC 3.1.0): two LLMs + one validator all reasoning in the same safe-area pixel space. 2.1: HTML Gen format-aware prompt (Phase 3). 2.0: video-overlay prompt rolled back to pipeline fundamentals.
 
-// Rewrite a Cloudinary /video/upload/ URL to a picked-frame still JPEG
-// so it's safe to embed as an <img> source. Non-video URLs and non-
-// Cloudinary videos pass through unchanged (Atlas / external hosts).
+// Rewrite a Cloudinary /video/upload/ URL to a still JPEG so it's
+// safe to embed as an <img> source. Uses so_2 (2 seconds in) instead
+// of so_auto — so_auto is the AI-Preview add-on and 400s on accounts
+// without it. so_2 skips typical intro flashes and works on any plan.
+// Non-video URLs and non-Cloudinary videos pass through unchanged.
 function toStillIfVideo(url) {
   if (!url || typeof url !== 'string') return url;
   if (!url.includes('/video/upload/')) return url;
   return url
-    .replace('/video/upload/', '/video/upload/so_auto,f_jpg,q_auto:good/')
+    .replace('/video/upload/', '/video/upload/so_2,f_jpg,q_auto:good/')
     .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2');
 }
 

@@ -513,7 +513,7 @@ async function renderOne(run, job, adId, index, renderToken) {
       // renderUrl/posterUrl/cloudinaryPublicId on success.
       const fallbackPosterUrl = veoVideoUrl?.includes('/video/upload/')
         ? veoVideoUrl
-            .replace('/video/upload/', '/video/upload/so_auto,f_jpg,q_auto:good/')
+            .replace('/video/upload/', '/video/upload/so_2,f_jpg,q_auto:good/')
             .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2')
         : null;
       await Ad.updateOne(

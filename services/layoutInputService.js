@@ -2225,12 +2225,13 @@ function pickRafflePrizeMedia(raffle, aspectRatio) {
       };
     }
   }
-  // No crops — raw URL. For video, also expose a Cloudinary picked-frame
-  // poster (so_auto — smart poster instead of literal frame 0 which is
-  // often a black flash or title card on Reels / TikToks).
+  // No crops — raw URL. For video, also expose a Cloudinary poster
+  // frame at so_2 (2 seconds in — skips typical intro flashes / title
+  // cards on Reels / TikToks). so_auto would be nicer but requires
+  // the AI Preview add-on; accounts without it 400 on so_auto URLs.
   if (isVideo) {
     const poster = pm.fileUrl.includes('/video/upload/')
-      ? pm.fileUrl.replace('/video/upload/', '/video/upload/so_auto,f_jpg,q_auto:good/').replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2')
+      ? pm.fileUrl.replace('/video/upload/', '/video/upload/so_2,f_jpg,q_auto:good/').replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2')
       : pm.fileUrl;
     return { image: poster, video: pm.fileUrl };
   }

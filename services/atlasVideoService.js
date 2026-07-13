@@ -155,23 +155,29 @@ function imageDimsForAspect(aspectRatio) {
   }
 }
 
+// Cloudinary start-offset for video → poster / segment extraction.
+// so_auto is nicer (Cloudinary picks the most eye-catching frame)
+// but requires the AI Preview add-on — accounts without it get 400
+// on every so_auto URL. so_2 is the safe fallback: 2 seconds in,
+// past typical intro flashes and title cards on Reels/TikToks,
+// without needing an add-on. Works on any Cloudinary plan.
+const VIDEO_START_OFFSET = 'so_2';
+
 // Build a Cloudinary 8-second segment URL for a video source. Grok
-// is skipped for video-seeded video ads — Cloudinary's picked-frame
-// heuristic (so_auto) selects a representative start point and du_8.0
-// caps the clip at 8 seconds to match the canonical DR-v1 overlay
-// timing. Returns null when the URL isn't a Cloudinary /video/upload/
-// asset we can transform.
+// is skipped for video-seeded video ads — Cloudinary extracts an
+// 8-second clip starting at VIDEO_START_OFFSET (2s in). Aspect crop
+// lands the clip at the target canvas aspect via c_fill with
+// saliency-aware gravity so downstream overlays don't have to deal
+// with letterboxing or mid-shot recomposition.
 //
-// Aspect crop lands the clip at the target canvas aspect via c_fill
-// with saliency-aware gravity, so downstream overlays don't have to
-// deal with letterboxing or mid-shot recomposition.
+// Returns null when the URL isn't a Cloudinary /video/upload/ asset
+// we can transform.
 function buildVideoSegmentUrl(originalUrl, aspectRatio, durationSec = 8) {
   if (!originalUrl || typeof originalUrl !== 'string') return null;
   if (!originalUrl.includes('/video/upload/')) return null;
   const ar = String(aspectRatio || '').trim() || '1:1';
-  const cloudinaryAr = ar.replace(':', ':'); // Cloudinary accepts "9:16" style directly
   const du = Math.max(1, Math.min(30, Number(durationSec) || 8));
-  const chain = `so_auto,du_${du.toFixed(1)},c_fill,ar_${cloudinaryAr},g_auto,q_auto:good`;
+  const chain = `${VIDEO_START_OFFSET},du_${du.toFixed(1)},c_fill,ar_${ar},g_auto,q_auto:good`;
   return originalUrl.replace('/video/upload/', `/video/upload/${chain}/`);
 }
 
@@ -182,15 +188,14 @@ function cropImageUrlForAspect(originalUrl, aspectRatio) {
     return originalUrl.replace('/image/upload/', `/image/upload/c_fill,w_${w},h_${h},g_auto,q_auto:good/`);
   }
   // Video source → extract a representative still at target aspect.
-  // so_auto asks Cloudinary to pick the most representative poster
-  // frame (its own saliency heuristic) instead of taking frame 0
-  // verbatim. Frame 0 on Reels / TikToks is frequently a black flash,
-  // title card, or mid-motion blur from an animated intro — so_auto
-  // gives Grok a stronger anchor. f_jpg forces JPEG output.
+  // Uses VIDEO_START_OFFSET (2s in) rather than so_0 to skip typical
+  // intro flashes / title cards on Reels / TikToks, and rather than
+  // so_auto because so_auto needs the AI Preview add-on (accounts
+  // without it 400). f_jpg forces JPEG output.
   if (originalUrl.includes('/video/upload/')) {
     const { w, h } = imageDimsForAspect(aspectRatio);
     return originalUrl
-      .replace('/video/upload/', `/video/upload/so_auto,c_fill,w_${w},h_${h},g_auto,f_jpg,q_auto:good/`)
+      .replace('/video/upload/', `/video/upload/${VIDEO_START_OFFSET},c_fill,w_${w},h_${h},g_auto,f_jpg,q_auto:good/`)
       .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2');
   }
   // Non-Cloudinary URL: pass through untouched. Atlas will pull from
