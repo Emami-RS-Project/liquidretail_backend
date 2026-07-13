@@ -256,7 +256,14 @@ const campaignSchema = new mongoose.Schema({
   // the backend so the polished version actually exists. Falls back to
   // renderUrl gracefully when the polished version hasn't landed yet
   // (image-ref runs as a shadow after the Puppeteer render).
-  useImageRefAsProduction: { type: Boolean, default: false },
+  //
+  // Default flipped to `true` — photoreal is now the mature production
+  // path. Existing campaigns keep whatever value was explicitly set on
+  // them (mongoose default only fills in the field on documents that
+  // don't already have it), so this change only affects newly-created
+  // campaigns. Set to false explicitly on a campaign to see the
+  // Puppeteer render (useful for debugging composition issues).
+  useImageRefAsProduction: { type: Boolean, default: true },
 
   // Derived creative brief — extracted by campaignBriefDerivationService
   // from this campaign's targeting + objective + matched products + ad
