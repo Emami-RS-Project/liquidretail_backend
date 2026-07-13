@@ -29,6 +29,7 @@ const CampaignRun  = require('../models/CampaignRun');
 const { expandWizardJob, selectAdsForRun } = require('../services/campaignAdsGenerationService');
 const { renderCreative }        = require('../services/renderService');
 const { generateForAd: veoGenerateForAd, prepareStoryboard: veoPrepareStoryboard } = require('../services/videoRouter');
+const { buildVideoSegmentUrl } = require('../services/atlasVideoService');
 const { deleteFromCloudinary } = require('../services/cloudinaryService');
 const { buildVideoCompositeUrl } = require('../services/videoCompositeService');
 const { buildPreviewHtmlForAd }  = require('../services/adPreviewPageService');
@@ -435,44 +436,84 @@ async function renderOne(run, job, adId, index, renderToken) {
   // ── Veo render path ────────────────────────────────────────────────
   if (ad.renderRoute === 'veo') {
     try {
-      // Stage 1 — generate the storyboard ONCE. It directs Grok's motion
-      // via beats/camera/audio/vibe. The brand-script overlay downstream
-      // handles on-screen text independently from ad.copy + layoutInput.
-      const { storyboard } = await veoPrepareStoryboard({ ad });
-
-      // Stamp the storyboard early so chrome can read it from ad.veoStoryboard
-      // if the in-memory pass somehow drops, and downstream debug tools see it.
-      if (storyboard) {
-        await Ad.updateOne({ _id: adId }, { $set: { veoStoryboard: storyboard, updatedAt: new Date() } });
-      }
-
-      // Load brand once so the post-Grok brand-script step can resolve
-      // the right chrome renderer for this ad's format.
-      const brandMedia = await Media.findById(ad.mediaId).select('brandId').lean();
-      const brandDoc   = brandMedia?.brandId
-        ? await Brand.findById(brandMedia.brandId).select('name styleScript styleScriptVertical styleTheme').lean()
+      // Load brand + source media up front. The Grok-skip check needs
+      // sourceMedia.fileType; the brand-script overlay needs brandDoc.
+      const sourceMedia = await Media.findById(ad.mediaId)
+        .select('fileType fileUrl brandId').lean();
+      const brandDoc = sourceMedia?.brandId
+        ? await Brand.findById(sourceMedia.brandId)
+            .select('name styleScript styleScriptVertical styleTheme tagline logoUrl primaryColor secondaryColor accentColor fontFamily derivedVoice').lean()
         : null;
 
-      // Stage 2 — generate the base video. HTML/Puppeteer chrome has
-      // been retired in favor of the brand-script canvas overlay, so
-      // Grok is the only thing running here. Chrome (if any) runs
-      // after Grok completes in Stage 3.
-      const veoResult = await veoGenerateForAd({ ad, storyboard });
-      if (veoResult.skipped) {
-        await CampaignRun.updateOne({ _id: run._id }, { $inc: { skipped: 1 } });
-        await Ad.updateOne(
-          { _id: adId },
-          { $set: { status: 'queued', updatedAt: new Date() } }  // re-queues for next run when Veo is enabled
-        );
-        return;
+      // Grok-skip branch — when the seed is already a video, we keep
+      // its real motion instead of asking Grok to invent new motion
+      // from a still. Cloudinary picks an 8-second segment starting at
+      // its saliency-derived poster frame, aspect-cropped to the ad's
+      // canvas. Downstream (renderBrandScriptAndSave) doesn't need to
+      // know or care whether ad.veoVideoUrl came from Grok or from a
+      // Cloudinary extract — it just composites the canonical overlay
+      // on top.
+      const isVideoSeed = sourceMedia?.fileType === 'video';
+      let veoVideoUrl, veoAspectRatio, veoPrompt = null, veoStoryboard = null, veoCloudinaryPublicId = null;
+
+      if (isVideoSeed) {
+        const segmentUrl = buildVideoSegmentUrl(sourceMedia.fileUrl, ad.aspectRatio || '9:16', 8);
+        if (!segmentUrl) {
+          console.warn(
+            `⚠️  [veo] ad=${adId} seed is video but not Cloudinary-hosted (${sourceMedia.fileUrl?.slice(0, 80)}…) — ` +
+            `Grok-skip requires Cloudinary /video/upload/. Falling through to Grok with picked-frame reference.`
+          );
+        } else {
+          veoVideoUrl    = segmentUrl;
+          veoAspectRatio = ad.aspectRatio || '9:16';
+          console.log(
+            `🎬 [veo] ad=${adId} seed=video → skip Grok, 8s Cloudinary segment ` +
+            `(aspect=${veoAspectRatio}) → ${segmentUrl.slice(0, 120)}…`
+          );
+        }
       }
 
-      // Veo-fallback Ad state. Done BEFORE composite so a composite failure
-      // still leaves a viewable ad (raw Veo video). Composite overwrites
+      // Grok path — fires when the seed is an image OR when the video
+      // Grok-skip couldn't build a Cloudinary segment (non-Cloudinary
+      // video host — rare but possible).
+      if (!veoVideoUrl) {
+        // Stage 1 — generate the storyboard ONCE. It directs Grok's motion
+        // via camera/audio/vibe. The brand-script overlay downstream
+        // handles on-screen text independently from ad.copy + layoutInput.
+        const { storyboard } = await veoPrepareStoryboard({ ad });
+        veoStoryboard = storyboard || null;
+
+        // Stamp the storyboard early so chrome can read it from ad.veoStoryboard
+        // if the in-memory pass somehow drops, and downstream debug tools see it.
+        if (storyboard) {
+          await Ad.updateOne({ _id: adId }, { $set: { veoStoryboard: storyboard, updatedAt: new Date() } });
+        }
+
+        // Stage 2 — generate the base video via Grok. Chrome (if any)
+        // runs after Grok completes in Stage 3.
+        const veoResult = await veoGenerateForAd({ ad, storyboard });
+        if (veoResult.skipped) {
+          await CampaignRun.updateOne({ _id: run._id }, { $inc: { skipped: 1 } });
+          await Ad.updateOne(
+            { _id: adId },
+            { $set: { status: 'queued', updatedAt: new Date() } }  // re-queues for next run when Veo is enabled
+          );
+          return;
+        }
+        veoVideoUrl           = veoResult.videoUrl;
+        veoAspectRatio        = veoResult.aspectRatio || null;
+        veoPrompt             = veoResult.prompt || null;
+        veoStoryboard         = veoResult.storyboard || veoStoryboard;
+        veoCloudinaryPublicId = veoResult.cloudinaryPublicId || null;
+      }
+
+      // Stamp the video URL + Ad state. Done BEFORE the brand-script
+      // overlay so a composite failure still leaves a viewable ad
+      // (raw Grok video or Cloudinary segment). Composite overwrites
       // renderUrl/posterUrl/cloudinaryPublicId on success.
-      const fallbackPosterUrl = veoResult.videoUrl?.includes('/video/upload/')
-        ? veoResult.videoUrl
-            .replace('/video/upload/', '/video/upload/so_0,f_jpg,q_auto:good/')
+      const fallbackPosterUrl = veoVideoUrl?.includes('/video/upload/')
+        ? veoVideoUrl
+            .replace('/video/upload/', '/video/upload/so_auto,f_jpg,q_auto:good/')
             .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2')
         : null;
       await Ad.updateOne(
@@ -481,13 +522,13 @@ async function renderOne(run, job, adId, index, renderToken) {
           $set: {
             status:             'draft',
             kind:               'video',
-            veoVideoUrl:        veoResult.videoUrl,
-            veoAspectRatio:     veoResult.aspectRatio || null,
-            veoPrompt:          veoResult.prompt || null,
-            veoStoryboard:      veoResult.storyboard || storyboard || null,
-            renderUrl:          veoResult.videoUrl,
-            posterUrl:          fallbackPosterUrl || veoResult.videoUrl,
-            cloudinaryPublicId: veoResult.cloudinaryPublicId,
+            veoVideoUrl,
+            veoAspectRatio,
+            veoPrompt,
+            veoStoryboard,
+            renderUrl:          veoVideoUrl,
+            posterUrl:          fallbackPosterUrl || veoVideoUrl,
+            cloudinaryPublicId: veoCloudinaryPublicId,
             sourceFileType:     'video',
             updatedAt:          new Date()
           },

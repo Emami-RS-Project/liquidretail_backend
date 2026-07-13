@@ -111,15 +111,16 @@ async function renderCreative(req) {
   // unique index — same inputs never produce two queued Ad docs in the
   // first place. No per-render dedup check needed.
 
-  // Decide image vs video branch. Video requires (a) source Media is
-  // a video, (b) the template has a media slot we can punch through.
-  // When (a) is true but (b) isn't, fall back to the static-image path
-  // — runVideoPipeline already populated layoutInput with a hero-frame
-  // image, so the static render produces a valid (still) creative.
+  // renderCreative only runs for renderRoute='html_gen' (kind='image')
+  // ads. Video ads route to veoPrepareStoryboard → Grok (routes/ads.js
+  // renderOne). So this path always produces a static PNG image ad.
+  //
+  // When the seed Media happens to be a video, we don't attempt to
+  // overlay chrome on the raw video anymore (retired). layoutInput's
+  // media.hero_media.image already holds a Cloudinary picked-frame
+  // poster URL for video seeds; the HTML Gen embeds that as a normal
+  // <img> and Puppeteer renders it as any other static image.
   const sourceMedia = await Media.findById(req.creative.mediaId).select('fileType fileUrl latestArtifacts').lean();
-  const isVideoSource = sourceMedia?.fileType === 'video';
-  const supportsVideoTemplate = VIDEO_TEMPLATES.has(req.creative.template);
-  const useVideoBranch = isVideoSource && supportsVideoTemplate && sourceMedia?.fileUrl?.includes('/video/upload/');
 
   // Phase 2 V2 flag — look up the campaign to see whether to dispatch
   // through the new Director-driven Generator. Cheap select; no LLM.
@@ -148,7 +149,7 @@ async function renderCreative(req) {
       mediaId:      req.creative.mediaId,
       brandId:      req.brandId,
       authToken:    req.authToken || null,
-      renderMode:   useVideoBranch ? 'video-overlay' : 'static',
+      renderMode:   'static',
       // V2 routing — only set when the campaign opted in. The legacy
       // pipeline is unaffected for unflagged campaigns.
       aiCreativeV2,
@@ -172,7 +173,7 @@ async function renderCreative(req) {
       adConceptId:         req.adConceptId         || null
     });
     stages.render = Date.now() - t;
-    console.log(`   🖼️  ${tag} render ok in ${stages.render}ms (${renderOutput.width}×${renderOutput.height}, ${Math.round(renderOutput.bytes/1024)}KB, mode=${useVideoBranch ? 'video-overlay' : 'static'})`);
+    console.log(`   🖼️  ${tag} render ok in ${stages.render}ms (${renderOutput.width}×${renderOutput.height}, ${Math.round(renderOutput.bytes/1024)}KB, mode=static)`);
   } catch (err) {
     console.error(`   ❌ ${tag} render: ${err.message || err}`);
     return failed(jobId, 'render', err);
@@ -191,7 +192,7 @@ async function renderCreative(req) {
       template:         req.creative.template,
       aspectRatio:      req.creative.aspectRatio,
       identityDigest,
-      isOverlay:        useVideoBranch
+      isOverlay:        false
     });
     stages.upload = Date.now() - t;
     console.log(`   ☁️  ${tag} upload ok in ${stages.upload}ms (publicId=${upload.cloudinaryPublicId})`);
@@ -200,43 +201,10 @@ async function renderCreative(req) {
     return failed(jobId, 'upload', err);
   }
 
-  // 5b. video composite — chain Cloudinary transforms to overlay the
-  // PNG on the source video. Failure here falls through to the static
-  // PNG output (the renderUrl just stays the PNG, kind stays 'image')
-  // so video doesn't completely block the run.
-  let videoComposite = null;
-  if (useVideoBranch) {
-    try {
-      videoComposite = await composeVideoOutput({
-        media:            sourceMedia,
-        template:         req.creative.template,
-        aspectRatio:      req.creative.aspectRatio,
-        overlayUrl:       upload.renderUrl,
-        overlayPublicId:  upload.cloudinaryPublicId,
-        // Prefer the direct FK stamped by renderStage when the eager
-        // prime ran. The 8-field cartesian lookup below (productId,
-        // variantKind, paletteSource, creativeStyle, campaignContext-
-        // Hash) was under-matching for video ads because creativeStyle
-        // and campaignContextHash aren't reliably populated on
-        // req.creative — they're computed at queue time and never
-        // persisted on the Ad doc. Same fix as the photoreal join.
-        aiCanvasArtifactId:  renderOutput.aiCanvasArtifactId   || null,
-        productId:           req.creative.productId           || null,
-        variantKind:         req.creative.variantKind         || null,
-        paletteSource:       req.creative.paletteSource       || 'media',
-        creativeStyle:       req.creative.creativeStyle       || null,
-        campaignContextHash: req.creative.campaignContextHash || null
-      });
-      if (videoComposite) {
-        console.log(`   🎞️  ${tag} video composite ok (${videoComposite.compositeUrl.length} chars)`);
-      } else {
-        console.warn(`   ⚠️  ${tag} video composite returned null — falling back to static PNG`);
-      }
-    } catch (err) {
-      console.warn(`   ⚠️  ${tag} video composite failed: ${err.message} — falling back to static PNG`);
-      videoComposite = null;
-    }
-  }
+  // Video-composite step retired. Image ads always ship the static PNG
+  // as renderUrl. Video ads never reach this code path — they route
+  // through veoPrepareStoryboard → Grok upstream (routes/ads.js).
+  const videoComposite = null;
 
   // 6. persist — Ad doc
   let ad;

@@ -2225,10 +2225,12 @@ function pickRafflePrizeMedia(raffle, aspectRatio) {
       };
     }
   }
-  // No crops — raw URL. For video, also expose a poster frame.
+  // No crops — raw URL. For video, also expose a Cloudinary picked-frame
+  // poster (so_auto — smart poster instead of literal frame 0 which is
+  // often a black flash or title card on Reels / TikToks).
   if (isVideo) {
     const poster = pm.fileUrl.includes('/video/upload/')
-      ? pm.fileUrl.replace('/video/upload/', '/video/upload/so_0/').replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2')
+      ? pm.fileUrl.replace('/video/upload/', '/video/upload/so_auto,f_jpg,q_auto:good/').replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2')
       : pm.fileUrl;
     return { image: poster, video: pm.fileUrl };
   }

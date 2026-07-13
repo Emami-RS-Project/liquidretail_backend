@@ -34,6 +34,17 @@ const N_CANDIDATES_DEFAULT = 2;        // HTML output is ~3-5× longer than JSON
 const MAX_TOKENS          = 12000;     // animated video-overlay HTML with cycling reviews can exceed 8K chars
 const HTML_SCHEMA_VERSION = '2.4.0';  // 2.4: video-overlay animation unlock — CSS @keyframes allowed, cycling reviews, 5s timing context. MAX_TOKENS raised to 12000. 2.3: JSON Gen retirement (AI_LAYOUT_DIRECT_HTML flag). Response schema gains a `copy_picks` object so HTML Gen owns the final headline/eyebrow/cta/subheadline strings; persisted on AiCanvasArtifact.copyPicks for downstream consumers (Image Ref) that previously read pickCopyFromSpec(canvasSpec). Also handles canvasSpec=null gracefully: videoMode derives from sourceMedia.fileType alone, mediaRect defaults to the full canvas (so video bleeds edge-to-edge when no zones[] is available to declare a slot rect). 2.2: platform-format-aware Phase 4 — passes platformFormat into validateCandidate so the new safe_area_violation HARD rule catches chrome that intrudes Reels reserved bands. Pairs with the JSON Gen's FORMAT CONSTRAINTS section (SPEC 3.1.0): two LLMs + one validator all reasoning in the same safe-area pixel space. 2.1: HTML Gen format-aware prompt (Phase 3). 2.0: video-overlay prompt rolled back to pipeline fundamentals.
 
+// Rewrite a Cloudinary /video/upload/ URL to a picked-frame still JPEG
+// so it's safe to embed as an <img> source. Non-video URLs and non-
+// Cloudinary videos pass through unchanged (Atlas / external hosts).
+function toStillIfVideo(url) {
+  if (!url || typeof url !== 'string') return url;
+  if (!url.includes('/video/upload/')) return url;
+  return url
+    .replace('/video/upload/', '/video/upload/so_auto,f_jpg,q_auto:good/')
+    .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2');
+}
+
 function enabled() {
   return String(process.env.AI_HTML_LAYOUT_ENABLED || '').toLowerCase() === 'true';
 }
@@ -152,26 +163,17 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false, operat
   // (double-text) or hides the product (subject occlusion).
   const sourceMedia = await Media.findById(canvas.mediaId)
     .select('fileType text subjects primarySubjectDesc').lean();
-  const isVideoSource = sourceMedia?.fileType === 'video';
   const sourceText    = Array.isArray(sourceMedia?.text) ? sourceMedia.text : [];
   const sourceSubjects = Array.isArray(sourceMedia?.subjects) ? sourceMedia.subjects : [];
   const sourcePrimarySubjectDesc = sourceMedia?.primarySubjectDesc || null;
-  // When the JSON Gen is retired (AI_LAYOUT_DIRECT_HTML=true) the canvas
-  // arrives here with canvasSpec=null and there are no zones[] to mine
-  // for a media-slot rect. Fall back to the full canvas as the implied
-  // transparent region — the video composite chain (c_fill,g_auto) fills
-  // the canvas regardless and chrome opacity is what gates visibility.
-  const mediaZones = (canvas.canvasSpec?.zones || []).filter(z =>
-    z.kind === 'media' && z.rect
-  );
-  const heroSlotted = mediaZones.find(z => z.slot === 'product.hero_media');
-  const largestMedia = mediaZones.slice()
-    .sort((a, b) => (b.rect.w * b.rect.h) - (a.rect.w * a.rect.h))[0] || null;
-  const mediaZone = heroSlotted || largestMedia;
-  const videoMode = isVideoSource;
-  const mediaRect = videoMode
-    ? (mediaZone?.rect || { x: 0, y: 0, w: dims.width, h: dims.height })
-    : null;
+  // videoMode was the legacy "transparent slot for Cloudinary video
+  // composite" flag. That path is retired — HTML Gen only runs for
+  // kind='image' ads now (routing enforces this via renderRoute).
+  // Video-seeded image ads get a picked-frame poster URL from
+  // layoutInput.media.hero_media.image and render as any other static
+  // image. See renderService.renderCreative for the parent flow.
+  const videoMode = false;
+  const mediaRect = null;
 
   // Platform-format-aware ad generation (Phase 3). Read from the
   // artifact (stamped by aiCanvasSpecService.getOrGenerate, plumbed
@@ -196,10 +198,15 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false, operat
     // V2 prompt's "use THESE URLs verbatim" block. One bulk query per
     // generation; misses default to null and the prompt builder
     // gracefully skips them.
+    //
+    // Video URLs are rewritten to Cloudinary picked-frame stills so
+    // the LLM never sees a .mp4 in the "use these URLs verbatim"
+    // block. HTML Gen only runs for kind='image' output, and <img>
+    // tags can't render .mp4 sources.
     const Media = require('../models/Media');
     const ids = concept.media_picks.map(p => p.media_id).filter(Boolean);
     const docs = ids.length ? await Media.find({ _id: { $in: ids } }).select('_id fileUrl').lean() : [];
-    mediaUrlMap = new Map(docs.map(d => [String(d._id), d.fileUrl || null]));
+    mediaUrlMap = new Map(docs.map(d => [String(d._id), toStillIfVideo(d.fileUrl)]));
   }
 
   const { system, user, images } = isV2Concept

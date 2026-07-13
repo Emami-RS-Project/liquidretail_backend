@@ -155,6 +155,26 @@ function imageDimsForAspect(aspectRatio) {
   }
 }
 
+// Build a Cloudinary 8-second segment URL for a video source. Grok
+// is skipped for video-seeded video ads — Cloudinary's picked-frame
+// heuristic (so_auto) selects a representative start point and du_8.0
+// caps the clip at 8 seconds to match the canonical DR-v1 overlay
+// timing. Returns null when the URL isn't a Cloudinary /video/upload/
+// asset we can transform.
+//
+// Aspect crop lands the clip at the target canvas aspect via c_fill
+// with saliency-aware gravity, so downstream overlays don't have to
+// deal with letterboxing or mid-shot recomposition.
+function buildVideoSegmentUrl(originalUrl, aspectRatio, durationSec = 8) {
+  if (!originalUrl || typeof originalUrl !== 'string') return null;
+  if (!originalUrl.includes('/video/upload/')) return null;
+  const ar = String(aspectRatio || '').trim() || '1:1';
+  const cloudinaryAr = ar.replace(':', ':'); // Cloudinary accepts "9:16" style directly
+  const du = Math.max(1, Math.min(30, Number(durationSec) || 8));
+  const chain = `so_auto,du_${du.toFixed(1)},c_fill,ar_${cloudinaryAr},g_auto,q_auto:good`;
+  return originalUrl.replace('/video/upload/', `/video/upload/${chain}/`);
+}
+
 function cropImageUrlForAspect(originalUrl, aspectRatio) {
   if (!originalUrl) return null;
   if (originalUrl.includes('/image/upload/')) {
@@ -672,6 +692,7 @@ module.exports = {
   capsFor,
   imageDimsForAspect,
   cropImageUrlForAspect,
+  buildVideoSegmentUrl,
   buildReferenceImages,
   pickProductOnlyUrl
 };
