@@ -140,28 +140,52 @@ function fadeInOut(t, tStart, tHoldStart, tHoldEnd, tEnd, smooth) {
 
 // ── Phase renderers ────────────────────────────────────────────────
 
-// HOOK: headline anchored in the upper-third, over a soft top-down
-// scrim. Vertical Reels UI reserves ~204px top + ~204px bottom on
-// 1080×1920 (≈10.6% of H each). Upper-third at y ≈ 0.20–0.45 keeps
-// text within the visible strip below the top safe zone (H*0.106)
-// and above the middle where the hero subject usually sits.
+// HOOK: headline anchored in the upper-third, sitting on a local
+// rounded-rectangle scrim that hugs the text block. Padding = 10% of
+// text-block dimensions, clamped so the scrim never extends past the
+// left frame edge (max horizontal padding = padX - 4). Composition
+// matches the feed / landscape canonicals' local-scrim convention;
+// the previous full-width top-down gradient is retired.
+//
+// Vertical Reels UI reserves ~204px top + ~204px bottom on 1080×1920
+// (≈10.6% of H each). Upper-third at y ≈ 0.20–0.45 keeps the text
+// (and its scrim) safely below the top safe zone.
 function drawHook(ctx, W, H, headline, alpha, colors, fonts, rgba) {
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  // Top-down scrim gradient over the upper half — opaque at top,
-  // fading to transparent as we approach the middle. Mirror of the
-  // previous bottom-up scrim.
-  const scrimBottom = H * 0.58;
-  const grad = ctx.createLinearGradient(0, 0, 0, scrimBottom);
-  grad.addColorStop(0, rgba(colors.hookScrim, 0.72));
-  grad.addColorStop(1, rgba(colors.hookScrim, 0));
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, W, scrimBottom);
+  const padX = Math.round(W * 0.075);
+  const wrapW = W - padX * 2;
 
-  // Headline typography — hero scale, wrapped to 2 lines max.
+  // Headline typography — measure first so we can size the scrim.
   const fontSize = clampNum(Math.round(H * 0.055), 60, 96);
   ctx.font = `700 ${fontSize}px "${fonts.headline}"`;
+  const lines = wrapLines(ctx, headline, wrapW, 3);
+  const lineH = Math.round(fontSize * 1.12);
+  const blockH = lines.length * lineH;
+
+  let widest = 0;
+  for (const line of lines) {
+    const w = ctx.measureText(line).width;
+    if (w > widest) widest = w;
+  }
+
+  const yStart = H * 0.32 - blockH / 2;
+
+  // Local scrim geometry — 10% margin around the text block, clamped
+  // to fit within padX from the left frame edge.
+  const scrimPadX = Math.min(Math.round(widest * 0.10), Math.max(0, padX - 4));
+  const scrimPadY = Math.round(blockH * 0.10);
+  const scrimX = padX - scrimPadX;
+  const scrimY = yStart - scrimPadY;
+  const scrimW = widest + scrimPadX * 2;
+  const scrimH = blockH + scrimPadY * 2;
+  const scrimR = Math.round(H * 0.014);
+
+  drawLocalScrim(ctx, scrimX, scrimY, scrimW, scrimH, scrimR, rgba(colors.hookScrim, 0.72));
+
+  // Headline fill on top of the scrim. Own shadow for edge legibility
+  // (scrim gives base contrast; shadow softens serif strokes).
   ctx.fillStyle = rgba(colors.hookText, 1);
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
@@ -169,46 +193,60 @@ function drawHook(ctx, W, H, headline, alpha, colors, fonts, rgba) {
   ctx.shadowBlur = 12;
   ctx.shadowOffsetY = 3;
 
-  const padX = Math.round(W * 0.075);
-  const wrapW = W - padX * 2;
-  // 3-line cap. Copy derivation targets 4-6 words per headline but
-  // the LLM regularly emits 7-8 words; two lines at hero scale
-  // ellipsized those on the second line ("Engineered For The..."
-  // truncation was the specific symptom). Three lines fits the
-  // common overrun without shrinking type. Block height still fits
-  // the top-58% scrim comfortably (3 * ~78px = 234px on a 720×1280
-  // canvas, centered at 32%H = y≈290-524px).
-  const lines = wrapLines(ctx, headline, wrapW, 3);
-  const lineH = Math.round(fontSize * 1.12);
-  const blockH = lines.length * lineH;
-  const yStart = H * 0.32 - blockH / 2;
-
   for (let i = 0; i < lines.length; i++) {
     ctx.fillText(lines[i], padX, yStart + i * lineH);
   }
   ctx.restore();
 }
 
-// PROOF: snippet quote + reviewer attribution. Same upper-third
-// anchor as the hook so the eye doesn't have to relocate mid-video.
+// PROOF: quote + attribution on a single local scrim spanning both
+// blocks. Same upper-third anchor and padding math as the hook so the
+// scrim rhythm stays consistent phase-to-phase.
 function drawProof(ctx, W, H, quote, reviewer, alpha, colors, fonts, rgba) {
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  // Same soft top-down scrim as HOOK phase for continuity.
-  const scrimBottom = H * 0.58;
-  const grad = ctx.createLinearGradient(0, 0, 0, scrimBottom);
-  grad.addColorStop(0, rgba(colors.quoteScrim, 0.72));
-  grad.addColorStop(1, rgba(colors.quoteScrim, 0));
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, W, scrimBottom);
-
   const padX = Math.round(W * 0.075);
   const wrapW = W - padX * 2;
 
-  // Quote — larger than a subheadline, smaller than a hero. Serif
-  // reads as testimonial by default; brand can override via theme.
+  // Quote typography — measure lines first.
   const quoteSize = clampNum(Math.round(H * 0.048), 52, 84);
+  ctx.font = `italic 500 ${quoteSize}px "${fonts.quote}"`;
+  const quoteWithQuotes = `“${quote}”`;
+  const quoteLines = wrapLines(ctx, quoteWithQuotes, wrapW, 3);
+  const quoteLineH = Math.round(quoteSize * 1.18);
+  const quoteBlockH = quoteLines.length * quoteLineH;
+
+  let widestQuote = 0;
+  for (const line of quoteLines) {
+    const w = ctx.measureText(line).width;
+    if (w > widestQuote) widestQuote = w;
+  }
+
+  // Attribution typography — measure so scrim can span both blocks.
+  const attribSize = clampNum(Math.round(H * 0.018), 18, 30);
+  const attribGap  = Math.round(H * 0.020);
+  const attribText = `— ${reviewer}`;
+  ctx.font = `600 ${attribSize}px "${fonts.body}"`;
+  const attribW = ctx.measureText(attribText).width;
+
+  const widest = Math.max(widestQuote, attribW);
+  const totalH = quoteBlockH + attribGap + attribSize;
+  const yStart = H * 0.32 - totalH / 2;
+
+  // Single local scrim spanning quote + attribution — 10% margin
+  // around the combined block, same clamping as the hook.
+  const scrimPadX = Math.min(Math.round(widest * 0.10), Math.max(0, padX - 4));
+  const scrimPadY = Math.round(totalH * 0.10);
+  const scrimX = padX - scrimPadX;
+  const scrimY = yStart - scrimPadY;
+  const scrimW = widest + scrimPadX * 2;
+  const scrimH = totalH + scrimPadY * 2;
+  const scrimR = Math.round(H * 0.014);
+
+  drawLocalScrim(ctx, scrimX, scrimY, scrimW, scrimH, scrimR, rgba(colors.quoteScrim, 0.72));
+
+  // Quote fill on top of the scrim.
   ctx.font = `italic 500 ${quoteSize}px "${fonts.quote}"`;
   ctx.fillStyle = rgba(colors.quoteText, 1);
   ctx.textAlign = 'left';
@@ -216,28 +254,31 @@ function drawProof(ctx, W, H, quote, reviewer, alpha, colors, fonts, rgba) {
   ctx.shadowColor = 'rgba(0,0,0,0.45)';
   ctx.shadowBlur = 12;
   ctx.shadowOffsetY = 3;
-
-  const quoteWithQuotes = `“${quote}”`;
-  const quoteLines = wrapLines(ctx, quoteWithQuotes, wrapW, 3);
-  const quoteLineH = Math.round(quoteSize * 1.18);
-  const quoteBlockH = quoteLines.length * quoteLineH;
-
-  const attribSize = clampNum(Math.round(H * 0.018), 18, 30);
-  const attribGap  = Math.round(H * 0.020);
-
-  const totalH = quoteBlockH + attribGap + attribSize;
-  const yStart = H * 0.32 - totalH / 2;
-
   for (let i = 0; i < quoteLines.length; i++) {
     ctx.fillText(quoteLines[i], padX, yStart + i * quoteLineH);
   }
 
-  // Attribution — small caps sans, dimmer color.
+  // Attribution — small caps sans, dimmer color, inside the same scrim.
   ctx.font = `600 ${attribSize}px "${fonts.body}"`;
   ctx.fillStyle = rgba(colors.reviewerText, 1);
   ctx.shadowBlur = 8;
-  ctx.fillText(`— ${reviewer}`, padX, yStart + quoteBlockH + attribGap);
+  ctx.fillText(attribText, padX, yStart + quoteBlockH + attribGap);
 
+  ctx.restore();
+}
+
+// Local scrim helper — rounded rectangle with a subtle drop shadow
+// beneath. Matches the feed canonical's drawLocalScrim pattern (same
+// shadowBlur / shadowOffsetY convention). Callers pass fillStyle as a
+// pre-composed rgba string so opacity is embedded in the color.
+function drawLocalScrim(ctx, x, y, w, h, r, fillStyle) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.20)';
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 4;
+  ctx.fillStyle = fillStyle;
+  roundedRect(ctx, x, y, w, h, r);
+  ctx.fill();
   ctx.restore();
 }
 
