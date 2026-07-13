@@ -386,6 +386,7 @@ async function expandWizardJob({
   if (useConceptDriven && !dryRun) {
     const result = await runConceptDrivenExpansion({
       campaignId, brandId, campaignKind, productIds,
+      mediaIds,   // operator-picked seeds — restricts the Director's universe when non-empty
       ctaText, ctaUrl, ctaUrlParams,
       platformFormat: effectivePlatformFormat,
       kinds: resolvedKinds,
@@ -1332,6 +1333,7 @@ function variantKindForUniverseRole(role) {
 
 async function runConceptDrivenExpansion({
   campaignId, brandId, campaignKind, productIds,
+  mediaIds = [],                                    // operator-picked seed media — when non-empty, restricts the Director's universe to just those IDs
   ctaText, ctaUrl, ctaUrlParams,
   platformFormat,
   kinds,                                            // [] of 'image'|'video' — what pipelines to emit per concept
@@ -1378,7 +1380,8 @@ async function runConceptDrivenExpansion({
       const { universe, seedUniverseHash, counts } =
         await seededUniverseSvc.buildSeededUniverse(brandId, productId, {
           includeCategoryMatched, includeBrandMatched, topN: 10,
-          wantsVideo: resolvedKinds.includes('video')
+          wantsVideo: resolvedKinds.includes('video'),
+          restrictToMediaIds: Array.isArray(mediaIds) && mediaIds.length ? mediaIds : null
         });
       const filtered = filterUniverseForProduct(productId, universe);
       if (!filtered.length) {

@@ -183,6 +183,14 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
   // captions / stickers / watermarks push a candidate below text-free
   // peers within its shot-type tier when Grok image-to-video is next.
   const wantsVideo = opts.wantsVideo === true;
+  // restrictToMediaIds — non-empty array switches to "operator picked
+  // these specific seeds" mode. Universe pool is loaded from those
+  // media IDs directly, bypassing the tier-based assembly. Preserves
+  // shotType ranking but the pool is constrained to what the operator
+  // explicitly chose in the wizard.
+  const restrictToMediaIds = Array.isArray(opts.restrictToMediaIds) && opts.restrictToMediaIds.length
+    ? opts.restrictToMediaIds.map(String)
+    : null;
 
   const counts = {
     catalog: 0,
@@ -190,6 +198,39 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
     catalog_hero: 0, catalog_alt: 0,
     ugc_product_match: 0, ugc_product_category: 0, ugc_brand_match: 0
   };
+
+  // ── Operator-picked media mode ─────────────────────────────────
+  // When restrictToMediaIds is set, the operator explicitly picked
+  // specific seeds in the wizard. Skip the full tier-based assembly
+  // and load only those media docs. Role tagging comes from
+  // Media.source (catalog-product → 'catalog'; anything else →
+  // 'ugc_brand_match' as a safe default — the exact UGC tier only
+  // matters for downstream match-tier accounting, not for the
+  // Director's picks).
+  if (restrictToMediaIds) {
+    const oids = restrictToMediaIds
+      .map(id => toObjectId(id))
+      .filter(Boolean);
+    const pickedMedias = oids.length ? await Media.find({
+      _id: { $in: oids },
+      brandId  // safety — never leak media from other brands
+    }).select('_id fileType fileUrl source createdAt classification metadata platformStats matchedProducts refinedProducts text').lean() : [];
+
+    const pool = pickedMedias.map(m => {
+      const isCatalog = m.source === 'catalog-product';
+      const role = isCatalog ? 'catalog' : 'ugc_brand_match';
+      if (isCatalog) counts.catalog++;
+      else           counts.ugc_brand_match++;
+      return { media: m, role };
+    });
+
+    const ranked = rankMergedPool(pool, { wantsVideo });
+    const universe = ranked.map(x => projectEntry(x.media, x.role));
+    const trimmed = universe.slice(0, topN);
+    const seedUniverseHash = computeSeedUniverseHash(trimmed, 5);
+
+    return { universe: trimmed, seedUniverseHash, counts };
+  }
 
   // ── Catalog media ──────────────────────────────────────────────
   // Product mode: scope to the specific SKU via catalogProductId.
