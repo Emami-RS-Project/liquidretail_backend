@@ -158,7 +158,11 @@ function drawHook(ctx, W, H, headline, alpha, colors, fonts, rgba) {
   const wrapW = W - padX * 2;
 
   // Headline typography — measure first so we can size the scrim.
-  const fontSize = clampNum(Math.round(H * 0.055), 60, 96);
+  // 75% of the previous hero scale (was H*0.055 clamped 60-96). Softer
+  // presence over the plate; hook feels less shouty. Note: this now
+  // reads smaller than the proof phase (H*0.048) — intentional
+  // editorial inversion where the quote is the anchor.
+  const fontSize = clampNum(Math.round(H * 0.041), 45, 72);
   ctx.font = `700 ${fontSize}px "${fonts.headline}"`;
   const lines = wrapLines(ctx, headline, wrapW, 3);
   const lineH = Math.round(fontSize * 1.12);
@@ -170,7 +174,12 @@ function drawHook(ctx, W, H, headline, alpha, colors, fonts, rgba) {
     if (w > widest) widest = w;
   }
 
-  const yStart = H * 0.32 - blockH / 2;
+  // Y anchor targets H * 0.16 — about half the previous 0.32 distance
+  // from the top. Clamped down when the block+scrim would intrude on
+  // the Reels top safe zone (~10.6% of H = 204/1920). Short-headline
+  // blocks (1-2 lines) sit at 0.16; longer 3-line blocks shift down
+  // just enough to keep text out of the caption/handle band.
+  const yStart = computeUpperThirdYStart(H, blockH);
 
   // Local scrim geometry — 10% margin around the text block, clamped
   // to fit within padX from the left frame edge.
@@ -232,7 +241,13 @@ function drawProof(ctx, W, H, quote, reviewer, alpha, colors, fonts, rgba) {
 
   const widest = Math.max(widestQuote, attribW);
   const totalH = quoteBlockH + attribGap + attribSize;
-  const yStart = H * 0.32 - totalH / 2;
+  // Same upper-anchor + safe-zone clamp math as drawHook. Proof's
+  // totalH is larger than the hook's blockH (quote + attribution
+  // stack), so the clamp typically pushes proof down further than
+  // the hook — the two phases can sit at slightly different y
+  // positions when the proof is 3+ lines. Design tolerance: eye
+  // relocates naturally at the phase transition anyway.
+  const yStart = computeUpperThirdYStart(H, totalH);
 
   // Single local scrim spanning quote + attribution — 10% margin
   // around the combined block, same clamping as the hook.
@@ -280,6 +295,25 @@ function drawLocalScrim(ctx, x, y, w, h, r, fillStyle) {
   roundedRect(ctx, x, y, w, h, r);
   ctx.fill();
   ctx.restore();
+}
+
+// Upper-third y-anchor with safe-zone protection. Targets H * 0.16
+// (half the previous 0.32 distance to the top of frame). When the
+// block + scrim padding would intrude on the Reels top safe zone
+// (~10.6% of H reserved by IG for caption/handle chrome), clamps the
+// block down just enough to keep the TEXT above the safe zone. Scrim
+// padding is baked in via blockH * 0.10 — the same 10% margin
+// drawHook / drawProof use for their local scrims. Returns the yStart
+// (top-of-block) for callers who then position each line at
+// yStart + i * lineH.
+function computeUpperThirdYStart(H, blockH) {
+  const targetCenter = H * 0.16;
+  const scrimPadY    = Math.round(blockH * 0.10);
+  const safeAreaTop  = Math.round(H * 0.106);   // ≈204/1920 Reels top band
+  const textMargin   = Math.round(H * 0.015);   // buffer below safe zone
+  const minCenter    = safeAreaTop + textMargin + blockH / 2 + scrimPadY;
+  const yCenter      = Math.max(targetCenter, minCenter);
+  return yCenter - blockH / 2;
 }
 
 // END CARD: product-only image dominates the frame; below it the
