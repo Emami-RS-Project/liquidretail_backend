@@ -171,7 +171,14 @@ function drawHook(ctx, W, H, headline, alpha, colors, fonts, rgba) {
 
   const padX = Math.round(W * 0.075);
   const wrapW = W - padX * 2;
-  const lines = wrapLines(ctx, headline, wrapW, 2);
+  // 3-line cap. Copy derivation targets 4-6 words per headline but
+  // the LLM regularly emits 7-8 words; two lines at hero scale
+  // ellipsized those on the second line ("Engineered For The..."
+  // truncation was the specific symptom). Three lines fits the
+  // common overrun without shrinking type. Block height still fits
+  // the top-58% scrim comfortably (3 * ~78px = 234px on a 720×1280
+  // canvas, centered at 32%H = y≈290-524px).
+  const lines = wrapLines(ctx, headline, wrapW, 3);
   const lineH = Math.round(fontSize * 1.12);
   const blockH = lines.length * lineH;
   const yStart = H * 0.32 - blockH / 2;
