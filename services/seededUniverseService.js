@@ -159,12 +159,22 @@ function computeSeedUniverseHash(universe, n = 5) {
 //   { catalog_hero, catalog_alt, ugc_product_match,
 //     ugc_product_category, ugc_brand_match }
 //
-// brandId is required. productId is required (this service is product-
-// scoped — brand-only seeds remain on the legacy V1 path until the
-// concept-driven model proves out per-product, then we extend).
+// brandId is required. productId is OPTIONAL — pass null for brand-only
+// runs (brand campaigns with no specific SKU to anchor on).
+//
+// Product mode (productId set): tiers 1/2 from CatalogProduct.matchedMedia,
+// tier 3 from brand-scoped ProductMatchArtifact when includeBrandMatched.
+// Catalog pool is scoped to the specific product via metadata.catalogProductId.
+//
+// Brand mode (productId null): tiers 1/2 skipped (they're product-specific).
+// Tier 3 (brand_match UGC) always fires regardless of includeBrandMatched —
+// brand-only runs need brand-scoped UGC as the primary UGC source. Catalog
+// pool expands to ALL catalog media for the brand (rank by shotType then
+// takes top-N via topN); lifestyle-first ranking naturally surfaces the
+// most brand-appropriate assets first.
 async function buildSeededUniverse(brandId, productId, opts = {}) {
-  if (!brandId)   throw new Error('brandId required');
-  if (!productId) throw new Error('productId required');
+  if (!brandId) throw new Error('brandId required');
+  const isBrandOnly = !productId;
 
   const topN = opts.topN ?? DEFAULT_TOP_N;
   const includeCategoryMatched = opts.includeCategoryMatched === true;
@@ -182,24 +192,39 @@ async function buildSeededUniverse(brandId, productId, opts = {}) {
   };
 
   // ── Catalog media ──────────────────────────────────────────────
+  // Product mode: scope to the specific SKU via catalogProductId.
+  // Brand mode: pull all catalog media for the brand, capped to a
+  // reasonable pool size (shotType ranking sorts the winners).
+  const BRAND_CATALOG_LIMIT = 50;
   const productOid = toObjectId(productId);
-  const catalogMedias = productOid ? await Media.find({
-    source: 'catalog-product',
-    'metadata.catalogProductId': productOid
-  }).select('_id fileType fileUrl createdAt classification metadata text').lean() : [];
+  const catalogQuery = isBrandOnly
+    ? { source: 'catalog-product', brandId }
+    : { source: 'catalog-product', 'metadata.catalogProductId': productOid };
+  const catalogCursor = Media.find(catalogQuery)
+    .select('_id fileType fileUrl createdAt classification metadata text');
+  const catalogMedias = isBrandOnly
+    ? await catalogCursor.limit(BRAND_CATALOG_LIMIT).lean()
+    : await catalogCursor.lean();
 
   // ── UGC candidate IDs by tier ──────────────────────────────────
-  const product = await CatalogProduct.findById(productId).select('matchedMedia').lean();
-  const mmEntries = Array.isArray(product?.matchedMedia) ? product.matchedMedia : [];
-
-  const tier1Ids = mmEntries
-    .filter(mm => mm.matchTier === 'product_match')
-    .map(mm => String(mm.mediaId));
-  const tier2Ids = includeCategoryMatched
-    ? mmEntries.filter(mm => mm.matchTier === 'product_category').map(mm => String(mm.mediaId))
-    : [];
+  // Product mode: tiers 1/2 come from the CatalogProduct.matchedMedia
+  // mirror; tier 3 is opt-in via includeBrandMatched.
+  // Brand mode: tiers 1/2 are product-specific and skipped; tier 3
+  // always fires (brand-scoped UGC is the primary UGC source).
+  let tier1Ids = [];
+  let tier2Ids = [];
+  if (!isBrandOnly) {
+    const product = await CatalogProduct.findById(productId).select('matchedMedia').lean();
+    const mmEntries = Array.isArray(product?.matchedMedia) ? product.matchedMedia : [];
+    tier1Ids = mmEntries
+      .filter(mm => mm.matchTier === 'product_match')
+      .map(mm => String(mm.mediaId));
+    tier2Ids = includeCategoryMatched
+      ? mmEntries.filter(mm => mm.matchTier === 'product_category').map(mm => String(mm.mediaId))
+      : [];
+  }
   let tier3Ids = [];
-  if (includeBrandMatched) {
+  if (isBrandOnly || includeBrandMatched) {
     const brandMatches = await ProductMatchArtifact.find({
       brandId, outcome: 'brand_match'
     }).select('mediaId').lean();

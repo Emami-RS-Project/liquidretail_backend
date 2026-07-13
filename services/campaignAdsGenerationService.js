@@ -371,15 +371,17 @@ async function expandWizardJob({
   //     legacy cartesian was 1:1-only and stamped Ad.aspectRatio='1:1'
   //     regardless of platformFormat, so it can't serve 4:5 / 9:16 / 16:9
   //     image ads. Concept-driven respects aspectRatioForPlatformFormat.
-  // Brand-only runs (productIds.length===0) stay on legacy cartesian.
+  //
+  // Brand campaigns (productIds.length===0) now route through
+  // concept-driven too — seededUniverseService.buildSeededUniverse and
+  // aiCreativeDirectorService both handle productId=null cleanly, and
+  // runConceptDrivenExpansion iterates a single [null] product when
+  // productIds is empty (brand-only mode).
   const wantsVideo = resolvedKinds.includes('video');
   const wantsImage = resolvedKinds.includes('image');
   const useConceptDriven =
-    productIds.length > 0
-    && (
-      wantsVideo
-      || (wantsImage && String(process.env.AI_CONCEPT_DRIVEN || '').toLowerCase() === 'true')
-    );
+    wantsVideo
+    || (wantsImage && String(process.env.AI_CONCEPT_DRIVEN || '').toLowerCase() === 'true');
 
   if (useConceptDriven && !dryRun) {
     const result = await runConceptDrivenExpansion({
@@ -1355,12 +1357,18 @@ async function runConceptDrivenExpansion({
   );
   function filterUniverseForProduct(productId, universe) {
     if (!excludeSet.size) return universe;
-    return universe.filter(u =>
-      !excludeSet.has(`${String(productId)}|${String(u.mediaId)}`)
-    );
+    const productKey = productId ? String(productId) : 'NULL';
+    return universe.filter(u => !excludeSet.has(`${productKey}|${String(u.mediaId)}`));
   }
 
-  const perProductResults = await Promise.all(productIds.map(async productId => {
+  // Brand-only runs (no productIds) iterate a single [null] product —
+  // seededUniverseService and the Director both accept productId=null
+  // and switch to brand-scoped signals (all brand catalog media +
+  // brand_match UGC).
+  const productIterations = productIds.length > 0 ? productIds : [null];
+
+  const perProductResults = await Promise.all(productIterations.map(async productId => {
+    const productTag = productId ? `product=${productId}` : `brand-only`;
     try {
       // 1. Seeded universe. wantsVideo flips a ranking bias inside the
       // universe service — text-burned-in candidates get deprioritized
@@ -1374,7 +1382,7 @@ async function runConceptDrivenExpansion({
         });
       const filtered = filterUniverseForProduct(productId, universe);
       if (!filtered.length) {
-        console.log(`📦 conceptDriven[product=${productId}]: empty universe after excludePairings — skipping`);
+        console.log(`📦 conceptDriven[${productTag}]: empty universe after excludePairings — skipping`);
         return { productId, payloads: [], skipped: 'empty_universe' };
       }
 
@@ -1388,7 +1396,7 @@ async function runConceptDrivenExpansion({
           creativeIntent, seededUniverse: filtered, seedUniverseHash
         });
       if (!concepts.length) {
-        console.warn(`📦 conceptDriven[product=${productId}]: Director returned no concepts — skipping`);
+        console.warn(`📦 conceptDriven[${productTag}]: Director returned no concepts — skipping`);
         return { productId, payloads: [], skipped: 'no_concepts' };
       }
 
@@ -1411,7 +1419,7 @@ async function runConceptDrivenExpansion({
         batchRationale  = judged.batchRationale;
       } catch (err) {
         // Judge failure is non-fatal — emit unscored Ads in input order.
-        console.warn(`📦 conceptDriven[product=${productId}]: Judge failed (${err.message}) — queueing unscored`);
+        console.warn(`📦 conceptDriven[${productTag}]: Judge failed (${err.message}) — queueing unscored`);
         conceptScores = concepts.map((c, i) => ({
           conceptId: c.concept_id, judgeScore: null, judgeRank: i + 1,
           criteriaScores: {}, hardViolations: []
@@ -1490,7 +1498,7 @@ async function runConceptDrivenExpansion({
       }
 
       console.log(
-        `📦 conceptDriven[product=${productId}]: round=${roundIndex} ` +
+        `📦 conceptDriven[${productTag}]: round=${roundIndex} ` +
         `universe=${filtered.length} (catalog=${counts.catalog || (counts.catalog_hero + counts.catalog_alt)} ` +
         `ugc=${counts.ugc_product_match + counts.ugc_product_category + counts.ugc_brand_match}) ` +
         `concepts=${concepts.length} payloads=${payloads.length} ` +
@@ -1505,7 +1513,7 @@ async function runConceptDrivenExpansion({
         batchRationale
       };
     } catch (err) {
-      console.error(`📦 conceptDriven[product=${productId}]: failed (${err.message})`);
+      console.error(`📦 conceptDriven[${productTag}]: failed (${err.message})`);
       return { productId, payloads: [], skipped: 'error', error: err.message };
     }
   }));
@@ -1529,7 +1537,8 @@ async function runConceptDrivenExpansion({
       const sorted = list.slice().sort((a, b) => (a.judgeRank ?? 999) - (b.judgeRank ?? 999));
       const slice  = isFinite(cap) ? sorted.slice(0, cap) : sorted;
       if (slice.length < list.length) {
-        console.log(`📦 conceptDriven[product=${r.productId}]: capped ${list.length} → ${slice.length} ${kind} payload(s) (cap=${cap})`);
+        const tag = r.productId ? `product=${r.productId}` : 'brand-only';
+        console.log(`📦 conceptDriven[${tag}]: capped ${list.length} → ${slice.length} ${kind} payload(s) (cap=${cap})`);
       }
       kept.push(...slice);
     }
