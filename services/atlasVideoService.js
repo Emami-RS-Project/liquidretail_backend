@@ -161,12 +161,16 @@ function cropImageUrlForAspect(originalUrl, aspectRatio) {
     const { w, h } = imageDimsForAspect(aspectRatio);
     return originalUrl.replace('/image/upload/', `/image/upload/c_fill,w_${w},h_${h},g_auto,q_auto:good/`);
   }
-  // Video source → extract first frame at target aspect (Cloudinary
-  // c_fill on a video URL with f_jpg returns a still).
+  // Video source → extract a representative still at target aspect.
+  // so_auto asks Cloudinary to pick the most representative poster
+  // frame (its own saliency heuristic) instead of taking frame 0
+  // verbatim. Frame 0 on Reels / TikToks is frequently a black flash,
+  // title card, or mid-motion blur from an animated intro — so_auto
+  // gives Grok a stronger anchor. f_jpg forces JPEG output.
   if (originalUrl.includes('/video/upload/')) {
     const { w, h } = imageDimsForAspect(aspectRatio);
     return originalUrl
-      .replace('/video/upload/', `/video/upload/so_0,c_fill,w_${w},h_${h},g_auto,f_jpg,q_auto:good/`)
+      .replace('/video/upload/', `/video/upload/so_auto,c_fill,w_${w},h_${h},g_auto,f_jpg,q_auto:good/`)
       .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2');
   }
   // Non-Cloudinary URL: pass through untouched. Atlas will pull from
