@@ -97,14 +97,31 @@ module.exports = {
 
     // ── Dynamic content ───────────────────────────────────────────
     const brandName    = meta.brandName || 'Brand';
+    // Brand vs product endcard dispatch. Brand campaigns (no
+    // productId) suppress the product-specific chrome — badge pill,
+    // star rating + review bar, ships-free delivery line — and
+    // substitute Brand.tagline into the primary-text slot so the
+    // composition reads as identity rather than a product sale.
+    // Quote / reviewer / CTA / top brand pill are shared across modes.
+    const endcardMode = meta.endcardMode === 'brand' ? 'brand' : 'product';
+    const isBrandMode = endcardMode === 'brand';
+
     const badgeText    = (meta.badgeText || 'Customer Favorite').toUpperCase();
-    const productName  = meta.productName || 'Signature Product';
+    const primaryLine  = isBrandMode
+      ? (meta.brandTagline || meta.headline || 'A brand you can trust')
+      : (meta.productName || 'Signature Product');
+    const productName  = primaryLine;
+    const hasRating    = Number.isFinite(Number(meta.rating)) && Number(meta.rating) > 0;
     const rating       = Number(meta.rating ?? 4.9);
     const reviewCount  = meta.reviewCount || '327 reviews';
     const quote        = normalizeQuote(meta.quote || 'Highly rated for comfort, durability, and standout style.');
     const reviewer     = meta.reviewer || 'Verified customer';
-    const deliveryLine = meta.deliveryLine || 'Ships free — arrives 2-3 days';
-    const ctaText      = (meta.ctaText || meta.cta || 'Shop Now').toUpperCase();
+    const deliveryLine = isBrandMode
+      ? (meta.brandWebsiteUrl
+          ? String(meta.brandWebsiteUrl).replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/+$/, '')
+          : null)
+      : (meta.deliveryLine || 'Ships free — arrives 2-3 days');
+    const ctaText      = (meta.ctaText || meta.cta || (isBrandMode ? 'Learn More' : 'Shop Now')).toUpperCase();
 
     const isVertical = H > W;
 
@@ -166,6 +183,10 @@ module.exports = {
     let cursor = Math.round(H * 0.54);
 
     // ── 2. Badge pill ────────────────────────────────────────────
+    // Product-specific — "Customer Favorite" / "Bestseller" reads wrong
+    // on a brand identity ad. Skip entirely in brand mode; cursor stays
+    // put so the product-title slot moves up to fill the freed space.
+    if (!isBrandMode) {
     ctx.save();
     ctx.globalAlpha = badgeT;
     ctx.font = `700 ${isVertical ? 21 : 17}px "${fonts.sans}"`;
@@ -198,6 +219,7 @@ module.exports = {
     ctx.restore();
 
     cursor += badgeH + rowGap;
+    } // end !isBrandMode (badge)
 
     // ── 3. Product title (2-line wrap) with local scrim ──────────
     ctx.save();
@@ -244,6 +266,10 @@ module.exports = {
     cursor += titleBoxH + rowGap;
 
     // ── 4. Rating (stars + score + count + bar) — one scrim ──────
+    // Product-specific proof anchor. Skip when brand mode (no product
+    // to rate) or when no rating data was resolved by buildMetaForAd —
+    // the old 4.9 fabricated fallback misrepresents unrated inventory.
+    if (!isBrandMode && hasRating) {
     ctx.save();
     ctx.globalAlpha = ratingT;
 
@@ -331,6 +357,7 @@ module.exports = {
 
     ctx.restore();
     cursor += ratingBoxH + rowGap;
+    } // end !isBrandMode && hasRating (rating bar)
 
     // ── 5. Quote (2-line fixed) with local scrim ─────────────────
     const QUOTE_LINES_FIXED = 2;
@@ -398,51 +425,63 @@ module.exports = {
     ctx.restore();
     cursor += reviewerBoxH + rowGap;
 
-    // ── 7. Delivery line with local scrim + truck icon ───────────
-    ctx.save();
-    ctx.font = `500 ${isVertical ? 18 : 15}px "${fonts.sans}"`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-
-    const deliveryFontSize = isVertical ? 18 : 15;
-    const iconSize = isVertical ? 18 : 14;
-    const deliveryFit = fitText(ctx, deliveryLine, contentW - scrimPadX * 2 - iconSize * 2 - 8);
-    const deliveryTextW = ctx.measureText(deliveryFit).width;
-
-    const deliveryBoxW = iconSize * 2 + 8 + deliveryTextW + scrimPadX * 2;
-    const deliveryBoxH = Math.max(iconSize, deliveryFontSize) * 1.3 + scrimPadY * 2;
-
-    // CTA sizing — needed to reserve horizontal space
+    // ── 7. Delivery / brand-website line ─────────────────────────
+    // Product mode: "Ships free — arrives 2-3 days" with a truck icon.
+    // Brand mode: compact brand website URL (protocol/www stripped) as
+    // a subtle footer, no truck icon. When the brand has no website
+    // configured deliveryLine is null and the row is skipped.
+    // CTA sizing is computed regardless so the button always ships.
     const ctaW = Math.min(Math.round(W * 0.42), 340);
     const ctaH = isVertical ? 76 : 56;
     const ctaX = W - rightSafe - ctaW;
-    const ctaY = cursor + Math.max(0, (ctaH - deliveryBoxH) / 2);
-    const deliveryBoxY = cursor + Math.max(0, (deliveryBoxH < ctaH ? (ctaH - deliveryBoxH) / 2 : 0));
-    const deliveryBoxX = blockX;
-    const deliveryMidY = deliveryBoxY + deliveryBoxH / 2;
 
-    // Cap delivery scrim to not overlap CTA
-    const cappedDeliveryW = Math.min(deliveryBoxW, ctaX - deliveryBoxX - 20);
+    const showDeliveryRow = !!deliveryLine;
+    let deliveryRowH = ctaH;
+    if (showDeliveryRow) {
+      ctx.save();
+      ctx.font = `500 ${isVertical ? 18 : 15}px "${fonts.sans}"`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
 
-    drawLocalScrim(
-      ctx, deliveryBoxX, deliveryBoxY, cappedDeliveryW, deliveryBoxH,
-      scrimRadius * 0.85, rgba(colors.scrim, deliveryScrimOpacity), scrimShadowBlur * 0.85
-    );
+      const deliveryFontSize = isVertical ? 18 : 15;
+      const iconSize = isBrandMode ? 0 : (isVertical ? 18 : 14);
+      const iconGap  = isBrandMode ? 0 : 8;
+      const deliveryFit = fitText(ctx, deliveryLine, contentW - scrimPadX * 2 - iconSize * 2 - iconGap);
+      const deliveryTextW = ctx.measureText(deliveryFit).width;
 
-    drawTruckIcon(
-      ctx,
-      deliveryBoxX + scrimPadX,
-      deliveryMidY - iconSize / 2,
-      iconSize,
-      rgba(colors.textSecondary, 0.92)
-    );
-    ctx.fillStyle = rgba(colors.textSecondary, 0.96);
-    ctx.fillText(
-      deliveryFit,
-      deliveryBoxX + scrimPadX + iconSize * 2 + 8,
-      deliveryMidY
-    );
-    ctx.restore();
+      const deliveryBoxW = iconSize * 2 + iconGap + deliveryTextW + scrimPadX * 2;
+      const deliveryBoxH = Math.max(iconSize, deliveryFontSize) * 1.3 + scrimPadY * 2;
+      deliveryRowH = Math.max(deliveryBoxH, ctaH);
+
+      const deliveryBoxY = cursor + Math.max(0, (deliveryBoxH < ctaH ? (ctaH - deliveryBoxH) / 2 : 0));
+      const deliveryBoxX = blockX;
+      const deliveryMidY = deliveryBoxY + deliveryBoxH / 2;
+
+      const cappedDeliveryW = Math.min(deliveryBoxW, ctaX - deliveryBoxX - 20);
+
+      drawLocalScrim(
+        ctx, deliveryBoxX, deliveryBoxY, cappedDeliveryW, deliveryBoxH,
+        scrimRadius * 0.85, rgba(colors.scrim, deliveryScrimOpacity), scrimShadowBlur * 0.85
+      );
+
+      if (!isBrandMode) {
+        drawTruckIcon(
+          ctx,
+          deliveryBoxX + scrimPadX,
+          deliveryMidY - iconSize / 2,
+          iconSize,
+          rgba(colors.textSecondary, 0.92)
+        );
+      }
+      ctx.fillStyle = rgba(colors.textSecondary, 0.96);
+      ctx.fillText(
+        deliveryFit,
+        deliveryBoxX + scrimPadX + iconSize * 2 + iconGap,
+        deliveryMidY
+      );
+      ctx.restore();
+    }
+    const ctaY = cursor + Math.max(0, (ctaH - deliveryRowH) / 2);
 
     // ── 8. CTA button (right-aligned, solid pill) ─────────────────
     const ctaScale = ctaT * pulseT;

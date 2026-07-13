@@ -52,6 +52,15 @@ module.exports = {
         ? h.rgba(rgb, alpha)
         : `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`;
 
+    // ── Endcard-mode dispatch ──────────────────────────────────────
+    // Brand campaigns (no productId) suppress the product-specific
+    // chrome — badge pill + star rating — and substitute Brand.tagline
+    // into the primary-text slot. Quote / reviewer / brand mark are
+    // shared across modes. Same treatment canonical.script.js (feed)
+    // applies at 1:1 / 4:5.
+    const endcardMode = meta.endcardMode === 'brand' ? 'brand' : 'product';
+    const isBrandMode = endcardMode === 'brand';
+
     // ── Dynamic content ────────────────────────────────────────────
     const badgeText = String(
       meta.badgeText ||
@@ -60,12 +69,12 @@ module.exports = {
     ).toUpperCase();
 
     const productName = String(
-      meta.productName ||
-      meta.product ||
-      meta.name ||
-      'Desert Rose Arrangement'
+      isBrandMode
+        ? (meta.brandTagline || meta.headline || 'A brand you can trust')
+        : (meta.productName || meta.product || meta.name || 'Desert Rose Arrangement')
     );
 
+    const hasRating = Number.isFinite(Number(meta.rating)) && Number(meta.rating) > 0;
     const rating = clamp(
       Number(meta.rating ?? 4.9),
       0,
@@ -222,7 +231,8 @@ module.exports = {
     let cursorY = contentTop;
 
     // ── 2. Callout badge ───────────────────────────────────────────
-    if (meta.showBadge !== false && badgeText) {
+    // Product-specific — skip in brand mode.
+    if (!isBrandMode && meta.showBadge !== false && badgeText) {
       ctx.save();
       ctx.globalAlpha = badgeT;
 
@@ -397,6 +407,11 @@ module.exports = {
     cursorY += productBoxH + rowGap;
 
     // ── 4. Ratings row with local scrim ────────────────────────────
+    // Product-specific — skip in brand mode OR when no rating data
+    // was resolved (buildMetaForAd leaves meta.rating null for brand
+    // ads and unrated products; the old 4.9 fabricated fallback
+    // misrepresents inventory that has no actual score).
+    if (!isBrandMode && hasRating) {
     ctx.save();
     ctx.globalAlpha = ratingT;
     ctx.textAlign = 'left';
@@ -566,6 +581,7 @@ module.exports = {
     ctx.restore();
 
     cursorY += ratingBoxH + rowGap;
+    } // end !isBrandMode && hasRating (ratings row)
 
     // ── 5. Quote with local scrim ──────────────────────────────────
     if (meta.showQuote !== false && quote) {
