@@ -803,7 +803,7 @@ const REELS_DURATION_MAX_SEC = 8;
 // Ad rows; the artifact's _id becomes conceptArtifactId on each Ad.
 async function directConceptsRound({
   brandId,
-  productId,
+  productId      = null,    // null in brand-only mode — Director branches on campaignKind + productId presence downstream
   platformFormat = 'meta_feed_1_1',
   campaignKind   = null,
   campaignId     = null,    // when set, Campaign.creativeBrief is loaded + threaded into the prompt
@@ -813,8 +813,7 @@ async function directConceptsRound({
   roundIndex      = null,   // computed from prior rows when omitted
   avoidList       = null    // computed from prior rows when omitted
 }) {
-  if (!brandId)   throw badRequest('brandId required');
-  if (!productId) throw badRequest('productId required (Phase A is product-scoped)');
+  if (!brandId) throw badRequest('brandId required');
   if (!Array.isArray(seededUniverse) || !seededUniverse.length) {
     throw badRequest('seededUniverse required and must be non-empty');
   }
@@ -962,7 +961,7 @@ async function directConceptsRound({
 
   console.log(
     `🎭 directorRound[r${roundIndex}/${platformFormat}]: ` +
-    `brand=${brandId} product=${productId} kind=${campaignKind || '-'} ` +
+    `brand=${brandId} product=${productId || '-'} kind=${campaignKind || '-'} ` +
     `universe=${seededUniverse.length} concepts=${(parsed.concepts || []).length} ` +
     `took=${elapsedMs}ms warnings=${warnings.length}`
   );
