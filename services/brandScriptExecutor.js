@@ -536,62 +536,111 @@ async function buildMetaForAd(ad, brand) {
     productOnlyImageUrl,
 
     // ── Theme (canonical path) ─────────────────────────────────────
-    // Colors + font families that Claude / an operator picks per
-    // brand. Feeds meta.theme in the canonical renderer. Kept as a
-    // freeform object so future fields (icon color, secondary badge,
-    // etc.) don't need schema changes.
-    theme:              brand?.styleTheme || {}
+    // Derived from three sources in priority order (higher wins):
+    //   1. Brand.styleTheme (operator-curated canonical script keys)
+    //   2. Brand.primaryColor / accentColor / secondaryColor / fontFamily
+    //      (brand-level fields set at onboarding)
+    //   3. LayoutInputArtifact.input.brand.* (LLM-derived per-artifact,
+    //      backed by media palette when Brand fields are empty)
+    // Canonical scripts have sensible defaults for every field they
+    // read, so any subset of the above is enough to render.
+    theme:              deriveTheme(brand, li)
   };
+}
+
+// Merge theme signals from Brand.styleTheme, Brand.* color/font fields,
+// and LayoutInputArtifact.input.brand into the shape the canonical
+// scripts consume. Brand.styleTheme keys always win when explicitly
+// set — this preserves operator-curated overrides. The rest of the
+// slots fall back through Brand.primaryColor → layoutInput.brand →
+// canonical defaults.
+function deriveTheme(brand, li) {
+  const explicit = brand?.styleTheme || {};
+
+  const brandColors = {
+    primary:   hexToRgbArray(brand?.primaryColor   || li?.brand?.primary_color),
+    secondary: hexToRgbArray(brand?.secondaryColor || li?.brand?.secondary_color),
+    accent:    hexToRgbArray(brand?.accentColor    || li?.brand?.accent_color)
+  };
+
+  const brandFont = brand?.fontFamily || li?.brand?.font_family || null;
+
+  // Only fill slots that aren't already set on styleTheme. Undefined
+  // means "let the canonical script's default apply" — cleaner than
+  // writing null and forcing the script to null-check.
+  return {
+    // Text
+    textPrimary:      explicit.textPrimary      || [255, 255, 255],
+    textSecondary:    explicit.textSecondary    || brandColors.secondary || [220, 220, 220],
+    // Backdrops / scrims
+    scrimColor:       explicit.scrimColor       || [0, 0, 0],
+    endcardBgColor:   explicit.endcardBgColor   || brandColors.primary || [8, 8, 10],
+    // Accents (stars, promo pill, badge)
+    accentColor:      explicit.accentColor      || brandColors.accent || brandColors.primary,
+    starColor:        explicit.starColor        || brandColors.accent || [245, 183, 10],
+    promoBgColor:     explicit.promoBgColor     || brandColors.accent || [245, 183, 10],
+    promoTextColor:   explicit.promoTextColor   || [22, 22, 26],
+    // Fonts — brandFont applies to headings + body; quote defaults serif.
+    headingFontFamily: explicit.headingFontFamily || brandFont || 'PlayfairDisplay',
+    bodyFontFamily:    explicit.bodyFontFamily    || brandFont || 'Inter',
+    quoteFontFamily:   explicit.quoteFontFamily   || 'Lora',
+    // Pass-through: any other keys operators added to styleTheme.
+    ...explicit
+  };
+}
+
+// Convert a "#RRGGBB" or "#RGB" hex string into [r, g, b] for the
+// canonical scripts' rgba() helper. Returns null on empty / invalid
+// input so the caller can fall through to the next source.
+function hexToRgbArray(hex) {
+  if (!hex) return null;
+  const clean = String(hex).trim().replace(/^#/, '');
+  if (!/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(clean)) return null;
+  const s = clean.length === 3
+    ? clean.split('').map(c => c + c).join('')
+    : clean;
+  const r = parseInt(s.slice(0, 2), 16);
+  const g = parseInt(s.slice(2, 4), 16);
+  const b = parseInt(s.slice(4, 6), 16);
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null;
+  return [r, g, b];
 }
 
 // Resolve which script source to run for one ad. Format-aware — the
 // ad's platformFormat determines which brand slot and which canonical
 // variant apply. Per-format priority ladder:
 //
-//   vertical (9:16 — Reels, Shorts, Stories):
-//     1. brand.styleScriptVertical    (custom vertical override)
-//     2. canonicalScriptVertical      (top_scrim_editorial)   — requires styleTheme
-//     3. no chrome                    (raw Grok video ships as-is)
+//   vertical (9:16):   brand.styleScriptVertical  → canonical vertical
+//   landscape (16:9):  brand.styleScriptLandscape → canonical landscape
+//   feed (4:5, 1:1):   brand.styleScript          → canonical feed
 //
-//   landscape (16:9 — pmax, YouTube pre-roll):
-//     1. brand.styleScriptLandscape   (custom landscape override)
-//     2. canonicalScriptLandscape     (local_scrim_landscape) — requires styleTheme
-//     3. no chrome
-//
-//   feed (4:5, 1:1):
-//     1. brand.styleScript            (custom feed override)
-//     2. canonicalScript              (canonical.script.js)   — requires styleTheme
-//     3. no chrome
-//
-// Requiring styleTheme for the canonical tier keeps opt-in behavior:
-// brands that never set a theme opt out of chrome entirely rather than
-// getting a default palette that may not match their identity.
+// Canonical is now the DEFAULT — no opt-in gate. meta.theme is derived
+// in buildMetaForAd from Brand.styleTheme, Brand.* color fields, and
+// LayoutInputArtifact.input.brand, with sensible defaults filling every
+// missing slot. So every canonical run has enough to render, and
+// operator-curated styleTheme still wins when it exists.
 async function resolveBrandRenderer(brand, ad) {
   const format     = classifyFormat(ad);
   const brandField = BRAND_SCRIPT_FIELD[format];
 
-  // 1. Custom per-format brand script
+  // 1. Custom per-format brand script (operator override)
   const brandScript = brand?.[brandField];
   if (brandScript && String(brandScript).trim()) {
     return { path: 'custom', script: brandScript, format };
   }
-  // 2. Canonical per-format (opt-in via styleTheme)
-  if (brand?.styleTheme && Object.keys(brand.styleTheme).length > 0) {
-    const {
-      getCanonicalScript,
-      getCanonicalScriptVertical,
-      getCanonicalScriptLandscape
-    } = require('./systemConfigService');
-    const getter = {
-      vertical:  getCanonicalScriptVertical,
-      landscape: getCanonicalScriptLandscape,
-      feed:      getCanonicalScript
-    }[format];
-    const { script, source } = await getter();
-    return { path: 'canonical', script, canonicalSource: source, format };
-  }
-  // 3. No chrome — ad ships as raw Grok video
-  return { path: null, script: null, format };
+  // 2. Canonical for this format — always fires when no custom script.
+  const {
+    getCanonicalScript,
+    getCanonicalScriptVertical,
+    getCanonicalScriptLandscape
+  } = require('./systemConfigService');
+  const getter = {
+    vertical:  getCanonicalScriptVertical,
+    landscape: getCanonicalScriptLandscape,
+    feed:      getCanonicalScript
+  }[format];
+  const { script, source } = await getter();
+  return { path: 'canonical', script, canonicalSource: source, format };
 }
 
 // End-to-end: render the brand's chosen path over the ad's Grok video,
