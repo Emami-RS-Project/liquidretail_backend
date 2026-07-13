@@ -88,15 +88,18 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   const canvas = await AiCanvasArtifact.findById(aiCanvasArtifactId).lean();
   if (!canvas) throw new Error(`AiCanvasArtifact ${aiCanvasArtifactId} not found`);
 
-  // Video sources skip the polish entirely. gpt-image-1 produces still
-  // images — running it on a video ad's canvas would yield a still PNG
-  // that the UI would then try to play as <video>, breaking playback.
-  // Video ads live on the Cloudinary composite (renderUrl) by design;
-  // photorealUrl stays null for them forever.
-  const sourceMedia = await Media.findById(canvas.mediaId).select('fileType').lean();
-  if (sourceMedia?.fileType === 'video') {
-    return { skipped: true, reason: 'source media is video — image-ref disabled for video ads' };
-  }
+  // Historical note: this used to bail when sourceMedia.fileType ===
+  // 'video' to prevent polishing a video ad's canvas into a still.
+  // That defense is stale — video ads now route through the veo branch
+  // in routes/ads.js (atlasVideoService → brandScriptExecutor) and
+  // never create an AiCanvasArtifact, so generateForArtifact isn't
+  // reachable from a video ad. Meanwhile, IMAGE ads with video seeds
+  // (brand campaigns picking a UGC Reel as the seed) DO reach this
+  // function via aiCanvasSpecService's shadow trigger; the old check
+  // wrongly skipped them because it keyed on the seed's fileType
+  // instead of the ad's output kind. The HTML render (canvas.outputHtml)
+  // is what the polish uses as seed — that's a PNG regardless of what
+  // the underlying source Media was.
 
   const filter = {
     mediaId:             canvas.mediaId,
