@@ -140,22 +140,24 @@ function fadeInOut(t, tStart, tHoldStart, tHoldEnd, tEnd, smooth) {
 
 // ── Phase renderers ────────────────────────────────────────────────
 
-// HOOK: headline anchored in the lower-third, over a soft bottom-up
-// scrim. Vertical Reels UI reserves ~220px top + ~240px bottom on
-// 1080×1920; lower-third at y ≈ 0.55–0.75 keeps text within the
-// visible strip below the safe zones.
+// HOOK: headline anchored in the upper-third, over a soft top-down
+// scrim. Vertical Reels UI reserves ~204px top + ~204px bottom on
+// 1080×1920 (≈10.6% of H each). Upper-third at y ≈ 0.20–0.45 keeps
+// text within the visible strip below the top safe zone (H*0.106)
+// and above the middle where the hero subject usually sits.
 function drawHook(ctx, W, H, headline, alpha, colors, fonts, rgba) {
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  // Bottom-up scrim gradient over the lower half — keeps hero motion
-  // above readable, gives headline a legibility floor.
-  const scrimTop = H * 0.42;
-  const grad = ctx.createLinearGradient(0, scrimTop, 0, H);
-  grad.addColorStop(0, rgba(colors.hookScrim, 0));
-  grad.addColorStop(1, rgba(colors.hookScrim, 0.72));
+  // Top-down scrim gradient over the upper half — opaque at top,
+  // fading to transparent as we approach the middle. Mirror of the
+  // previous bottom-up scrim.
+  const scrimBottom = H * 0.58;
+  const grad = ctx.createLinearGradient(0, 0, 0, scrimBottom);
+  grad.addColorStop(0, rgba(colors.hookScrim, 0.72));
+  grad.addColorStop(1, rgba(colors.hookScrim, 0));
   ctx.fillStyle = grad;
-  ctx.fillRect(0, scrimTop, W, H - scrimTop);
+  ctx.fillRect(0, 0, W, scrimBottom);
 
   // Headline typography — hero scale, wrapped to 2 lines max.
   const fontSize = clampNum(Math.round(H * 0.055), 60, 96);
@@ -172,7 +174,7 @@ function drawHook(ctx, W, H, headline, alpha, colors, fonts, rgba) {
   const lines = wrapLines(ctx, headline, wrapW, 2);
   const lineH = Math.round(fontSize * 1.12);
   const blockH = lines.length * lineH;
-  const yStart = H * 0.68 - blockH / 2;
+  const yStart = H * 0.32 - blockH / 2;
 
   for (let i = 0; i < lines.length; i++) {
     ctx.fillText(lines[i], padX, yStart + i * lineH);
@@ -180,19 +182,19 @@ function drawHook(ctx, W, H, headline, alpha, colors, fonts, rgba) {
   ctx.restore();
 }
 
-// PROOF: snippet quote + reviewer attribution. Same lower-third
+// PROOF: snippet quote + reviewer attribution. Same upper-third
 // anchor as the hook so the eye doesn't have to relocate mid-video.
 function drawProof(ctx, W, H, quote, reviewer, alpha, colors, fonts, rgba) {
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  // Same soft bottom-up scrim as HOOK phase for continuity.
-  const scrimTop = H * 0.42;
-  const grad = ctx.createLinearGradient(0, scrimTop, 0, H);
-  grad.addColorStop(0, rgba(colors.quoteScrim, 0));
-  grad.addColorStop(1, rgba(colors.quoteScrim, 0.72));
+  // Same soft top-down scrim as HOOK phase for continuity.
+  const scrimBottom = H * 0.58;
+  const grad = ctx.createLinearGradient(0, 0, 0, scrimBottom);
+  grad.addColorStop(0, rgba(colors.quoteScrim, 0.72));
+  grad.addColorStop(1, rgba(colors.quoteScrim, 0));
   ctx.fillStyle = grad;
-  ctx.fillRect(0, scrimTop, W, H - scrimTop);
+  ctx.fillRect(0, 0, W, scrimBottom);
 
   const padX = Math.round(W * 0.075);
   const wrapW = W - padX * 2;
@@ -217,7 +219,7 @@ function drawProof(ctx, W, H, quote, reviewer, alpha, colors, fonts, rgba) {
   const attribGap  = Math.round(H * 0.020);
 
   const totalH = quoteBlockH + attribGap + attribSize;
-  const yStart = H * 0.68 - totalH / 2;
+  const yStart = H * 0.32 - totalH / 2;
 
   for (let i = 0; i < quoteLines.length; i++) {
     ctx.fillText(quoteLines[i], padX, yStart + i * quoteLineH);
