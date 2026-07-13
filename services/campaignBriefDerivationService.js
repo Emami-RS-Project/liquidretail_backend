@@ -13,8 +13,9 @@
 // POST /api/campaigns/:id/derive-brief and on campaign sync (debounced).
 
 const OpenAI = require('openai');
-const Campaign = require('../models/Campaign');
+const Campaign       = require('../models/Campaign');
 const CatalogProduct = require('../models/CatalogProduct');
+const Brand          = require('../models/Brand');
 const { trackLlmCall } = require('./costTracker');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -109,11 +110,12 @@ function formatTargeting(targeting) {
   return parts.length ? parts.join('\n  ') : '(no structured targeting fields)';
 }
 
-function buildUserPrompt({ campaign, productTitles }) {
+function buildUserPrompt({ campaign, productTitles, brand = null }) {
   const lines = [];
   lines.push(`Campaign: ${campaign.name}`);
   if (campaign.objective)      lines.push(`Platform objective: ${campaign.objective}`);
   if (campaign.kind)           lines.push(`Derived kind: ${campaign.kind}`);
+  if (campaign.platform)       lines.push(`Source: ${campaign.platform}`);
   if (campaign.status)         lines.push(`Status: ${campaign.status}`);
   if (campaign.schedule?.start || campaign.schedule?.end) {
     lines.push(`Schedule: ${campaign.schedule.start || '?'} → ${campaign.schedule.end || 'open'}`);
@@ -136,7 +138,8 @@ function buildUserPrompt({ campaign, productTitles }) {
     lines.push('');
   }
 
-  // Walk every ad's creative for the LLM to read.
+  // Walk every ad's creative for the LLM to read. Empty for
+  // platform-native (reach-social) campaigns.
   const creatives = [];
   for (const adSet of (campaign.adSets || [])) {
     for (const ad of (adSet.ads || [])) {
@@ -157,6 +160,45 @@ function buildUserPrompt({ campaign, productTitles }) {
     if (cr.linkUrl) lines.push(`Link:  ${cr.linkUrl}`);
   }
   lines.push('');
+
+  // Platform-native campaigns arrive with no ad creatives to
+  // reverse-engineer from. Fall back to brand voice + campaign
+  // metadata (kind, name, objective, products) as the LLM's evidence
+  // for the brief. Same output shape either way.
+  if (creatives.length === 0 && brand) {
+    lines.push('NO AD CREATIVES AVAILABLE — this is a platform-native campaign created inside the operator app. Synthesize the brief from the campaign metadata above and the brand voice below.');
+    lines.push('');
+    lines.push('BRAND VOICE:');
+    if (brand.name)    lines.push(`  Brand: ${brand.name}`);
+    if (brand.tagline) lines.push(`  Tagline: "${brand.tagline}"`);
+    if (Array.isArray(brand.tone) && brand.tone.length) {
+      lines.push(`  Tone: ${brand.tone.slice(0, 8).join(', ')}`);
+    }
+    if (brand.websiteUrl) lines.push(`  Website: ${brand.websiteUrl}`);
+    const dv = brand.derivedVoice || {};
+    if (dv.voice_summary) lines.push(`  Voice summary: ${dv.voice_summary}`);
+    if (Array.isArray(dv.value_props) && dv.value_props.length) {
+      lines.push(`  Recurring value props: ${dv.value_props.slice(0, 5).join('; ')}`);
+    }
+    if (Array.isArray(dv.hooks) && dv.hooks.length) {
+      lines.push(`  Hook patterns: ${dv.hooks.slice(0, 5).join('; ')}`);
+    }
+    if (Array.isArray(dv.common_phrases) && dv.common_phrases.length) {
+      lines.push(`  Recurring phrases: ${dv.common_phrases.slice(0, 5).map(p => `"${p}"`).join(', ')}`);
+    }
+    lines.push('');
+    if (campaign.kind === 'brand') {
+      lines.push('KIND-DRIVEN GUIDANCE (kind=brand): No specific product to sell — the brief should anchor on brand identity, positioning, and top-of-funnel discovery. focus lever should favor "trust", "discovery", or "lifestyle". cta_emphasis should favor "aspirational" or "informational", NOT "urgent".');
+    } else if (campaign.kind === 'promotional') {
+      lines.push('KIND-DRIVEN GUIDANCE (kind=promotional): Deal / sale campaign. focus lever should favor "price" or "scarcity". cta_emphasis should favor "urgent".');
+    } else if (campaign.kind === 'collection') {
+      lines.push('KIND-DRIVEN GUIDANCE (kind=collection): Multi-product launch or grouping. focus lever should favor "novelty" or "discovery". cta_emphasis should favor "informational" or "aspirational".');
+    } else {
+      lines.push('KIND-DRIVEN GUIDANCE (kind=product): Single-product performance campaign. focus lever should favor "performance", "social_proof", or "transformation" depending on brand positioning. cta_emphasis should favor "low_friction" or "urgent".');
+    }
+    lines.push('');
+  }
+
   lines.push('Derive the creative brief for this campaign.');
   return lines.join('\n');
 }
@@ -185,8 +227,15 @@ async function deriveCampaignBrief(campaignId, { force = false, derivedFrom = 'm
     productTitles = products.map(p => p.title).filter(Boolean);
   }
 
+  // Load brand voice — used as fallback signal for platform-native
+  // (reach-social) campaigns that have no ad creatives to
+  // reverse-engineer from. Cheap select; buildUserPrompt no-ops the
+  // brand block when creatives are present.
+  const brand = await Brand.findById(campaign.brandId)
+    .select('name tagline tone websiteUrl derivedVoice').lean();
+
   const system = buildSystemPrompt();
-  const user   = buildUserPrompt({ campaign, productTitles });
+  const user   = buildUserPrompt({ campaign, productTitles, brand });
 
   const t0 = Date.now();
   const completion = await trackLlmCall(

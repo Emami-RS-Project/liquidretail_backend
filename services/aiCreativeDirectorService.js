@@ -874,8 +874,32 @@ async function directConceptsRound({
   if (campaignId) {
     try {
       const Campaign = require('../models/Campaign');
-      const camp = await Campaign.findById(campaignId).select('creativeBrief').lean();
+      const camp = await Campaign.findById(campaignId)
+        .select('creativeBrief briefDerivedAt platform kind name objective targeting matchedProductIds status schedule insights adSets brandId')
+        .lean();
       creativeBrief = camp?.creativeBrief || null;
+
+      // Lazy synthetic-brief derivation for platform-native campaigns.
+      // Platform-synced (meta-ads, google-ads) campaigns have their
+      // brief derived at ingest by campaignSyncService. Platform-native
+      // (reach-social) campaigns get theirs derived here on first use
+      // — same output shape, same downstream flow.
+      if (!creativeBrief && camp?.platform === 'reach-social') {
+        try {
+          const { deriveCampaignBrief } = require('./campaignBriefDerivationService');
+          const result = await deriveCampaignBrief(campaignId, { derivedFrom: 'director_lazy' });
+          if (result?.brief) {
+            creativeBrief = result.brief;
+            console.log(
+              `📋 directorRound: derived synthetic brief for reach-social campaign=${campaignId} ` +
+              `kind=${camp.kind || '-'} focus=${creativeBrief.focus || '-'} ` +
+              `cta=${creativeBrief.cta_emphasis || '-'}`
+            );
+          }
+        } catch (deriveErr) {
+          console.warn(`   ⚠️  directorRound: synthetic brief derivation failed (${deriveErr.message}) — proceeding without`);
+        }
+      }
     } catch (err) {
       console.warn(`   ⚠️  directorRound: Campaign brief load failed (${err.message}) — proceeding without`);
     }
