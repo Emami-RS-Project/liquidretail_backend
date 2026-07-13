@@ -94,8 +94,16 @@ const TEMPLATE_SUPPORTS_VARIANT = {
   ai_promotional:        new Set(['ugc', 'product_image'])
 };
 
-// Aspect ratios we're shipping ad output for in V1.
-const SHIPPING_RATIOS = new Set(['1:1', '9:16', '16:9']);
+// Aspect ratios we ship ad output for — derived from the platformFormats
+// table so this stays aligned with product ads (concept-driven path
+// sets aspectRatio directly from platformFormat, no gate). Brand ads
+// route through the legacy cartesian and hit this filter; keeping it
+// dynamic means any new platformFormat addition auto-unlocks the same
+// aspect for brand campaigns.
+const { PLATFORM_FORMATS } = require('./platformFormats');
+const SHIPPING_RATIOS = new Set(
+  Object.values(PLATFORM_FORMATS).map(f => f.aspectRatio).filter(Boolean)
+);
 
 // Brand-only inventory cap. Without picks, this limits how many of
 // the brand's brand_match media get pulled into the queue.
