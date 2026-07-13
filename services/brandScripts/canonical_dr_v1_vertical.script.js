@@ -27,10 +27,12 @@
 
 const FPS = 24;
 
-// Load the product-only image lazily and cache the promise so all
-// frames reuse the same decoded image object. Falls back to null when
-// the file is missing — the endcard degrades to text-only.
+// Endcard imagery is loaded lazily and cached across frames. Product
+// endcard uses productImage; brand endcard uses brandLogo. Only the
+// one relevant to the ad's endcardMode is actually needed, but caching
+// both promises keeps the code parallel.
 let productImagePromise = null;
+let brandLogoPromise    = null;
 
 module.exports = {
   renderFrame: async (frameIndex, ctx, plate, meta, h) => {
@@ -67,14 +69,17 @@ module.exports = {
     };
 
     // ── Copy resolution ────────────────────────────────────────────
-    const headline    = String(meta.headline || meta.hookHeadline || '').trim();
-    const quote       = String(meta.quoteSnippet || meta.quote || '').trim();
-    const reviewer    = String(meta.reviewer || 'Verified customer').trim().toUpperCase();
-    const productName = String(meta.productName || meta.product || '').trim();
-    const rating      = Number(meta.rating);
-    const reviewCount = Number(meta.reviewCount);
-    const promoText   = String(meta.promoText || '').trim();
-    const brandName   = String(meta.brandName || '').trim();
+    const headline     = String(meta.headline || meta.hookHeadline || '').trim();
+    const quote        = String(meta.quoteSnippet || meta.quote || '').trim();
+    const reviewer     = String(meta.reviewer || 'Verified customer').trim().toUpperCase();
+    const productName  = String(meta.productName || meta.product || '').trim();
+    const rating       = Number(meta.rating);
+    const reviewCount  = Number(meta.reviewCount);
+    const promoText    = String(meta.promoText || '').trim();
+    const brandName    = String(meta.brandName || '').trim();
+    const brandTagline = String(meta.brandTagline || '').trim();
+    const brandWebsite = normalizeWebsite(meta.brandWebsiteUrl);
+    const endcardMode  = meta.endcardMode === 'brand' ? 'brand' : 'product';
 
     // ── Phase gating ───────────────────────────────────────────────
     if (t < 3) {
@@ -86,18 +91,37 @@ module.exports = {
     } else {
       const alpha = fadeInOut(t, 6.0, 6.3, 8.0, 8.0, smooth);
       if (alpha > 0.01) {
-        // Lazy-load the product-only image once, then reuse.
-        if (meta.productOnlyImagePath && !productImagePromise) {
-          productImagePromise = canvas.loadImage(meta.productOnlyImagePath).catch(() => null);
+        if (endcardMode === 'brand') {
+          if (meta.brandLogoPath && !brandLogoPromise) {
+            brandLogoPromise = canvas.loadImage(meta.brandLogoPath).catch(() => null);
+          }
+          const brandLogo = brandLogoPromise ? await brandLogoPromise : null;
+          drawBrandEndCard(ctx, W, H, {
+            brandLogo, brandName, brandTagline, brandWebsite, quote, reviewer
+          }, alpha, colors, fonts, rgba);
+        } else {
+          if (meta.productOnlyImagePath && !productImagePromise) {
+            productImagePromise = canvas.loadImage(meta.productOnlyImagePath).catch(() => null);
+          }
+          const productImage = productImagePromise ? await productImagePromise : null;
+          drawEndCard(ctx, W, H, {
+            productImage, productName, rating, reviewCount, promoText, brandName
+          }, alpha, colors, fonts, rgba);
         }
-        const productImage = productImagePromise ? await productImagePromise : null;
-        drawEndCard(ctx, W, H, {
-          productImage, productName, rating, reviewCount, promoText, brandName
-        }, alpha, colors, fonts, rgba);
       }
     }
   }
 };
+
+// Strip protocol + trailing slash for compact display: "reach-social.io"
+// reads cleaner than "https://reach-social.io/" on a small footer line.
+function normalizeWebsite(url) {
+  if (!url) return '';
+  return String(url).trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .replace(/\/+$/, '');
+}
 
 // ── Timing ─────────────────────────────────────────────────────────
 
@@ -288,6 +312,104 @@ function drawEndCard(ctx, W, H, data, alpha, colors, fonts, rgba) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     ctx.fillText(brandName.toUpperCase(), W / 2, H - Math.round(H * 0.04));
+  }
+
+  ctx.restore();
+}
+
+// BRAND END CARD (0:06-0:08 brand-mode variant): brand logo dominates
+// the upper half; tagline sits below on a divider-separated row; small
+// brand-mark + website footer anchors the bottom. Composition mirrors
+// the product endcard's rhythm but reads as identity rather than a
+// transactional product moment.
+function drawBrandEndCard(ctx, W, H, data, alpha, colors, fonts, rgba) {
+  const { brandLogo, brandName, brandTagline, brandWebsite } = data;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  // Full-frame background wash — same treatment as product endcard.
+  ctx.fillStyle = rgba(colors.endcardBg, 0.94);
+  ctx.fillRect(0, 0, W, H);
+
+  const padX = Math.round(W * 0.08);
+
+  // Brand logo slot — smaller than product endcard's product image
+  // (logos are simpler shapes and don't need to dominate 60% of the
+  // frame the way a product does). ~35% frame height, centered above
+  // the tagline.
+  const logoMaxW = W - padX * 2;
+  const logoMaxH = Math.round(H * 0.32);
+  const logoCenterY = Math.round(H * 0.34);
+
+  if (brandLogo && brandLogo.width && brandLogo.height) {
+    const scale = Math.min(logoMaxW / brandLogo.width, logoMaxH / brandLogo.height);
+    const drawW = Math.round(brandLogo.width * scale);
+    const drawH = Math.round(brandLogo.height * scale);
+    const drawX = Math.round((W - drawW) / 2);
+    const drawY = Math.round(logoCenterY - drawH / 2);
+    ctx.drawImage(brandLogo, drawX, drawY, drawW, drawH);
+  } else if (brandName) {
+    // No logo image — fall back to the brand name at hero scale as
+    // the identity anchor. Same slot, same y-anchor.
+    const wordmarkSize = clampNum(Math.round(H * 0.052), 60, 96);
+    ctx.font = `700 ${wordmarkSize}px "${fonts.headline}"`;
+    ctx.fillStyle = rgba(colors.endcardText, 1);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(brandName.toUpperCase(), W / 2, logoCenterY);
+  }
+
+  // Divider under the logo slot.
+  const dividerY = logoCenterY + Math.round(logoMaxH / 2) + Math.round(H * 0.03);
+  ctx.strokeStyle = rgba(colors.endcardBody, 0.35);
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padX, dividerY);
+  ctx.lineTo(W - padX, dividerY);
+  ctx.stroke();
+
+  // Brand tagline — editorial serif at a larger scale than the product
+  // endcard's product name. Positions the tagline as the primary line
+  // the viewer reads on the endcard.
+  let cursorY = dividerY + Math.round(H * 0.036);
+  if (brandTagline) {
+    const taglineSize = clampNum(Math.round(H * 0.034), 40, 64);
+    ctx.font = `500 ${taglineSize}px "${fonts.quote}"`;
+    ctx.fillStyle = rgba(colors.endcardText, 1);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    const lines = wrapLines(ctx, brandTagline, W - padX * 2, 3);
+    const lineH = Math.round(taglineSize * 1.18);
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], W / 2, cursorY + i * lineH);
+    }
+    cursorY += lines.length * lineH;
+  }
+
+  // Footer row — brand name (small caps) + website. Only renders when
+  // there's a logo image (otherwise the wordmark above already carries
+  // the name and repeating it would be noisy). Website reads compact:
+  // "reach-social.io" not "https://www.reach-social.io/".
+  const footerY = H - Math.round(H * 0.04);
+  if (brandLogo && (brandName || brandWebsite)) {
+    const footerSize = clampNum(Math.round(H * 0.014), 16, 24);
+    ctx.font = `600 ${footerSize}px "${fonts.body}"`;
+    ctx.fillStyle = rgba(colors.endcardBody, 0.85);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    const footerLine = [brandName ? brandName.toUpperCase() : null, brandWebsite]
+      .filter(Boolean)
+      .join('  ·  ');
+    if (footerLine) ctx.fillText(footerLine, W / 2, footerY);
+  } else if (brandWebsite) {
+    // Logo missing (wordmark on top) — footer becomes just the website.
+    const footerSize = clampNum(Math.round(H * 0.014), 16, 24);
+    ctx.font = `600 ${footerSize}px "${fonts.body}"`;
+    ctx.fillStyle = rgba(colors.endcardBody, 0.85);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(brandWebsite, W / 2, footerY);
   }
 
   ctx.restore();

@@ -119,12 +119,13 @@ async function renderBrandScript({ videoUrl, styleScript, meta, adId, brandName 
     const { width, height } = await probeImage(path.join(plateDir, plateFiles[0]));
     console.log(`🎨 brandScript[ad=${adId}]: extracted ${plateFiles.length} plates @ ${width}×${height} (${timings.extractMs}ms)`);
 
-    // 2b. Download the product-only image (endcard asset) into tempDir
-    // when meta carries a URL. Rewriting meta so the child only sees
-    // a local file path — the child runs with a scrubbed env and has
-    // no network access. Non-fatal: if download fails, canonical
-    // scripts degrade to a text-only endcard.
+    // 2b. Download endcard imagery (product-only image AND/OR brand
+    // logo) into tempDir when meta carries their URLs. Rewriting meta
+    // so the child only sees local file paths — the child runs with a
+    // scrubbed env and has no network access. Non-fatal on failure:
+    // canonical scripts degrade to a text-only endcard.
     const runtimeMeta = { ...(meta || {}) };
+
     if (runtimeMeta.productOnlyImageUrl) {
       try {
         const ext = extForImageUrl(runtimeMeta.productOnlyImageUrl);
@@ -135,9 +136,20 @@ async function renderBrandScript({ videoUrl, styleScript, meta, adId, brandName 
       } catch (err) {
         console.warn(`⚠️  brandScript[ad=${adId}]: product-only image download failed (${err.message}) — endcard will render text-only`);
       }
-      // Never pass the URL to the sandboxed child; the child couldn't
-      // fetch it anyway and leaving it in meta is confusing at review.
       delete runtimeMeta.productOnlyImageUrl;
+    }
+
+    if (runtimeMeta.brandLogoUrl) {
+      try {
+        const ext = extForImageUrl(runtimeMeta.brandLogoUrl);
+        const brandLogoPath = path.join(tempDir, `brand_logo${ext}`);
+        await downloadToFile(runtimeMeta.brandLogoUrl, brandLogoPath);
+        runtimeMeta.brandLogoPath = brandLogoPath;
+        console.log(`🎨 brandScript[ad=${adId}]: brand logo downloaded → ${path.basename(brandLogoPath)}`);
+      } catch (err) {
+        console.warn(`⚠️  brandScript[ad=${adId}]: brand logo download failed (${err.message}) — endcard will render text-only`);
+      }
+      delete runtimeMeta.brandLogoUrl;
     }
 
     // 3. Run child renderer.
@@ -498,6 +510,21 @@ async function buildMetaForAd(ad, brand) {
     || li?.social_proof?.primary_quote?.text
     || null;
 
+  // Endcard dispatch (canonical_dr_v1_vertical.script.js). Brand
+  // campaigns (no productId) render a brand-identity endcard —
+  // logo + tagline + optional social-proof line + website — instead
+  // of the product endcard's image + name + rating + promo. The
+  // canonical script branches on meta.endcardMode.
+  const endcardMode = ad.productId ? 'product' : 'brand';
+
+  // Brand-mode headline fallback: use brand.tagline when the layout
+  // input didn't produce a headline (platform brand campaigns that
+  // predate the kind-driven copy derivation in PR 6). Product-mode
+  // headline is unaffected — it still resolves via ad.copy or
+  // layoutInput.copy.headline as before.
+  const rawHeadline = ad.copy?.headline || li?.copy?.headline || null;
+  const headline = rawHeadline || (endcardMode === 'brand' ? (brand?.tagline || null) : null);
+
   return {
     // ── Text used by the canonical renderer + most custom scripts ──
     brandName:          brand?.name || null,
@@ -507,7 +534,7 @@ async function buildMetaForAd(ad, brand) {
     price:              ad.copy?.productPrice || li?.product?.price    || catalogProduct?.price || null,
     benefits:           li?.product?.short_benefits || li?.product?.benefits || [],
     badges,
-    headline:           ad.copy?.headline    || li?.copy?.headline     || null,
+    headline,
     // primary_quote is an OBJECT { text, author_name, source, verified } —
     // pull .text so meta.quote is a string the canvas script can render.
     quote:              ad.copy?.quote       || li?.social_proof?.primary_quote?.text || null,
@@ -534,6 +561,17 @@ async function buildMetaForAd(ad, brand) {
     quoteSnippet,
     promoText,
     productOnlyImageUrl,
+
+    // ── DR-v1 brand-mode fields ────────────────────────────────────
+    // Populated for all campaigns (product ads ignore them). endcardMode
+    // is 'brand' when there's no productId to feature. brandLogoUrl
+    // gets downloaded by the parent to tempDir and re-exposed as
+    // brandLogoPath before spawning the child renderer, mirroring the
+    // productOnlyImageUrl → productOnlyImagePath flow.
+    endcardMode,
+    brandLogoUrl:       brand?.logoUrl     || null,
+    brandTagline:       brand?.tagline     || null,
+    brandWebsiteUrl:    brand?.websiteUrl  || null,
 
     // ── Theme (canonical path) ─────────────────────────────────────
     // Derived from three sources in priority order (higher wins):
