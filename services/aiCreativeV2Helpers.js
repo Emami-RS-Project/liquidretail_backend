@@ -34,6 +34,11 @@ function pickConceptForCell({ concepts, cellKey, runId = null }) {
 // For LLM vision, 512px is plenty — the model judges composition not
 // pixel sharpness, and small images cost a fraction of full-res tiles.
 //
+// Video URLs are rewritten to a still JPEG (so_2 — 2 seconds in,
+// past typical intro flashes) with the same size cap. OpenAI's
+// multimodal endpoint 400s on .mp4 URLs; the still keeps the vision
+// signal usable when the seededUniverse includes UGC video.
+//
 // Skips:
 //   - non-Cloudinary URLs (no '/upload/' segment) — passed through as-is
 //   - URLs that already have a low-cap transform chained — would double up
@@ -43,6 +48,18 @@ function pickConceptForCell({ concepts, cellKey, runId = null }) {
 // right before the `v<version>/` segment, or right after `/upload/`.
 function compressVisionUrl(url, maxDim = 512) {
   if (!url || typeof url !== 'string') return url;
+
+  // Video → still JPEG. Uses so_2 (2 seconds in) to avoid typical
+  // intro flashes / title cards, matching the extraction convention
+  // used across atlasVideoService, aiCanvasHtmlGeneratorService, and
+  // layoutInputService. f_jpg forces JPEG so OpenAI accepts it.
+  if (url.includes('/video/upload/')) {
+    const t = `so_2,c_limit,w_${maxDim},h_${maxDim},q_auto:eco,f_jpg`;
+    return url
+      .replace('/video/upload/', `/video/upload/${t}/`)
+      .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2');
+  }
+
   if (!url.includes('/upload/')) return url;
   // Avoid double-wrapping when caller already compressed.
   if (/\/c_limit,w_\d+,h_\d+/.test(url) || /\/q_auto:(?:low|eco)\b/.test(url)) return url;
