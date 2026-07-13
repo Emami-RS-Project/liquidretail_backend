@@ -202,7 +202,7 @@ function readinessScoreForProductImage(matchTier) {
 // rejects the duplicate insert. paletteSource doubles the identity
 // space so media-palette and brand-palette renders for the same
 // (media, product, template, ratio, variant) coexist as separate Ads.
-function computeIdentityDigest({ campaignId, productId, mediaId, template, aspectRatio, variantKind, paletteSource, ctaText, ctaUrl, ctaUrlParams, rafflePrizeMediaId }) {
+function computeIdentityDigest({ campaignId, productId, mediaId, template, aspectRatio, variantKind, paletteSource, ctaText, ctaUrl, ctaUrlParams, rafflePrizeMediaId, kind }) {
   const payload = JSON.stringify({
     campaignId:    String(campaignId),
     productId:     productId ? String(productId) : null,
@@ -211,6 +211,11 @@ function computeIdentityDigest({ campaignId, productId, mediaId, template, aspec
     aspectRatio,
     variantKind,
     paletteSource: paletteSource || 'media',
+    // kind separates image+video variants of the same (seed × template ×
+    // ratio) so they don't collide on the (campaignId, identityDigest)
+    // unique index. Absent kind serializes as 'image' — matches legacy
+    // behavior for older payloads that didn't set the field.
+    kind:          String(kind || 'image'),
     ctaText:       String(ctaText || ''),
     ctaUrl:        String(ctaUrl  || ''),
     ctaUrlParams:  String(ctaUrlParams || ''),
@@ -470,6 +475,7 @@ async function expandWizardJob({
     ? campaign.promotionalDetails.rafflePrizeMediaIds.map(String)
     : [null];
 
+  const { renderRouteForKind } = require('./platformFormats');
   let payloads = [];
   for (const seed of seeds) {
     for (const cell of grid) {
@@ -480,70 +486,86 @@ async function expandWizardJob({
       if (supports && !supports.has(seed.variantKind)) continue;
       for (const paletteSource of PALETTE_SOURCES) {
         for (const rafflePrizeMediaId of rafflePrizeIds) {
-          const identityDigest = computeIdentityDigest({
-            campaignId,
-            productId:     seed.productId,
-            mediaId:       seed.mediaId,
-            template:      cell.templateId,
-            aspectRatio:   cell.aspectRatio,
-            variantKind:   seed.variantKind,
-            paletteSource,
-            ctaText, ctaUrl, ctaUrlParams,
-            rafflePrizeMediaId
-          });
-          const readinessScore = seed.variantKind === 'product_image'
-            ? readinessScoreForProductImage(seed.matchTier)
-            : readinessScoreFor(seed.matchTier, seed.fileType, seed.suitabilityScore, seed.platformStats);
-          payloads.push({
-            brandId,
-            campaignId,
-            campaignRunIds: [],
-            mediaId:        seed.mediaId,
-            productId:      seed.productId,
-            template:       cell.templateId,
-            aspectRatio:    cell.aspectRatio,
-            campaignKind,
-            platformFormat: effectivePlatformFormat,
-            matchTier:      seed.matchTier,
-            variantKind:    seed.variantKind,
-            paletteSource,
-            rafflePrizeMediaId,
-            readinessScore,
-            status:         'queued',
-            identityDigest,
-            ctaText, ctaUrl, ctaUrlParams,
-            queuedAt:       new Date(),
-            generatedAt:    new Date()
-          });
+          // One payload per requested kind (image / video / both). Mirrors
+          // the concept-driven expansion at line 1409 so brand campaigns
+          // — which route through this legacy cartesian since they have
+          // no productIds — actually produce video variants when the
+          // operator asks for them. Image + video variants of the same
+          // (seed × template × ratio) get distinct identityDigests via
+          // the kind field in the hash.
+          for (const kind of resolvedKinds) {
+            const identityDigest = computeIdentityDigest({
+              campaignId,
+              productId:     seed.productId,
+              mediaId:       seed.mediaId,
+              template:      cell.templateId,
+              aspectRatio:   cell.aspectRatio,
+              variantKind:   seed.variantKind,
+              paletteSource,
+              kind,
+              ctaText, ctaUrl, ctaUrlParams,
+              rafflePrizeMediaId
+            });
+            const readinessScore = seed.variantKind === 'product_image'
+              ? readinessScoreForProductImage(seed.matchTier)
+              : readinessScoreFor(seed.matchTier, seed.fileType, seed.suitabilityScore, seed.platformStats);
+            payloads.push({
+              brandId,
+              campaignId,
+              campaignRunIds: [],
+              mediaId:        seed.mediaId,
+              productId:      seed.productId,
+              template:       cell.templateId,
+              aspectRatio:    cell.aspectRatio,
+              campaignKind,
+              platformFormat: effectivePlatformFormat,
+              matchTier:      seed.matchTier,
+              variantKind:    seed.variantKind,
+              paletteSource,
+              rafflePrizeMediaId,
+              readinessScore,
+              status:         'queued',
+              identityDigest,
+              kind,
+              renderRoute:    renderRouteForKind(kind),
+              ctaText, ctaUrl, ctaUrlParams,
+              queuedAt:       new Date(),
+              generatedAt:    new Date()
+            });
+          }
         }
       }
     }
   }
 
-  // Per-product cap — keep at most ADS_PER_PRODUCT_CAP payloads per
-  // productId, picking the highest-readinessScore winners within each
-  // group. Brand-only seeds (productId null) form one group and get
-  // the same cap. Applied BEFORE the global MAX_ADS cap so that a
-  // wizard run on N products doesn't have one popular product hog
-  // the budget while others render zero ads.
+  // Per-(product, kind) cap. Video is expensive (~$1.75/Veo call, or
+  // ~$0 for the Grok-skip Cloudinary segment) so it caps at
+  // VEO_ADS_PER_PRODUCT_CAP (1); image uses ADS_PER_PRODUCT_CAP (3).
+  // Brand-only seeds (productId null) form one product group per kind
+  // — so brand + meta feed + both nets 3 image + 1 video rather than
+  // 3 image + 0 video (the pre-kind-multiplier bug). Applied BEFORE
+  // the global MAX_ADS cap so N-product wizards don't have one
+  // popular product hog the budget while others render zero ads.
   if (payloads.length) {
-    const groupKey = (p) => p.productId ? String(p.productId) : 'NULL';
-    const byProduct = new Map();
+    const groupKey = (p) => `${p.productId ? String(p.productId) : 'NULL'}|${p.kind || 'image'}`;
+    const byGroup = new Map();
     for (const p of payloads) {
       const k = groupKey(p);
-      if (!byProduct.has(k)) byProduct.set(k, []);
-      byProduct.get(k).push(p);
+      if (!byGroup.has(k)) byGroup.set(k, []);
+      byGroup.get(k).push(p);
     }
-    const cap     = effectivePlatformFormat === 'meta_reels_9_16' ? VEO_ADS_PER_PRODUCT_CAP : ADS_PER_PRODUCT_CAP;
+    const capForKind = (kind) => kind === 'video' ? VEO_ADS_PER_PRODUCT_CAP : ADS_PER_PRODUCT_CAP;
     const trimmed = [];
-    let perProductDropped = 0;
-    for (const group of byProduct.values()) {
+    let perGroupDropped = 0;
+    for (const [key, group] of byGroup.entries()) {
+      const kind = key.split('|')[1] || 'image';
+      const cap  = capForKind(kind);
       group.sort((a, b) => (b.readinessScore ?? -1) - (a.readinessScore ?? -1));
-      if (group.length > cap) perProductDropped += group.length - cap;
+      if (group.length > cap) perGroupDropped += group.length - cap;
       trimmed.push(...group.slice(0, cap));
     }
-    if (perProductDropped > 0) {
-      console.log(`📦 expandWizardJob: per-product trim dropped ${perProductDropped} payload(s) (cap=${cap}/product across ${byProduct.size} group(s))`);
+    if (perGroupDropped > 0) {
+      console.log(`📦 expandWizardJob: per-(product,kind) trim dropped ${perGroupDropped} payload(s) (image cap=${ADS_PER_PRODUCT_CAP}, video cap=${VEO_ADS_PER_PRODUCT_CAP}, across ${byGroup.size} group(s))`);
     }
     payloads = trimmed;
   }
