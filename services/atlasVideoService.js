@@ -166,9 +166,10 @@ const VIDEO_START_OFFSET = 'so_2';
 // Build a Cloudinary 8-second segment URL for a video source. Grok
 // is skipped for video-seeded video ads — Cloudinary extracts an
 // 8-second clip starting at VIDEO_START_OFFSET (2s in). Aspect crop
-// lands the clip at the target canvas aspect via c_fill with
-// saliency-aware gravity so downstream overlays don't have to deal
-// with letterboxing or mid-shot recomposition.
+// lands the clip at the target canvas aspect via c_fill; gravity
+// defaults to center. (Saliency-aware g_auto requires the AI add-on
+// for video transforms — accounts without it 400 on every g_auto
+// video URL. Same pattern as the so_auto add-on gate.)
 //
 // Returns null when the URL isn't a Cloudinary /video/upload/ asset
 // we can transform.
@@ -177,7 +178,7 @@ function buildVideoSegmentUrl(originalUrl, aspectRatio, durationSec = 8) {
   if (!originalUrl.includes('/video/upload/')) return null;
   const ar = String(aspectRatio || '').trim() || '1:1';
   const du = Math.max(1, Math.min(30, Number(durationSec) || 8));
-  const chain = `${VIDEO_START_OFFSET},du_${du.toFixed(1)},c_fill,ar_${ar},g_auto,q_auto:good`;
+  const chain = `${VIDEO_START_OFFSET},du_${du.toFixed(1)},c_fill,ar_${ar},q_auto:good`;
   return originalUrl.replace('/video/upload/', `/video/upload/${chain}/`);
 }
 
@@ -190,12 +191,13 @@ function cropImageUrlForAspect(originalUrl, aspectRatio) {
   // Video source → extract a representative still at target aspect.
   // Uses VIDEO_START_OFFSET (2s in) rather than so_0 to skip typical
   // intro flashes / title cards on Reels / TikToks, and rather than
-  // so_auto because so_auto needs the AI Preview add-on (accounts
-  // without it 400). f_jpg forces JPEG output.
+  // so_auto because so_auto needs the AI Preview add-on. Gravity
+  // defaults to center — g_auto on video-source transforms also needs
+  // the AI add-on. f_jpg forces JPEG output.
   if (originalUrl.includes('/video/upload/')) {
     const { w, h } = imageDimsForAspect(aspectRatio);
     return originalUrl
-      .replace('/video/upload/', `/video/upload/${VIDEO_START_OFFSET},c_fill,w_${w},h_${h},g_auto,f_jpg,q_auto:good/`)
+      .replace('/video/upload/', `/video/upload/${VIDEO_START_OFFSET},c_fill,w_${w},h_${h},f_jpg,q_auto:good/`)
       .replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, '.jpg$2');
   }
   // Non-Cloudinary URL: pass through untouched. Atlas will pull from
