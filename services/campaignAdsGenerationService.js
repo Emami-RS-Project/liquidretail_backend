@@ -442,13 +442,25 @@ async function expandWizardJob({
   // unique index at insert time.)
   seeds = dedupeSeeds(seeds);
 
-  // ── 2. Cartesian: seeds × allowedTemplates × (template ratios ∩ SHIPPING_RATIOS) ──
+  // ── 2. Cartesian: seeds × allowedTemplates × (template ratios ∩ SHIPPING_RATIOS ∩ platformFormat aspect) ──
+  //
+  // Grid ratios are filtered to the campaign's platformFormat aspect
+  // when one is set. Without this filter a Reels (9:16) brand campaign
+  // would queue 1:1 payloads whenever the template supported 1:1 —
+  // aspectRatio and platformFormat drift apart and the Grok-skip path
+  // downstream builds a 1:1 Cloudinary segment for a Reels ad. Concept-
+  // driven expansion already sets aspectRatio directly from
+  // platformFormat (line 1427); this brings the legacy cartesian into
+  // parity for brand campaigns (which have no productIds and never
+  // reach the concept-driven path).
+  const platformAspect = aspectRatioForPlatformFormat(effectivePlatformFormat) || null;
   const grid = [];
   for (const templateId of allowedTemplates) {
     const tpl = registry.getNormalized(templateId);
     if (!tpl) continue;
-    const ratios = (tpl.aspect_ratios?.supported || [])
+    let ratios = (tpl.aspect_ratios?.supported || [])
       .filter(r => SHIPPING_RATIOS.has(r));
+    if (platformAspect) ratios = ratios.filter(r => r === platformAspect);
     for (const aspectRatio of ratios) {
       grid.push({ templateId, aspectRatio });
     }
