@@ -613,10 +613,16 @@ function deriveTheme(brand, li) {
     // Backdrops / scrims
     scrimColor:       explicit.scrimColor       || [0, 0, 0],
     endcardBgColor:   explicit.endcardBgColor   || brandColors.primary || [8, 8, 10],
-    // Accents (stars, promo pill, badge)
+    // Accents (promo pill, badge). Tracks brand accent color when
+    // available so the pill matches brand identity.
     accentColor:      explicit.accentColor      || brandColors.accent || brandColors.primary,
-    starColor:        explicit.starColor        || brandColors.accent || [245, 183, 10],
     promoBgColor:     explicit.promoBgColor     || brandColors.accent || [245, 183, 10],
+    // Stars are a universal ecommerce convention (warm gold ★★★★★).
+    // Do NOT fall through to brandColors.accent — brands with dark
+    // accents (navy / deep grey) end up with invisible stars against
+    // the dark endcard background wash. Only respect an explicit
+    // styleTheme.starColor override.
+    starColor:        explicit.starColor        || [245, 183, 10],
     promoTextColor:   explicit.promoTextColor   || [22, 22, 26],
     // Fonts — brandFont applies to headings + body; quote defaults serif.
     headingFontFamily: explicit.headingFontFamily || brandFont || 'PlayfairDisplay',
