@@ -205,18 +205,57 @@ const COLORS = {
 
 // ── Fonts ──────────────────────────────────────────────────────────
 
+// Explicit filename → family-name map. Downloaded TTFs use compact
+// filenames (e.g., PlayfairDisplay.ttf) but need to register under
+// both the compact form (matches canonical scripts' historical
+// default fallbacks) AND the canonical Google Fonts specimen name
+// (matches brand.fontFamily values scraped from brand websites).
+// Unknown filenames fall through to filename-stem registration —
+// preserves the old convention for any custom TTFs an operator
+// drops in manually.
+const FONT_FILE_MAP = {
+  'Inter.ttf':              { family: 'Inter',              aliases: [] },
+  'PlayfairDisplay.ttf':    { family: 'Playfair Display',   aliases: ['PlayfairDisplay'] },
+  'Lora.ttf':               { family: 'Lora',               aliases: [] },
+  'Cormorant.ttf':          { family: 'Cormorant',          aliases: [] },
+  'CormorantGaramond.ttf':  { family: 'Cormorant Garamond', aliases: ['CormorantGaramond'] },
+  'Antonio.ttf':            { family: 'Antonio',            aliases: [] },
+  'Montserrat.ttf':         { family: 'Montserrat',         aliases: [] },
+  'GreatVibes.ttf':         { family: 'Great Vibes',        aliases: ['GreatVibes', 'Great-Vibes-Regular'] },
+  'DMSans.ttf':             { family: 'DM Sans',            aliases: ['DMSans'] },
+  'BebasNeue.ttf':          { family: 'Bebas Neue',         aliases: ['BebasNeue'] },
+  'Anton.ttf':              { family: 'Anton',              aliases: [] },
+  'Oswald.ttf':             { family: 'Oswald',             aliases: [] },
+  'IBMPlexSans.ttf':        { family: 'IBM Plex Sans',      aliases: ['IBMPlexSans'] },
+  'Poppins.ttf':            { family: 'Poppins',            aliases: [] },
+  'Nunito.ttf':             { family: 'Nunito',             aliases: [] },
+  'Quicksand.ttf':          { family: 'Quicksand',          aliases: [] }
+};
+
 async function registerFontsFromDir(fontsDir) {
   try {
     const entries = await fsp.readdir(fontsDir);
     let registered = 0;
+    let names = [];
     for (const name of entries) {
       if (!/\.(ttf|otf)$/i.test(name)) continue;
-      const family = name.replace(/\.(ttf|otf)$/i, '');
-      const full   = path.join(fontsDir, name);
-      canvasLib.GlobalFonts.registerFromPath(full, family);
+      const full = path.join(fontsDir, name);
+      const mapEntry = FONT_FILE_MAP[name];
+      // Primary registration — Google Fonts canonical name when known,
+      // else filename stem for backward compatibility.
+      const primary = mapEntry?.family || name.replace(/\.(ttf|otf)$/i, '');
+      canvasLib.GlobalFonts.registerFromPath(full, primary);
       registered++;
+      names.push(primary);
+      // Aliases — the same TTF re-registered under alternate names so
+      // canonical scripts referencing the compact form (e.g.,
+      // 'PlayfairDisplay' as a default fallback) still resolve.
+      for (const alias of (mapEntry?.aliases || [])) {
+        canvasLib.GlobalFonts.registerFromPath(full, alias);
+        names.push(alias);
+      }
     }
-    if (registered) progress(`registered ${registered} font${registered === 1 ? '' : 's'} from ${fontsDir}`);
+    if (registered) progress(`registered ${registered} font${registered === 1 ? '' : 's'} (${names.length} name${names.length === 1 ? '' : 's'}) from ${fontsDir}`);
     else            progress(`no fonts found in ${fontsDir} (scripts will fall back to system defaults)`);
   } catch (err) {
     progress(`font registration warning: ${err.message}`);

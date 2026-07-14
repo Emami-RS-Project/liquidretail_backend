@@ -306,5 +306,13 @@ if (process.env.RUN_WORKER === 'true') {
   require('./worker');
 }
 
+// Boot-time Google Fonts download for the brand-script overlay pipeline.
+// Non-blocking — server accepts requests immediately; brand-script renders
+// happen seconds-to-minutes later, giving the download time to complete.
+// Failures per-family are logged but don't abort startup.
+require('./services/fontLoader')
+  .ensureFontsLoaded()
+  .catch(err => console.warn(`🔤 fontLoader: unexpected failure (${err.message})`));
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
