@@ -38,11 +38,24 @@ async function main() {
   const {
     styleScript, meta, plateDir, outDir, fontsDir,
     width, height, totalFrames, brandName, adId,
-    previewIndices
+    previewIndices,
+    // When true, load a single plate once and reuse it for `totalFrames`
+    // renders. Used by the animated inline preview: the "video" is a
+    // static image with time-driven overlays. Avoids duplicating 192
+    // plate files on disk and skips re-reading the same PNG from disk
+    // 192 times.
+    singlePlateForAllFrames
   } = config;
 
-  const isPreview = Array.isArray(previewIndices) && previewIndices.length > 0;
-  progress(`starting brand=${brandName || '?'} ad=${adId || '?'} ${isPreview ? `preview[${previewIndices.join(',')}]` : `frames=${totalFrames}`} ${width}×${height}`);
+  const isPreview     = Array.isArray(previewIndices) && previewIndices.length > 0;
+  const isSinglePlate = singlePlateForAllFrames === true && !isPreview;
+  progress(
+    `starting brand=${brandName || '?'} ad=${adId || '?'} ` +
+    (isPreview     ? `preview[${previewIndices.join(',')}]`   :
+     isSinglePlate ? `singlePlate frames=${totalFrames}`      :
+                     `frames=${totalFrames}`) +
+    ` ${width}×${height}`
+  );
 
   // Register any TTF/OTF in the fonts dir. Family name = file stem.
   await registerFontsFromDir(fontsDir);
@@ -59,8 +72,10 @@ async function main() {
   const plateFiles = (await fsp.readdir(plateDir)).filter(f => f.endsWith('.png')).sort();
   let framesProduced = 0;
 
-  const renderOne = async (i, platePath) => {
-    const plate = await canvasLib.loadImage(platePath);
+  // Renders one frame using a pre-loaded plate. Split from disk-loading
+  // so the single-plate + preview paths can share one Image object
+  // across all frames (avoids 192 identical disk reads).
+  const drawFrame = async (i, plate) => {
     const canvas = canvasLib.createCanvas(width, height);
     const ctx = canvas.getContext('2d');
     try {
@@ -80,16 +95,28 @@ async function main() {
     // REQUESTED index so time-based animations show the correct
     // state at each preview moment (t=0, mid, end typically).
     if (plateFiles.length === 0) throw new Error('preview needs at least one plate file');
-    const platePath = path.join(plateDir, plateFiles[0]);
+    const plate = await canvasLib.loadImage(path.join(plateDir, plateFiles[0]));
     for (const i of previewIndices) {
-      await renderOne(i, platePath);
+      await drawFrame(i, plate);
       progress(`preview frame ${i} rendered`);
     }
+  } else if (isSinglePlate) {
+    // Single-plate animated mode — one plate, N frames. Plate loads
+    // once; canvas resets per frame. Overlay time envelopes still
+    // resolve against frameIndex/FPS so animations hit their marks.
+    if (plateFiles.length === 0) throw new Error('single-plate render needs a plate file');
+    const plate = await canvasLib.loadImage(path.join(plateDir, plateFiles[0]));
+    const n = Number(totalFrames) || 192;
+    for (let i = 0; i < n; i++) {
+      await drawFrame(i, plate);
+      if (i > 0 && i % 24 === 0) progress(`rendered frame ${i}/${n}`);
+    }
   } else {
-    // Full-render mode — loop every plate.
+    // Full-render mode — one plate file per frame (the Grok video path).
     const frameCount = Math.min(totalFrames || plateFiles.length, plateFiles.length);
     for (let i = 0; i < frameCount; i++) {
-      await renderOne(i, path.join(plateDir, plateFiles[i]));
+      const plate = await canvasLib.loadImage(path.join(plateDir, plateFiles[i]));
+      await drawFrame(i, plate);
       if (i > 0 && i % 24 === 0) progress(`rendered frame ${i}/${frameCount}`);
     }
   }

@@ -427,6 +427,120 @@ async function previewBrandScript({
   }
 }
 
+// Animated video preview — same overlay pipeline as a real ad, but the
+// "video" is a single static plate with time-driven overlays composited
+// on top. Renders N frames with singlePlateForAllFrames, ffmpeg-encodes
+// to MP4 with stillimage tuning (excellent compression for static
+// sources), and returns a base64 data URL.
+//
+// Cost roughly 10-40s depending on machine — mostly PNG encoding
+// bottleneck. That's why the child reuses one Image object across
+// frames instead of re-loading from disk each iteration.
+//
+// Returns { videoDataUrl, sizeBytes, framesProduced, timings }.
+async function previewBrandScriptAsVideo({
+  styleScript, meta,
+  width = 1080, height = 1920,
+  totalFrames = 192,
+  plateImagePath = null,
+  plateBackground = '#3D3D3D',
+  brandName,
+  useCanonical = false,
+  canonicalFormat = 'feed'
+}) {
+  // Resolve script source — same ladder as previewBrandScript.
+  if (!styleScript && useCanonical) {
+    const {
+      getCanonicalScript,
+      getCanonicalScriptVertical,
+      getCanonicalScriptLandscape
+    } = require('./systemConfigService');
+    const getter = {
+      vertical:  getCanonicalScriptVertical,
+      landscape: getCanonicalScriptLandscape,
+      feed:      getCanonicalScript
+    }[canonicalFormat] || getCanonicalScript;
+    const { script } = await getter();
+    styleScript = script;
+  }
+  if (!styleScript) {
+    const e = new Error('previewBrandScriptAsVideo requires styleScript or useCanonical');
+    e.status = 400;
+    throw e;
+  }
+
+  const runId    = crypto.randomBytes(6).toString('hex');
+  const tempDir  = await fsp.mkdtemp(path.join(os.tmpdir(), `bvpreview_${runId}_`));
+  const plateDir = path.join(tempDir, 'plates');
+  const outDir   = path.join(tempDir, 'out');
+  const finalPath = path.join(tempDir, 'preview.mp4');
+  await fsp.mkdir(plateDir, { recursive: true });
+  await fsp.mkdir(outDir,   { recursive: true });
+
+  const timings = {};
+  try {
+    // Prepare the single plate — real photo when plateImagePath is set,
+    // otherwise a solid brand-primary fill.
+    let t = Date.now();
+    const sharp = require('sharp');
+    const platePath = path.join(plateDir, 'p0000.png');
+    if (plateImagePath) {
+      await sharp(plateImagePath)
+        .resize(width, height, { fit: 'cover' })
+        .png()
+        .toFile(platePath);
+    } else {
+      const rgb = hexToRgb(plateBackground);
+      await sharp({
+        create: { width, height, channels: 3, background: rgb }
+      }).png().toFile(platePath);
+    }
+    timings.plateMs = Date.now() - t;
+
+    // Render all frames — child reuses the single plate across all N.
+    t = Date.now();
+    const childReport = await runChild({
+      styleScript,
+      meta:      meta || {},
+      plateDir,
+      outDir,
+      fontsDir:  FONTS_DIR,
+      width, height,
+      totalFrames,
+      singlePlateForAllFrames: true,
+      brandName
+    });
+    timings.renderMs = Date.now() - t;
+
+    // Encode to MP4 — stillimage tune squeezes size on static plates.
+    // No audio track (preview has no source audio).
+    t = Date.now();
+    await runFfmpeg([
+      '-y',
+      '-framerate', '24',
+      '-i', path.join(outDir, 'f%04d.png'),
+      '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      '-preset', 'ultrafast',
+      '-tune', 'stillimage',
+      '-crf', '26',
+      '-movflags', '+faststart',
+      finalPath
+    ]);
+    timings.encodeMs = Date.now() - t;
+
+    const buf = await fsp.readFile(finalPath);
+    return {
+      videoDataUrl:   `data:video/mp4;base64,${buf.toString('base64')}`,
+      sizeBytes:      buf.length,
+      framesProduced: childReport.framesProduced,
+      timings
+    };
+  } finally {
+    await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 function hexToRgb(hex) {
   const clean = String(hex || '').replace(/^#/, '');
   const s = clean.length === 3
@@ -762,4 +876,4 @@ async function renderBrandScriptAndSave({ ad, brand }) {
   }
 }
 
-module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript, resolveBrandRenderer, isVerticalFormat, isLandscapeFormat, classifyFormat };
+module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript, previewBrandScriptAsVideo, resolveBrandRenderer, isVerticalFormat, isLandscapeFormat, classifyFormat };
