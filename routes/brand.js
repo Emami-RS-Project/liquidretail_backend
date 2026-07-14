@@ -731,8 +731,28 @@ async function runGenerateFullScript(jobId, brand, direction, format, baseScript
       ].join('\n');
     }
 
+    // Output budget — canonical-sized scripts run 600-1000 lines, which
+    // is ~6-10k tokens. 8192 was cutting Claude off mid-function on the
+    // longer canonicals (proof/endcard phases got truncated). 32000
+    // gives comfortable headroom without paying for tokens we don't
+    // use — Claude stops naturally at the closing brace well before
+    // the cap on well-scoped outputs.
     const { generate } = require('../services/atlasTextService');
-    const result = await generate({ system, user, temperature: 0.5, maxTokens: 8192 });
+    const result = await generate({ system, user, temperature: 0.5, maxTokens: 32000 });
+
+    // Truncation guard — if the model stopped because it hit the token
+    // budget (not a natural end), the tail of the script is missing and
+    // the sandbox will fail to parse. Surface a clear error instead of
+    // shipping broken JS to Preview.
+    const finish = String(result.finishReason || '').toLowerCase();
+    const truncated = finish === 'length' || finish === 'max_tokens';
+    if (truncated) {
+      throw new Error(
+        `Generation was cut off by the token budget (finishReason=${result.finishReason}). ` +
+        `Ask Claude for a more compact composition (e.g. add "keep the script under 400 lines" ` +
+        `to the direction) and try again.`
+      );
+    }
 
     // Strip markdown fences if Claude wrapped despite the instruction.
     let cleaned = result.text
@@ -747,6 +767,18 @@ async function runGenerateFullScript(jobId, brand, direction, format, baseScript
     }
     if (!/renderFrame\s*[:=]/.test(cleaned)) {
       throw new Error(`Generated script is missing "renderFrame". First 300 chars:\n${cleaned.slice(0, 300)}`);
+    }
+    // Balanced-brace sanity check — a truncated tail can still pass the
+    // structural regex above if the cutoff happened after `module.exports
+    // = { renderFrame: ...`. Compare braces and parens; mismatches mean
+    // the script is incomplete even if finishReason wasn't 'length'.
+    const braceDelta = (cleaned.match(/\{/g)?.length || 0) - (cleaned.match(/\}/g)?.length || 0);
+    const parenDelta = (cleaned.match(/\(/g)?.length || 0) - (cleaned.match(/\)/g)?.length || 0);
+    if (braceDelta !== 0 || parenDelta !== 0) {
+      throw new Error(
+        `Generated script is unbalanced (braces off by ${braceDelta}, parens off by ${parenDelta}). ` +
+        `Likely truncated mid-body — try again.`
+      );
     }
 
     const job = scriptJobs.get(jobId) || {};
