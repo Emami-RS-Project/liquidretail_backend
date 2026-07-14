@@ -1139,6 +1139,14 @@ router.get('/:id/style', async (req, res) => {
       }
     } catch { /* dir missing — no templates */ }
 
+    // Preview plate — brand's own lifestyle image (or on_model, or
+    // any image) so the phone-chrome mockup on the frontend can render
+    // a representative background even before the operator clicks
+    // Preview. Same picker the /preview-script route uses for the
+    // actual render, so the visible plate matches the render plate.
+    const previewPickPromise = pickBrandPreviewMediaUrl(brand._id).catch(() => null);
+    const previewPick = await previewPickPromise;
+
     res.json({
       overrides:        brand.styleOverrides || null,
       fileStyle:        getFileStyle(brand),
@@ -1146,7 +1154,8 @@ router.get('/:id/style', async (req, res) => {
       scriptVertical:   brand.styleScriptVertical || null,
       scriptLandscape:  brand.styleScriptLandscape || null,
       theme:            brand.styleTheme || null,
-      scriptTemplates
+      scriptTemplates,
+      previewPlate:     previewPick ? { url: previewPick.url, source: `brand-media (${previewPick.shotType})` } : null
     });
   } catch (err) {
     res.status(500).json({ error: err.message || 'style lookup failed' });
