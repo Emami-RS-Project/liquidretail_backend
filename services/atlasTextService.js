@@ -26,9 +26,30 @@ function apiKey() {
   return k;
 }
 
+// Retry policy for transient Atlas failures. Atlas's gateway 504s
+// on long-running requests (~120s cap observed empirically); a fresh
+// attempt usually succeeds because Claude finishes faster once the
+// prompt is cached upstream. Also covers 503 (upstream unavailable)
+// and pure network errors (ECONNRESET, ETIMEDOUT). 400/401/403/404
+// are surfaced without retry — those are real problems the caller
+// needs to see.
+const RETRY_STATUS = new Set([502, 503, 504]);
+const RETRY_CODES  = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'EAI_AGAIN']);
+const MAX_ATTEMPTS = 3;
+
+function shouldRetry(err) {
+  const status = err.response?.status;
+  if (status && RETRY_STATUS.has(status)) return true;
+  if (!err.response && RETRY_CODES.has(err.code)) return true;
+  return false;
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 // Single-shot chat completion. Returns the assistant message text.
 // Non-streaming for simplicity; add a streaming variant later if the
-// caller UX warrants it.
+// caller UX warrants it. Auto-retries on 5xx / network errors up to
+// MAX_ATTEMPTS with exponential backoff.
 async function generate({
   system,
   user,
@@ -43,34 +64,46 @@ async function generate({
   const url = `${BASE_URL}/chat/completions`;
   const promptChars = (system?.length || 0) + (user?.length || 0);
   console.log(`🧠 atlasText: POST ${url} model=${model} promptChars=${promptChars} maxTokens=${maxTokens}`);
-  const t0 = Date.now();
+
   let res;
-  try {
-    res = await axios.post(
-      url,
-      { model, messages, temperature, max_tokens: maxTokens },
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey()}`,
-          'content-type': 'application/json'
-        },
-        timeout: HTTP_TIMEOUT_MS
+  let lastErr;
+  const totalT0 = Date.now();
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const t0 = Date.now();
+    try {
+      res = await axios.post(
+        url,
+        { model, messages, temperature, max_tokens: maxTokens },
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey()}`,
+            'content-type': 'application/json'
+          },
+          timeout: HTTP_TIMEOUT_MS
+        }
+      );
+      lastErr = null;
+      break;
+    } catch (err) {
+      const ms = Date.now() - t0;
+      const status = err.response?.status;
+      const body   = err.response?.data;
+      const bodyStr = typeof body === 'string'
+        ? body.slice(0, 500)
+        : body != null ? JSON.stringify(body).slice(0, 500) : '(no body)';
+      lastErr = err;
+      if (attempt < MAX_ATTEMPTS && shouldRetry(err)) {
+        const backoffMs = 3000 * attempt; // 3s, 6s
+        console.warn(`⚠️  atlasText: attempt ${attempt}/${MAX_ATTEMPTS} FAILED in ${ms}ms status=${status || 'network'} code=${err.code || '?'} — retrying in ${backoffMs}ms`);
+        await sleep(backoffMs);
+        continue;
       }
-    );
-  } catch (err) {
-    const ms = Date.now() - t0;
-    // Log the actual response body — critical for diagnosing model
-    // slug 404s, quota errors, etc. axios errors have .response on
-    // HTTP failures and .code on network failures.
-    const status = err.response?.status;
-    const body   = err.response?.data;
-    const bodyStr = typeof body === 'string'
-      ? body.slice(0, 500)
-      : body != null ? JSON.stringify(body).slice(0, 500) : '(no body)';
-    console.error(`❌ atlasText: FAILED in ${ms}ms status=${status || 'network'} code=${err.code || '?'} body=${bodyStr}`);
-    throw err;
+      console.error(`❌ atlasText: FAILED (final attempt ${attempt}/${MAX_ATTEMPTS}) in ${ms}ms status=${status || 'network'} code=${err.code || '?'} body=${bodyStr}`);
+      throw err;
+    }
   }
-  const ms = Date.now() - t0;
+  if (!res) throw lastErr || new Error('atlasText: exhausted retries with no response');
+  const ms = Date.now() - totalT0;
 
   const choice = res.data?.choices?.[0];
   const text   = choice?.message?.content;

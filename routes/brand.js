@@ -628,6 +628,8 @@ async function runGenerateFullScript(jobId, brand, direction, format, baseScript
       '',
       'IMAGE LOADING: to draw meta.productOnlyImagePath or meta.brandLogoPath, use `canvas.loadImage(path)` — the `canvas` namespace is in closure scope. Cache the promise across frames (see the reference implementation).',
       '',
+      'OUTPUT LENGTH BUDGET: Target 200-350 lines total. Skip verbose comment blocks — one short line max per function is enough. Do NOT restate the interface spec in comments. Skip defensive fallbacks for meta fields that already have safe defaults in the sample. Prefer inline expressions over separate helper functions where a helper is only called once. The reference below is intentionally long for coverage; your output should be TIGHTER.',
+      '',
       'OUTPUT: return ONLY the raw JavaScript module. No markdown fences, no commentary, no leading prose. The first characters should be `//` (a comment) or `module.exports` or `const`.'
     ].join('\n');
 
@@ -731,14 +733,14 @@ async function runGenerateFullScript(jobId, brand, direction, format, baseScript
       ].join('\n');
     }
 
-    // Output budget — canonical-sized scripts run 600-1000 lines, which
-    // is ~6-10k tokens. 8192 was cutting Claude off mid-function on the
-    // longer canonicals (proof/endcard phases got truncated). 32000
-    // gives comfortable headroom without paying for tokens we don't
-    // use — Claude stops naturally at the closing brace well before
-    // the cap on well-scoped outputs.
+    // Output budget — sized for compact scripts (200-350 lines, per
+    // system prompt). 8192 was truncating on the fatter drafts; 32000
+    // was inviting Claude to keep going past the Atlas gateway's ~120s
+    // Cloudflare timeout. 12000 hits the sweet spot: enough headroom
+    // for tight canonical replacements, not so much that verbosity
+    // wanders past the timeout.
     const { generate } = require('../services/atlasTextService');
-    const result = await generate({ system, user, temperature: 0.5, maxTokens: 32000 });
+    const result = await generate({ system, user, temperature: 0.5, maxTokens: 12000 });
 
     // Truncation guard — if the model stopped because it hit the token
     // budget (not a natural end), the tail of the script is missing and
