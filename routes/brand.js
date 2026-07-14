@@ -352,12 +352,96 @@ router.post('/:id/render-script', express.json(), async (req, res) => {
   }
 });
 
+// In-memory async job store for preview renders. Netlify's proxy caps
+// responses at ~26s; render + encode routinely runs 15-40s (varies with
+// script complexity and Render CPU pressure). So the POST kicks off a
+// background render and returns 202+jobId; the frontend polls GET
+// /:id/preview-script/:jobId until status transitions.
+// Auto-cleaned 5 min after done/failed so the map doesn't grow.
+const previewJobs = new Map();
+const PREVIEW_JOB_TTL_MS = 5 * 60 * 1000;
+
+function reapPreviewJob(jobId) {
+  setTimeout(() => previewJobs.delete(jobId), PREVIEW_JOB_TTL_MS);
+}
+
+// Runs the actual render off the request thread. Writes progress into
+// previewJobs.set so the poller sees each state transition. Any thrown
+// error is captured into { status: 'failed', error }.
+async function runPreviewRender(jobId, brand, opts) {
+  const { styleScript, useCanonical, canonicalFormat, meta, dims, totalFrames } = opts;
+  let brandPlateTempPath = null;
+  try {
+    // Plate resolution — brand image first, then picsum sample.
+    let plateImagePath = null;
+    let plateSource    = 'solid';
+    const brandPick = await pickBrandPreviewMediaUrl(brand._id).catch(() => null);
+    if (brandPick?.url) {
+      try {
+        brandPlateTempPath = await downloadUrlToTemp(brandPick.url);
+        plateImagePath = brandPlateTempPath;
+        plateSource    = `brand-media (${brandPick.shotType})`;
+      } catch (err) {
+        console.warn(`⚠️  preview-script[${jobId}]: brand media download failed (${err.message}) — falling back to sample`);
+      }
+    }
+    if (!plateImagePath) {
+      const sampleFile = await ensureSamplePlate(canonicalFormat);
+      if (sampleFile) {
+        plateImagePath = sampleFile;
+        plateSource    = 'sample';
+      }
+    }
+
+    const { previewBrandScriptAsVideo } = require('../services/brandScriptExecutor');
+    const result = await previewBrandScriptAsVideo({
+      styleScript,
+      useCanonical,
+      canonicalFormat,
+      meta,
+      width:           dims.width,
+      height:          dims.height,
+      totalFrames,
+      plateImagePath,
+      plateBackground: brand.primaryColor || '#3D3D3D',
+      brandName:       brand.name
+    });
+
+    const prev = previewJobs.get(jobId) || {};
+    previewJobs.set(jobId, {
+      ...prev,
+      status:       'done',
+      videoDataUrl: result.videoDataUrl,
+      width:        dims.width,
+      height:       dims.height,
+      sizeBytes:    result.sizeBytes,
+      plateSource,
+      timings:      result.timings,
+      completedAt:  Date.now()
+    });
+    reapPreviewJob(jobId);
+    console.log(`🎬 preview-script[${jobId}]: DONE in ${Date.now() - (prev.startedAt || Date.now())}ms plate=${plateSource} bytes=${result.sizeBytes}`);
+  } catch (err) {
+    console.error(`🎬 preview-script[${jobId}]: FAILED — ${err.message}`);
+    const prev = previewJobs.get(jobId) || {};
+    previewJobs.set(jobId, {
+      ...prev,
+      status:      'failed',
+      error:       err.message || 'preview failed',
+      completedAt: Date.now()
+    });
+    reapPreviewJob(jobId);
+  } finally {
+    if (brandPlateTempPath) {
+      const fs = require('fs');
+      fs.promises.unlink(brandPlateTempPath).catch(() => {});
+    }
+  }
+}
+
 // POST /api/brand/:id/preview-script
-// Renders an ANIMATED 8-second preview of the operator's script (or
-// theme) as an MP4 data URL. Same overlay pipeline as a real ad but
-// the "video" is a single static plate with time-driven overlays —
-// gives the flavor of composition + motion without the 30-45s cost of
-// running the full Grok video pipeline.
+// Kicks off an async render, returns 202 + jobId immediately. Poll
+// GET /:id/preview-script/:jobId for status transitions.
 //
 // Body:
 //   { script?: string, theme?: object, format?: 'vertical'|'feed'|'landscape' }
@@ -374,8 +458,6 @@ router.post('/:id/render-script', express.json(), async (req, res) => {
 //   - fallback picsum sample per format (cached to disk after first hit)
 //   - fallback solid brand-primary fill (via executor)
 router.post('/:id/preview-script', express.json(), async (req, res) => {
-  const started = Date.now();
-  let brandPlateTempPath = null;
   try {
     const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
     if (!brand) return res.status(404).json({ error: 'brand not found' });
@@ -408,12 +490,7 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
     }
 
     // Canvas dims — preview renders at HALF the production ad size so
-    // the sync render fits under Netlify's ~26s proxy timeout. PNG
-    // encoding is the dominant cost and scales linearly with pixel
-    // count; halving each dimension cuts it 4x. Canonicals use
-    // proportional sizing (H*0.041 font, etc.) so composition tracks;
-    // some clamps hit their MIN at half-res but the preview is meant
-    // to show flavor, not pixel-accurate production output.
+    // each frame's PNG encode is 4x cheaper (linear in pixel count).
     //   feed      → 540×675  (4:5 preview, real 1080×1350)
     //   vertical  → 540×960  (9:16 preview, real 1080×1920)
     //   landscape → 960×540  (16:9 preview, real 1920×1080)
@@ -446,60 +523,57 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
       theme:              themeForPreview || {}
     };
 
-    // Plate resolution — brand image first, then picsum sample. Track
-    // source so the UI can surface it ("Sample: your Product Shot").
-    let plateImagePath = null;
-    let plateSource    = 'solid';
-    const brandPick = await pickBrandPreviewMediaUrl(brand._id).catch(() => null);
-    if (brandPick?.url) {
-      try {
-        brandPlateTempPath = await downloadUrlToTemp(brandPick.url);
-        plateImagePath = brandPlateTempPath;
-        plateSource    = `brand-media (${brandPick.shotType})`;
-      } catch (err) {
-        console.warn(`⚠️  preview-script: brand media download failed (${err.message}) — falling back to sample`);
-      }
-    }
-    if (!plateImagePath) {
-      const sampleFile = await ensureSamplePlate(format);
-      if (sampleFile) {
-        plateImagePath = sampleFile;
-        plateSource    = 'sample';
-      }
-    }
+    const crypto = require('crypto');
+    const jobId = crypto.randomBytes(6).toString('hex');
+    previewJobs.set(jobId, {
+      status:    'pending',
+      startedAt: Date.now(),
+      brand:     String(brand._id),
+      format
+    });
+    console.log(`🎬 preview-script[${jobId}]: brand="${brand.name}" format=${format} scriptChars=${styleScript?.length || 0} themeMode=${useCanonical}`);
 
-    const { previewBrandScriptAsVideo } = require('../services/brandScriptExecutor');
-    const result = await previewBrandScriptAsVideo({
-      styleScript,
-      useCanonical,
-      canonicalFormat: format,
-      meta,
-      width:           dims.width,
-      height:          dims.height,
-      totalFrames,
-      plateImagePath,
-      plateBackground: brand.primaryColor || '#3D3D3D',
-      brandName:       brand.name
+    // Fire-and-forget. The runner flips the job to done/failed when it
+    // finishes; errors are captured into the job entry, never crash.
+    runPreviewRender(jobId, brand, {
+      styleScript, useCanonical, canonicalFormat: format, meta, dims, totalFrames
     });
 
+    res.status(202).json({ ok: true, jobId, status: 'pending', format });
+  } catch (err) {
+    console.error('preview-script kick failed:', err);
+    res.status(err.status || 500).json({ error: err.message || 'preview-script failed' });
+  }
+});
+
+// GET /api/brand/:id/preview-script/:jobId — poll target for the async
+// render kicked off by POST. Returns:
+//   { status: 'pending' | 'done' | 'failed',
+//     videoDataUrl?, plateSource?, width?, height?, sizeBytes?,
+//     error?, elapsedMs }
+// 404 when the job doesn't exist OR was reaped after 5 min.
+router.get('/:id/preview-script/:jobId', async (req, res) => {
+  try {
+    const job = previewJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'preview job not found or expired' });
+    // Cross-brand safety: reject reads for the wrong brand id.
+    if (job.brand && String(job.brand) !== String(req.params.id)) {
+      return res.status(404).json({ error: 'preview job not found' });
+    }
     res.json({
-      ok:            true,
-      videoDataUrl:  result.videoDataUrl,
-      width:         dims.width,
-      height:        dims.height,
-      sizeBytes:     result.sizeBytes,
-      plateSource,
-      timings:       result.timings,
-      totalMs:       Date.now() - started
+      status:       job.status,
+      format:       job.format,
+      videoDataUrl: job.videoDataUrl,
+      plateSource:  job.plateSource,
+      width:        job.width,
+      height:       job.height,
+      sizeBytes:    job.sizeBytes,
+      error:        job.error,
+      timings:      job.timings,
+      elapsedMs:    Date.now() - (job.startedAt || Date.now())
     });
   } catch (err) {
-    console.error('preview-script failed:', err);
-    res.status(err.status || 500).json({ error: err.message || 'preview-script failed' });
-  } finally {
-    if (brandPlateTempPath) {
-      const fs = require('fs');
-      fs.promises.unlink(brandPlateTempPath).catch(() => {});
-    }
+    res.status(500).json({ error: err.message || 'preview status lookup failed' });
   }
 });
 
