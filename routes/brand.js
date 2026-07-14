@@ -316,8 +316,19 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
       feed:      { width: 1080, height: 1350 }
     })[format];
 
-    const totalFrames = 145;
-    const previewIndices = [0, Math.floor(totalFrames / 2), totalFrames - 1];
+    // Frame budget mirrors the real render (8s @ 24fps = 192 plates).
+    // Every canonical times its fade envelopes against this 8-second
+    // canvas — using 145 frames + [0, mid, end-1] indices sampled
+    // exactly on the 0s/3s/6s phase boundaries where fadeInOut returns
+    // alpha=0, so overlays would never appear on any of the three
+    // preview keyframes. Mid-phase sampling (t≈1.5s hook / 4.5s proof /
+    // 7s endcard) hits full-opacity moments for all three phases.
+    const totalFrames = 192;
+    const previewIndices = [
+      Math.round(24 * 1.5),   // 36 — mid HOOK
+      Math.round(24 * 4.5),   // 108 — mid PROOF
+      Math.round(24 * 7.0)    // 168 — mid ENDCARD
+    ];
     const meta = {
       brandName:          brand.name,
       badgeText:          'Customer Favorite',

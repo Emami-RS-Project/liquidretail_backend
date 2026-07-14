@@ -327,8 +327,11 @@ function runChild(config) {
 async function previewBrandScript({
   styleScript, meta,
   width = 1080, height = 1080,
-  totalFrames = 145,
-  previewIndices = [0, Math.floor(145 / 2), 144],
+  // Match the real 8s @ 24fps render — canonicals time fades on this
+  // window. See routes/brand.js `preview-script` for why the default
+  // preview indices must be mid-phase, not on-boundary.
+  totalFrames = 192,
+  previewIndices = [36, 108, 168],
   plateBackground = '#3D3D3D',
   brandName,
   // Optional: when styleScript is falsy but useCanonical is true,
