@@ -10,6 +10,51 @@ const Campaign = require('../models/Campaign');
 const IntegrationCredential = require('../models/IntegrationCredential');
 const ProductMatchArtifact = require('../models/ProductMatchArtifact');
 
+// ── Sample plate resolver ──────────────────────────────────────────
+//
+// Previews now render against a real lifestyle image (not a solid color
+// fill) so the operator can judge how overlays sit on realistic
+// texture. Deterministic per format via picsum seeds — same brand
+// previews across runs = comparable results between generation
+// iterations. Cached to disk on first fetch; subsequent previews reuse
+// the local file. On download failure the executor falls back to the
+// solid plateBackground (existing behavior).
+const SAMPLE_PLATE_URLS = {
+  feed:      'https://picsum.photos/seed/reachsocial-feed/1080/1350',
+  vertical:  'https://picsum.photos/seed/reachsocial-vertical/1080/1920',
+  landscape: 'https://picsum.photos/seed/reachsocial-landscape/1920/1080'
+};
+
+async function ensureSamplePlate(format) {
+  const fs   = require('fs');
+  const path = require('path');
+  const dir  = path.join(__dirname, '..', 'services', 'brandScripts', 'assets', 'samples');
+  await fs.promises.mkdir(dir, { recursive: true });
+  const file = path.join(dir, `${format}.jpg`);
+  try {
+    const stat = await fs.promises.stat(file);
+    if (stat.size > 1024) return file;
+  } catch { /* fall through to download */ }
+
+  const url = SAMPLE_PLATE_URLS[format];
+  if (!url) return null;
+  const axios = require('axios');
+  try {
+    const res = await axios.get(url, { responseType: 'stream', timeout: 15_000, maxRedirects: 5 });
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(file);
+      res.data.pipe(out);
+      out.on('finish', resolve);
+      out.on('error', reject);
+      res.data.on('error', reject);
+    });
+    return file;
+  } catch (err) {
+    console.warn(`⚠️  sample plate fetch failed for ${format} (${err.message}) — preview will use solid color`);
+    return null;
+  }
+}
+
 // Fire-and-forget enrichment trigger. Imported lazily to avoid the
 // circular require that originally pushed enrichment scheduling into
 // brandCatalogService — same dance, but now the user (not detect)
@@ -350,6 +395,11 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
       theme:              themeForPreview || {}
     };
 
+    // Sample lifestyle plate — deterministic per format, cached to disk
+    // on first hit. Null return means the fetch failed; the executor
+    // then falls back to a solid brand-primary fill.
+    const plateImagePath = await ensureSamplePlate(format);
+
     const { previewBrandScript } = require('../services/brandScriptExecutor');
     const result = await previewBrandScript({
       styleScript,
@@ -360,6 +410,7 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
       height:          dims.height,
       totalFrames,
       previewIndices,
+      plateImagePath,
       plateBackground: brand.primaryColor || '#3D3D3D',
       brandName:       brand.name
     });

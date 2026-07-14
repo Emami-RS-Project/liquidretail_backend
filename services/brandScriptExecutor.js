@@ -333,6 +333,12 @@ async function previewBrandScript({
   totalFrames = 192,
   previewIndices = [36, 108, 168],
   plateBackground = '#3D3D3D',
+  // Optional path to a JPEG/PNG on disk to use as the plate. When set,
+  // the file is resized+cropped to (width, height) via sharp's `cover`
+  // and used instead of the solid plateBackground synthesis. Lets the
+  // route feed a real lifestyle image so overlays render against a
+  // realistic backdrop instead of a flat color.
+  plateImagePath = null,
   brandName,
   // Optional: when styleScript is falsy but useCanonical is true,
   // the preview loads the canonical renderer instead. Meta.theme
@@ -372,13 +378,22 @@ async function previewBrandScript({
   await fsp.mkdir(outDir,   { recursive: true });
 
   try {
-    // One synthetic plate — the runner re-uses it across all
-    // requested preview indices.
+    // One plate — the runner re-uses it across all requested preview
+    // indices. Real lifestyle image when plateImagePath is provided,
+    // otherwise a solid brand-primary fill.
     const sharp = require('sharp');
-    const rgb = hexToRgb(plateBackground);
-    await sharp({
-      create: { width, height, channels: 3, background: rgb }
-    }).png().toFile(path.join(plateDir, 'p0000.png'));
+    const platePath = path.join(plateDir, 'p0000.png');
+    if (plateImagePath) {
+      await sharp(plateImagePath)
+        .resize(width, height, { fit: 'cover' })
+        .png()
+        .toFile(platePath);
+    } else {
+      const rgb = hexToRgb(plateBackground);
+      await sharp({
+        create: { width, height, channels: 3, background: rgb }
+      }).png().toFile(platePath);
+    }
 
     await runChild({
       styleScript,
