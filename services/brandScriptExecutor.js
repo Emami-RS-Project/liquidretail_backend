@@ -685,7 +685,13 @@ async function buildMetaForAd(ad, brand) {
     // ── Text used by the canonical renderer + most custom scripts ──
     brandName:          brandNameResolved,
     badgeText,
-    productName:        ad.copy?.productName  || li?.product?.name     || catalogProduct?.title || null,
+    // Product name — canonical catalog record wins. LLMs occasionally
+    // rephrase product names in ad.copy (e.g., truncating or restyling
+    // for the hook); the actual catalog title should still label the
+    // product on the endcard. LayoutInput is a snapshot of the catalog
+    // at assembly time; useful as a fallback when the catalog record
+    // was deleted after the artifact was written.
+    productName:        catalogProduct?.title || li?.product?.name    || ad.copy?.productName  || null,
     productDescription: li?.product?.description || catalogProduct?.description || null,
     price:              ad.copy?.productPrice || li?.product?.price    || catalogProduct?.price || null,
     benefits:           li?.product?.short_benefits || li?.product?.benefits || [],
