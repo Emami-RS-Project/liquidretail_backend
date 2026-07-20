@@ -649,13 +649,16 @@ async function buildMetaForAd(ad, brand) {
   // canonical script branches on meta.endcardMode.
   const endcardMode = ad.productId ? 'product' : 'brand';
 
-  // Brand-mode headline fallback: use brand.tagline when the layout
-  // input didn't produce a headline (platform brand campaigns that
-  // predate the kind-driven copy derivation in PR 6). Product-mode
-  // headline is unaffected — it still resolves via ad.copy or
-  // layoutInput.copy.headline as before.
-  const rawHeadline = ad.copy?.headline || li?.copy?.headline || null;
-  const headline = rawHeadline || (endcardMode === 'brand' ? (brand?.tagline || null) : null);
+  // Headline cascade — product ads and brand ads share the same ladder
+  // now. Ad.copy.headline is the ideal per-concept LLM output; the
+  // artifact's copy.headline is the pre-computed alternative per seed;
+  // brand.tagline is the safety net so any ad with no derived headline
+  // still renders something meaningful (previously product-mode ads
+  // fell through to null and rendered no hook overlay at all).
+  const headline = ad.copy?.headline
+                || li?.copy?.headline
+                || brand?.tagline
+                || null;
 
   // Brand name fallback ladder — when Brand.name is empty (rare, but
   // possible for auto-created stubs), fall back to the connected IG
