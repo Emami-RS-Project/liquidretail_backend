@@ -693,7 +693,11 @@ async function buildMetaForAd(ad, brand) {
     // was deleted after the artifact was written.
     productName:        catalogProduct?.title || li?.product?.name    || ad.copy?.productName  || null,
     productDescription: li?.product?.description || catalogProduct?.description || null,
-    price:              ad.copy?.productPrice || li?.product?.price    || catalogProduct?.price || null,
+    // Price — canonical catalog record wins for the same reason as
+    // productName. LLM snapshots and artifact snapshots can go stale
+    // when a Shopify sync updates the current price; endcards should
+    // show what the customer will actually be charged.
+    price:              catalogProduct?.price || li?.product?.price    || ad.copy?.productPrice || null,
     benefits:           li?.product?.short_benefits || li?.product?.benefits || [],
     badges,
     headline,
