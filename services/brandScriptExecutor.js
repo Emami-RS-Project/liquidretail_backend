@@ -657,9 +657,30 @@ async function buildMetaForAd(ad, brand) {
   const rawHeadline = ad.copy?.headline || li?.copy?.headline || null;
   const headline = rawHeadline || (endcardMode === 'brand' ? (brand?.tagline || null) : null);
 
+  // Brand name fallback ladder — when Brand.name is empty (rare, but
+  // possible for auto-created stubs), fall back to the connected IG
+  // handle so the endcard still identifies who the ad is from. Sales
+  // demo brands don't have OAuth credentials — they carry the scraped
+  // IG handle on Brand.apifyDemo.igHandle. Handle prefixed with '@' so
+  // scripts render it as a social-media mention style identifier.
+  let brandNameResolved = brand?.name || null;
+  if (!brandNameResolved && brand?._id) {
+    try {
+      const IntegrationCredential = require('../models/IntegrationCredential');
+      const igCred = await IntegrationCredential
+        .findOne({ brandId: brand._id, type: 'instagram', status: 'active' })
+        .select('igUsername')
+        .lean();
+      if (igCred?.igUsername) brandNameResolved = `@${igCred.igUsername}`;
+    } catch { /* optional */ }
+  }
+  if (!brandNameResolved && brand?.apifyDemo?.igHandle) {
+    brandNameResolved = `@${brand.apifyDemo.igHandle}`;
+  }
+
   return {
     // ── Text used by the canonical renderer + most custom scripts ──
-    brandName:          brand?.name || null,
+    brandName:          brandNameResolved,
     badgeText,
     productName:        ad.copy?.productName  || li?.product?.name     || catalogProduct?.title || null,
     productDescription: li?.product?.description || catalogProduct?.description || null,
