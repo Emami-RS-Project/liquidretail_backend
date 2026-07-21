@@ -79,7 +79,10 @@ function buildAtlasBody(params, atlasId) {
     body.reasoning_effort = 'low';
   }
   if (body.max_tokens != null) {
-    body.max_tokens = Math.min(16_384, body.max_tokens + REASONING_RESERVE_TOKENS);
+    // Clamp the caller's budget, then ALWAYS add the full reserve on top —
+    // a combined clamp could silently swallow the reserve at high caller
+    // budgets and reintroduce the mid-JSON truncation it exists to prevent.
+    body.max_tokens = Math.min(16_384, body.max_tokens) + REASONING_RESERVE_TOKENS;
   }
   return body;
 }
@@ -127,11 +130,12 @@ async function chatCompletion(meta, params) {
         lastErr = err;
         // Listed-but-unrouted model — retrying won't help; fallback might.
         if (err.routerMissing) break;
-        // True request-validation errors fail everywhere — fail fast, no
-        // fallback (the identical body would just fail twice). 401/403/404
-        // and friends are gateway-side problems where the direct provider
-        // is exactly what the fallback is for.
-        if ((err.status === 400 || err.status === 422) && !err.routerMissing) throw err;
+        // 400/422 included: the Atlas body is NOT the direct body (mapped
+        // model, reasoning_effort, padded max_tokens), so a gateway-side
+        // validation error doesn't prove the original request is bad —
+        // stop retrying Atlas but still give the direct fallback its shot
+        // with the caller's original params. A truly malformed request
+        // costs one extra round trip and then fails honestly.
         if (err.status && !retryableStatus(err.status)) break;
         if (!err.status && !retryableError(err) && !/timeout/i.test(err.message)) break;
         if (attempt < MAX_ATTEMPTS) await sleep(BACKOFF_MS * attempt);
