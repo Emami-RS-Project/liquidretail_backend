@@ -218,7 +218,7 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted } = {}) {
     ? isBrandAborted
     : async () => false;
 
-  const origin = resolveStoreOrigin(brand);
+  let origin = resolveStoreOrigin(brand);
   if (!origin) {
     return {
       productsUpserted: 0,
@@ -234,79 +234,58 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted } = {}) {
 
   console.log(`🛍  Shopify-direct sync starting: brand=${brand._id} store=${origin} cap=${CAP}`);
 
-  // ── Stage 1: product pages (products.json pagination) ────────────
-  run?.stage?.('product pages');
+  // ── Stage 1: acquire the catalog via the resolver ladder ─────────
+  // resolveShopifyAccess tries, cheapest first: primary products.json →
+  // myshopify-backend discovery (for HEADLESS Hydrogen/Next/Remix stores
+  // whose custom domain doesn't serve products.json) → tokenless
+  // Storefront GraphQL → sitemap. It returns products in the products.json
+  // item shape PLUS the EFFECTIVE origin (the myshopify backend when the
+  // storefront is headless) that the media/review stages below fetch
+  // against. Layer 4 — the flag-gated headless-render fallback
+  // (headlessScrapeService, SHOPIFY_HEADLESS_RENDER=true) — is the last
+  // resort when every HTTP rung is Cloudflare-blocked or JS-only.
+  run?.stage?.('resolving catalog access');
+  // Bind the abort check to this brand/run so it fires inside the
+  // resolver/headless loops (they call abortCheck() with no args).
+  const boundAbort = () => abortCheck(brand._id, run);
 
-  const products = []; // { id, handle, raw } in fetch order
-  let page = 1;
-  let totalPlanned = CAP; // refined after page 1
-  let hitRateLimit = false;
-
+  const { resolveShopifyAccess } = require('./shopifyAccessResolver');
+  let access;
   try {
-    while (products.length < CAP) {
-      if (await abortCheck(brand._id, run)) {
-        console.log(`   · 🛍  aborted during product pages for brand=${brand._id}`);
-        return {
-          productsUpserted,
-          videosIngested,
-          reviewsCaptured,
-          errors,
-          cancelled: true,
-          durationMs: Date.now() - t0
-        };
-      }
-      if (run?.checkpoint) await run.checkpoint();
-
-      const url = `${origin}/products.json?limit=250&page=${page}`;
-      let data;
-      try {
-        await pace();
-        data = await politeFetch(url);
-      } catch (err) {
-        if (err.message === 'store rate-limited this server') {
-          hitRateLimit = true;
-          errors.push(`products.json page ${page}: ${err.message}`);
-          console.warn(`   ⚠️  🛍  ${err.message} — keeping ${products.length} partials`);
-          break;
-        }
-        errors.push(`products.json page ${page}: ${err.message}`);
-        console.warn(`   ⚠️  🛍  products.json page ${page} failed: ${err.message}`);
-        break;
-      }
-
-      const batch = Array.isArray(data?.products) ? data.products : [];
-      if (!batch.length) break;
-
-      for (const p of batch) {
-        if (products.length >= CAP) break;
-        products.push(p);
-      }
-
-      // After page 1, set totalPlanned for the progress bar.
-      if (page === 1) {
-        // If page 1 came back full (250) we don't know the true total —
-        // use the cap. Otherwise the running count is the whole catalog.
-        totalPlanned = batch.length < 250
-          ? Math.min(CAP, batch.length)
-          : CAP;
-        run?.tick?.(0, totalPlanned, 'fetching product pages');
-      }
-
-      // Short page → done.
-      if (batch.length < 250) break;
-      page += 1;
-    }
+    access = await resolveShopifyAccess(brand, { run, abortCheck: boundAbort, cap: CAP });
   } catch (err) {
-    if (err.message === 'store rate-limited this server') {
-      hitRateLimit = true;
-      errors.push(err.message);
-    } else {
-      errors.push(`product pages: ${err.message}`);
-      throw err;
+    errors.push(`access resolver: ${err.message}`);
+    access = { ok: false, mode: null, products: [], origin, reason: err.message };
+  }
+
+  // Last-resort headless render (default OFF; SHOPIFY_HEADLESS_RENDER=true).
+  if ((!access.ok || !(access.products || []).length) && !(await boundAbort())) {
+    try {
+      const headless = require('./headlessScrapeService');
+      if (typeof headless.syncViaHeadless === 'function') {
+        run?.note?.('all HTTP rungs empty — trying headless render');
+        const hres = await headless.syncViaHeadless(brand, { run, abortCheck: boundAbort, cap: CAP });
+        if (hres && hres.ok && (hres.products || []).length) access = hres;
+        else if (hres?.reason) errors.push(`headless: ${hres.reason}`);
+      }
+    } catch (err) {
+      errors.push(`headless render: ${err.message}`);
     }
   }
 
-  console.log(`🛍  fetched ${products.length} products from ${origin} (pages=${page})`);
+  // Abort could have landed during resolution — honor it before persisting.
+  if (await boundAbort()) {
+    console.log(`   · 🛍  aborted during catalog resolution for brand=${brand._id}`);
+    return { productsUpserted, videosIngested, reviewsCaptured, errors, cancelled: true, durationMs: Date.now() - t0 };
+  }
+
+  const products = (access.products || []).slice(0, CAP);
+  if (access.origin) origin = access.origin;   // effective backend (myshopify for headless)
+  const totalPlanned = products.length || CAP;
+  const hitRateLimit = !!access.rateLimited;
+  if (access.reason && !products.length) errors.push(access.reason);
+  run?.tick?.(0, totalPlanned, `resolved ${products.length} products via ${access.mode || 'none'}`);
+  console.log(`🛍  resolved ${products.length} products via ${access.mode || 'none'} (origin=${origin}${access.discoveredMyshopify ? `, backend=${access.discoveredMyshopify}` : ''})`);
 
   // ── Upsert each product ──────────────────────────────────────────
   let idx = 0;
@@ -417,25 +396,38 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted } = {}) {
     }
 
     const p = products[i];
-    if (!p?.handle) continue;
+    const hasStorefrontVideos = Array.isArray(p?._storefrontVideos) && p._storefrontVideos.length > 0;
+    if (!p?.handle && !hasStorefrontVideos) continue;
 
-    let ajax;
-    try {
-      await pace();
-      ajax = await politeFetch(`${origin}/products/${encodeURIComponent(p.handle)}.js`);
-    } catch (err) {
-      if (err.message === 'store rate-limited this server') {
-        errors.push(`media stage rate-limited at handle=${p.handle}`);
-        console.warn(`   ⚠️  🛍  ${err.message} during media stage — skipping remaining videos`);
-        break;
+    let mediaArr;
+    if (hasStorefrontVideos) {
+      // Storefront-GraphQL rung already returned hosted video sources —
+      // use them directly, no extra <handle>.js round-trip.
+      mediaArr = p._storefrontVideos.map(v => ({
+        id:           v.id,
+        media_type:   'video',
+        duration:     v.duration ?? null,
+        aspect_ratio: v.aspect_ratio ?? null,
+        sources:      Array.isArray(v.sources) ? v.sources : []
+      }));
+    } else {
+      let ajax;
+      try {
+        await pace();
+        ajax = await politeFetch(`${origin}/products/${encodeURIComponent(p.handle)}.js`);
+      } catch (err) {
+        if (err.message === 'store rate-limited this server') {
+          errors.push(`media stage rate-limited at handle=${p.handle}`);
+          console.warn(`   ⚠️  🛍  ${err.message} during media stage — skipping remaining videos`);
+          break;
+        }
+        // 404 / parse-fail → skip silently, count error.
+        if (err.status === 404) continue;
+        errors.push(`products/${p.handle}.js: ${err.message}`);
+        continue;
       }
-      // 404 / parse-fail → skip silently, count error.
-      if (err.status === 404) continue;
-      errors.push(`products/${p.handle}.js: ${err.message}`);
-      continue;
+      mediaArr = Array.isArray(ajax?.media) ? ajax.media : [];
     }
-
-    const mediaArr = Array.isArray(ajax?.media) ? ajax.media : [];
     // external_video → metadata-only note on the product rawData (no mirror).
     const externalVideos = mediaArr.filter(m => m && m.media_type === 'external_video');
     if (externalVideos.length) {

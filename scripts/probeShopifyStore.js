@@ -65,33 +65,35 @@ const pause = (ms) => new Promise(r => setTimeout(r, ms));
   console.log(`🛍  probing ${store} from this host…\n`);
   let verdict = { catalog: false, videos: false, reviews: false };
 
-  // 1. Catalog
+  // 1. Catalog — the classic primary-domain products.json (Layer 0).
+  // A miss here is NOT fatal: headless stores legitimately 404 on the
+  // custom domain, so we note it and let the resolver ladder (below)
+  // give the authoritative verdict (myshopify backend / GraphQL / sitemap).
   const pj = await get(`${store}/products.json?limit=5&page=1`, 'application/json');
-  if (pj.status === 429) {
-    console.log(`products.json → 429 (Retry-After: ${pj.retryAfter}). This egress IP is`);
-    console.log('rate-limited by Shopify — run this probe from the production host, or');
-    console.log('use the Apify method for this store.');
-    process.exit(2);
-  }
   const products = pj.json?.products;
-  if (pj.status !== 200 || !Array.isArray(products) || !products.length) {
-    console.log(`products.json → ${pj.status}; not an ingestable Shopify storefront (headless/moved/blocked).`);
-    process.exit(2);
+  let p0 = null;
+  if (pj.status === 429) {
+    console.log(`⚠️  products.json → 429 (Retry-After: ${pj.retryAfter}) — this egress IP is rate-limited by Shopify's edge (run from the production host for a true reading).`);
+  } else if (pj.status !== 200 || !Array.isArray(products) || !products.length) {
+    console.log(`ℹ️  products.json → ${pj.status} on the primary domain (classic path unavailable — likely headless; the resolver ladder below will try the myshopify backend / GraphQL / sitemap).`);
+  } else {
+    verdict.catalog = true;
+    p0 = products[0];
+    console.log(`✅ products.json: ${products.length} sampled — first: "${p0.title}"`);
+    console.log(`   variants[0]: price=${p0.variants?.[0]?.price} sku=${p0.variants?.[0]?.sku || '—'} barcode=${p0.variants?.[0]?.barcode || '—'}`);
+    console.log(`   images: ${p0.images?.length || 0} (src: ${p0.images?.[0]?.src?.slice(0, 90) || '—'}…)`);
+    console.log(`   tags: ${Array.isArray(p0.tags) ? 'array' : typeof p0.tags}, product_type: ${p0.product_type || '—'}`);
   }
-  verdict.catalog = true;
-  const p0 = products[0];
-  console.log(`✅ products.json: ${products.length} sampled — first: "${p0.title}"`);
-  console.log(`   variants[0]: price=${p0.variants?.[0]?.price} sku=${p0.variants?.[0]?.sku || '—'} barcode=${p0.variants?.[0]?.barcode || '—'}`);
-  console.log(`   images: ${p0.images?.length || 0} (src: ${p0.images?.[0]?.src?.slice(0, 90) || '—'}…)`);
-  console.log(`   tags: ${Array.isArray(p0.tags) ? 'array' : typeof p0.tags}, product_type: ${p0.product_type || '—'}`);
 
-  // 2. Media / videos (scan up to 5 products for a video)
+  // 2. Media / videos (scan up to 5 products for a video) — classic path only.
   await pause(500);
   let sawMedia = false;
-  for (const prod of products.slice(0, 5)) {
+  let mediaProbed = 0; // how many <handle>.js actually returned 200 + JSON
+  for (const prod of (verdict.catalog ? products.slice(0, 5) : [])) {
     const hj = await get(`${store}/products/${prod.handle}.js`, 'application/json');
     await pause(450);
     if (hj.status !== 200 || !hj.json) continue;
+    mediaProbed += 1;
     const media = hj.json.media || [];
     if (media.length) sawMedia = true;
     const vids = media.filter(m => m.media_type === 'video');
@@ -105,14 +107,24 @@ const pause = (ms) => new Promise(r => setTimeout(r, ms));
     }
   }
   if (!verdict.videos) {
-    console.log(sawMedia
-      ? 'ℹ️  <handle>.js media present but no videos in the first 5 products (store may have none).'
-      : '⚠️  <handle>.js returned no media[] — legacy theme; ingest will be images-only.');
+    // Only call it "legacy / images-only" when we ACTUALLY inspected a
+    // <handle>.js body. If the classic catalog was unreachable, or every
+    // handle.js was blocked (429/403/headless), media is UNDETERMINED here —
+    // not absent — and the resolver ladder below gives the real answer.
+    if (!verdict.catalog) {
+      console.log('ℹ️  media not probed on the classic path — primary-domain catalog unavailable (see resolver ladder below).');
+    } else if (mediaProbed === 0) {
+      console.log('⚠️  <handle>.js not fetchable from this egress (429/403/blocked) — media undetermined, not necessarily images-only.');
+    } else {
+      console.log(sawMedia
+        ? 'ℹ️  <handle>.js media present but no videos in the first 5 products (store may have none).'
+        : '⚠️  <handle>.js returned no media[] in the sampled products — likely a legacy theme; ingest would be images-only.');
+    }
   }
 
-  // 3. Reviews via JSON-LD
+  // 3. Reviews via JSON-LD (classic path only — needs a product handle).
   await pause(500);
-  const page = await get(`${store}/products/${p0.handle}`, 'text/html');
+  const page = p0 ? await get(`${store}/products/${p0.handle}`, 'text/html') : { status: 0, text: '' };
   if (page.status === 200) {
     const blocks = [...page.text.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)].map(m => m[1]);
     const flat = blocks.join(' ');
@@ -122,12 +134,36 @@ const pause = (ms) => new Promise(r => setTimeout(r, ms));
     verdict.reviews = hasAgg;
     console.log(`${hasAgg ? '✅' : '⚠️ '} product page JSON-LD: ${blocks.length} block(s), aggregateRating=${hasAgg}, review[]=${hasReviews}`);
     console.log(`   review app(s) detected: ${apps.length ? apps.join(', ') : 'none'}`);
-  } else {
+  } else if (p0) {
     console.log(`⚠️  product page → ${page.status}; reviews/ratings unavailable from this egress.`);
   }
 
-  console.log(`\nverdict: catalog=${verdict.catalog} videos=${verdict.videos} reviews=${verdict.reviews}`);
-  console.log(verdict.catalog
-    ? '→ store is ingestable via the shopify-direct method from this host.'
-    : '→ use the Apify method for this store.');
+  // 4. Authoritative verdict — run the real resolver ladder (Layers 1-3;
+  // Layer 4 render only if SHOPIFY_HEADLESS_RENDER=true). This is what the
+  // shopify-direct sync actually uses, so it's the true ingestability
+  // answer — including headless stores the classic checks above missed.
+  console.log('\n🪜  resolver ladder (authoritative)…');
+  let ladderMode = null;
+  try {
+    const { resolveShopifyAccess } = require('../services/shopifyAccessResolver');
+    const res = await resolveShopifyAccess(
+      { _id: 'probe', apifyDemo: { shopifyUrl: store } },
+      { cap: 8, abortCheck: async () => false }
+    );
+    ladderMode = res.mode;
+    console.log(`   mode=${res.mode || 'none'} products=${(res.products || []).length}` +
+      `${res.discoveredMyshopify ? ` backend=${res.discoveredMyshopify}` : ''}` +
+      `${res.rateLimited ? ' (rate-limited)' : ''}${res.reason ? ` — ${res.reason}` : ''}`);
+    if (!res.ok && String(process.env.SHOPIFY_HEADLESS_RENDER || '').toLowerCase() !== 'true') {
+      console.log('   (headless render fallback is OFF — set SHOPIFY_HEADLESS_RENDER=true to also test Layer 4)');
+    }
+  } catch (err) {
+    console.log(`   resolver failed: ${err.message}`);
+  }
+
+  const ingestable = verdict.catalog || !!ladderMode;
+  console.log(`\nverdict: catalog=${verdict.catalog} videos=${verdict.videos} reviews=${verdict.reviews} ladder=${ladderMode || 'none'}`);
+  console.log(ingestable
+    ? `→ store is ingestable via the shopify-direct method${ladderMode && ladderMode !== 'products-json' ? ` (${ladderMode} rung)` : ''} from this host.`
+    : '→ not reachable from this egress — use the Apify method, or run this probe from the production host.');
 })().catch(err => { console.error('probe failed:', err.message); process.exit(1); });
