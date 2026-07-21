@@ -229,9 +229,26 @@ export const BadgeSlot = ({ slot, content, tokens, dims, format }) => {
   );
 };
 
-export const BrandPillSlot = ({ slot, content, tokens, dims, format }) => {
+export const BrandPillSlot = ({ slot, content, tokens, dims, format, meta }) => {
   const t = slot.treatment;
   const size = baseSize('brandPill', format, t.sizeScale);
+  // The brand's real logo wins over the text pill whenever the ad meta
+  // carries one (logoMode 'text' opts back into the pill). Drop-shadow
+  // only — no box, matching the no-scrim standard.
+  if (t.logoMode !== 'text' && meta?.brandLogoUrl) {
+    return (
+      <img
+        src={meta.brandLogoUrl}
+        alt={content || 'brand logo'}
+        style={{
+          height: Math.round(size * 2.4),
+          maxWidth: Math.round(dims.width * 0.4),
+          objectFit: 'contain',
+          filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.5)) drop-shadow(0 4px 12px rgba(0,0,0,0.35))',
+        }}
+      />
+    );
+  }
   const font = tokenFont(tokens, 'body');
   const color = tokenColor(tokens, t.colorToken);
   return (

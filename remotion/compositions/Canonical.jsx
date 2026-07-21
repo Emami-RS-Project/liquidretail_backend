@@ -17,6 +17,23 @@ import { useBrandFonts } from '../components/FontLoader.jsx';
 import { SLOT_RENDERERS } from '../components/slotRenderers.jsx';
 import { slotEnvelope, slotProgress } from '../lib/timing.js';
 import { stackContainerStyle, SAFE_ZONES } from '../lib/safeZones.js';
+import { contrastToken } from '../lib/tokens.js';
+
+const BAND_FOR_ANCHOR = { top: 'top', upperThird: 'top', center: 'middle', lowerThird: 'bottom', bottom: 'bottom' };
+
+// Look up the plate-intelligence band under a slot group at the time its
+// content is on screen: bright band → dark type; avoid band → gentle nudge
+// toward the frame edge (clamped by the safe zones like any offset).
+function bandStateFor(plateHints, anchor, atSec) {
+  if (!plateHints?.samples?.length) return { isLight: false, avoid: false };
+  let best = plateHints.samples[0];
+  for (const s of plateHints.samples) {
+    if (Math.abs(s.atSec - atSec) < Math.abs(best.atSec - atSec)) best = s;
+  }
+  const band = best.bands?.[BAND_FOR_ANCHOR[anchor] || 'middle'];
+  if (!band) return { isLight: false, avoid: false };
+  return { isLight: band.lum > 0.62, avoid: !!band.avoid };
+}
 
 function resolveSlotContent(slot, meta) {
   const brandMode = meta?.endcardMode === 'brand';
@@ -67,7 +84,7 @@ function foldRows(items) {
 
 const ALIGN_TO_FLEX = { left: 'flex-start', center: 'center', right: 'flex-end' };
 
-export const Canonical = ({ format = 'feed', plate, meta = {}, tokens = {}, spec, debugLayout = false }) => {
+export const Canonical = ({ format = 'feed', plate, meta = {}, tokens = {}, spec, plateHints = null, debugLayout = false }) => {
   const frame = useCurrentFrame();
   const { width, height, fps, durationInFrames } = useVideoConfig();
   useBrandFonts(tokens?.fonts);
@@ -88,22 +105,37 @@ export const Canonical = ({ format = 'feed', plate, meta = {}, tokens = {}, spec
       {groups.map((group) => {
         const rows = foldRows(group.items);
         const first = group.items[0];
+        const band = bandStateFor(plateHints, group.anchor, first.timing.enterAtSec + 0.5);
+        // Keep-out nudge: slide the group away from the flagged band —
+        // downward for top-anchored groups, upward for bottom-anchored.
+        const nudge = band.avoid ? (group.anchor === 'bottom' || group.anchor === 'lowerThird' ? -0.05 : 0.05) : 0;
         const container = stackContainerStyle({
           format,
           anchor: group.anchor,
           offsetX: first.position.offsetX,
-          offsetY: first.position.offsetY,
+          offsetY: first.position.offsetY + nudge,
           width,
           height,
         });
         return (
           <div key={`${group.phase}|${group.anchor}`} style={{ ...container, gap: Math.round((spec.stack?.rowGapPct ?? 0.018) * height) }}>
             {rows.map((row, ri) => {
-              const rendered = row.slots.map((slot) => {
-                const content = resolveSlotContent(slot, meta);
+              const rendered = row.slots.map((rawSlot) => {
+                const content = resolveSlotContent(rawSlot, meta);
                 if (content == null) return null;
-                const Renderer = SLOT_RENDERERS[slot.key];
+                const Renderer = SLOT_RENDERERS[rawSlot.key];
                 if (!Renderer) return null;
+                // Bright band under this group → flip text tokens to their
+                // on-light variants (brand pills/CTA keep brand color).
+                const slot = band.isLight
+                  ? {
+                      ...rawSlot,
+                      treatment: {
+                        ...rawSlot.treatment,
+                        colorToken: contrastToken(mergedTokens, rawSlot.treatment.colorToken, true),
+                      },
+                    }
+                  : rawSlot;
                 const env = slotEnvelope({ frame, fps, timing: slot.timing, transition: slot.transition, durationInFrames });
                 const progress = slotProgress({ frame, fps, timing: slot.timing, durationInFrames });
                 return (

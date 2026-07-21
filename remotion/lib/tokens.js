@@ -15,7 +15,21 @@ const COLOR_DEFAULTS = {
   stars: '#F5B70A',
   badgeBg: '#BEC282',
   badgeText: '#1F2219',
+  // Contrast flips applied when plate intelligence reports a light band
+  // under a text slot (no scrims — dark type IS the legibility strategy).
+  textOnLight: '#16181D',
+  textSecondaryOnLight: '#3A4048',
 };
+
+// Plate-hint contrast flip: text color tokens swap to their on-light
+// variants when the band under the slot is bright. Non-text tokens
+// (pills, CTA, stars) keep their brand colors.
+export function contrastToken(tokens, key, bandIsLight) {
+  if (!bandIsLight) return key;
+  if (key === 'textPrimary') return 'textOnLight';
+  if (key === 'textSecondary') return 'textSecondaryOnLight';
+  return key;
+}
 
 export function tokenColor(tokens, key) {
   const c = tokens?.colors?.[key];

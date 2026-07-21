@@ -510,6 +510,7 @@ function buildPreviewSampleMeta(brand, themeForPreview) {
     endcardMode:        'product',
     brandTagline:       brand.tagline || null,
     brandWebsiteUrl:    brand.websiteUrl || null,
+    brandLogoUrl:       brand.logoUrl || null,
     theme:              themeForPreview || {}
   };
 }

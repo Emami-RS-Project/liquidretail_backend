@@ -82,6 +82,7 @@ const BINDABLE_META_FIELDS = [
 const TOKEN_COLOR_KEYS = [
   'primary', 'secondary', 'accent', 'ctaBg', 'ctaText', 'scrim',
   'textPrimary', 'textSecondary', 'stars', 'badgeBg', 'badgeText',
+  'textOnLight', 'textSecondaryOnLight',
 ];
 
 const FONT_ROLES = ['heading', 'body', 'quote'];
@@ -330,6 +331,11 @@ function validateTitleSpec(spec, { format = 'feed' } = {}) {
       if (!Number.isInteger(maxLines) || maxLines < 1 || maxLines > 4) { err(`${where}.treatment.maxLines must be an integer 1..4`); continue; }
       if (!inRange(trackingPx, 0, 8)) { err(`${where}.treatment.trackingPx must be 0..8`); continue; }
       if (!TOKEN_COLOR_KEYS.includes(colorToken)) { err(`${where}.treatment.colorToken '${colorToken}' unknown — valid: ${TOKEN_COLOR_KEYS.join(', ')}`); continue; }
+      // brandPill only: 'auto' renders the brand's actual logo when the ad
+      // meta carries one (text pill is the no-logo fallback); 'text' forces
+      // the text pill.
+      const logoMode = tm.logoMode ?? 'auto';
+      if (!['auto', 'text'].includes(logoMode)) { err(`${where}.treatment.logoMode must be 'auto' or 'text'`); continue; }
       let accent = { type: 'none', colorToken: 'accent', animate: true };
       if (tm.accent != null) {
         if (!isPlainObject(tm.accent)) { err(`${where}.treatment.accent must be an object`); continue; }
@@ -341,7 +347,7 @@ function validateTitleSpec(spec, { format = 'feed' } = {}) {
       }
       out.treatment = {
         scrim, scrimOpacity, scrimColorToken, shadow, casing, fontRole,
-        weight: Math.round(weight), sizeScale, maxLines, trackingPx, colorToken, accent,
+        weight: Math.round(weight), sizeScale, maxLines, trackingPx, colorToken, accent, logoMode,
       };
 
       slots.push(out);

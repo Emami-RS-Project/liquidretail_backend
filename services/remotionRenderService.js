@@ -329,14 +329,36 @@ async function renderTitles({ videoUrl, meta, spec, tokens, format, brandName = 
       const fps = probe.fps;
       const durationInFrames = Math.max(1, Math.round(probe.durationSec * fps));
 
+      // Plate intelligence: contrast + keep-out hints from the actual
+      // footage (TITLE_PLATE_SCAN=basic|gemini|off). Never fatal.
+      t = Date.now();
+      const { analyzePlate } = require('./plateIntelService');
+      const plateHints = await analyzePlate(platePath, { durationSec: probe.durationSec });
+      timings.plateScanMs = Date.now() - t;
+
+      // Brand logo: served to the render browser from the asset server
+      // (the browser has no external egress).
+      const cleanMeta = { ...stripHeavyMeta(meta), brandWebsiteDomain: websiteDomain(meta?.brandWebsiteUrl) };
+      if (cleanMeta.brandLogoUrl && /^https?:\/\//i.test(cleanMeta.brandLogoUrl)) {
+        try {
+          const ext = (path.extname(new URL(cleanMeta.brandLogoUrl).pathname) || '.png').slice(0, 6);
+          await downloadToFile(cleanMeta.brandLogoUrl, path.join(jobDir, `logo${ext}`));
+          cleanMeta.brandLogoUrl = `${base}/jobs/${jobId}/logo${ext}`;
+        } catch (e) {
+          console.warn(`🎬 remotion[ad=${adId || '?'}]: logo download failed (${e.message}) — text pill fallback`);
+          cleanMeta.brandLogoUrl = null;
+        }
+      }
+
       const inputProps = {
         format,
         fps,
         durationInFrames,
         plate: { videoUrl: `${base}/jobs/${jobId}/plate.mp4` },
-        meta: { ...stripHeavyMeta(meta), brandWebsiteDomain: websiteDomain(meta?.brandWebsiteUrl) },
+        meta: cleanMeta,
         tokens: { ...tokens, fonts: fontsToUrls(tokens?.fonts, base) },
         spec,
+        plateHints,
       };
 
       // 2. select + render
@@ -415,11 +437,30 @@ async function renderPreview({ meta, spec, tokens, format, plateImagePath = null
       const durationInFrames = Math.round(durationSec * fps);
 
       let plate = { color: plateColor };
+      let plateHints = null;
       if (plateImagePath) {
         const ext = path.extname(plateImagePath) || '.jpg';
         const target = path.join(jobDir, `plate${ext}`);
         await fsp.copyFile(plateImagePath, target);
         plate = { imageUrl: `${base}/jobs/${jobId}/plate${ext}` };
+        const { analyzePlate } = require('./plateIntelService');
+        plateHints = await analyzePlate(plateImagePath, { isImage: true });
+      }
+
+      const cleanMeta = { ...stripHeavyMeta(meta), brandWebsiteDomain: websiteDomain(meta?.brandWebsiteUrl) };
+      if (cleanMeta.brandLogoUrl && /^https?:\/\//i.test(cleanMeta.brandLogoUrl)) {
+        try {
+          const ext = (path.extname(new URL(cleanMeta.brandLogoUrl).pathname) || '.png').slice(0, 6);
+          await downloadToFile(cleanMeta.brandLogoUrl, path.join(jobDir, `logo${ext}`));
+          cleanMeta.brandLogoUrl = `${base}/jobs/${jobId}/logo${ext}`;
+        } catch {
+          cleanMeta.brandLogoUrl = null;
+        }
+      } else if (cleanMeta.brandLogoUrl && fs.existsSync(cleanMeta.brandLogoUrl)) {
+        // Local logo path (tests, cached assets) — serve it like the plate.
+        const ext = path.extname(cleanMeta.brandLogoUrl) || '.png';
+        await fsp.copyFile(cleanMeta.brandLogoUrl, path.join(jobDir, `logo${ext}`));
+        cleanMeta.brandLogoUrl = `${base}/jobs/${jobId}/logo${ext}`;
       }
 
       const inputProps = {
@@ -427,9 +468,10 @@ async function renderPreview({ meta, spec, tokens, format, plateImagePath = null
         fps,
         durationInFrames,
         plate,
-        meta: { ...stripHeavyMeta(meta), brandWebsiteDomain: websiteDomain(meta?.brandWebsiteUrl) },
+        meta: cleanMeta,
         tokens: { ...tokens, fonts: fontsToUrls(tokens?.fonts, base) },
         spec,
+        plateHints,
       };
 
       const { selectComposition, renderMedia, renderStill } = require('@remotion/renderer');

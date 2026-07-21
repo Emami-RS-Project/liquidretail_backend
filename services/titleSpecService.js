@@ -120,6 +120,9 @@ async function buildBrandTokens(brand, { layoutInputBrand = null, specFontOverri
     stars: themeColor(theme, 'starColor') || '#F5B70A',
     badgeBg: themeColor(theme, 'badgeBg') || accent || '#BEC282',
     badgeText: themeColor(theme, 'badgeText') || '#1F2219',
+    // Plate-intelligence contrast flips (light footage → dark type).
+    textOnLight: themeColor(theme, 'textOnLight') || primary || '#16181D',
+    textSecondaryOnLight: themeColor(theme, 'textSecondaryOnLight') || '#3A4048',
   };
 
   const fonts = await resolveBrandFonts(brand, { overrides: specFontOverrides, layoutInputBrand });
