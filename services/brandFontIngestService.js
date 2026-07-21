@@ -389,10 +389,19 @@ async function ingestBrandFonts(brand) {
   const run = await startRun({ kind: 'font-ingest', advertiserId: brand.advertiserId, brandId: brand._id, label: 'Website font ingest' });
   try {
     const result = await ingestBrandFontsInner(brand, run);
-    await run.succeed({ ingested: result.ingested?.length ?? 0, flagged: result.flagged?.length ?? 0 });
+    if (result.cancelled) {
+      // Faces mirrored before the stop are in the result — the route
+      // still merges them into brand.customFonts, so "partials kept"
+      // holds. Don't succeed(): that would overwrite the cancelled row.
+      await run.markCancelled(`Cancelled — ${result.ingested.length} mirrored face(s) kept`);
+    } else {
+      await run.succeed({ ingested: result.ingested?.length ?? 0, flagged: result.flagged?.length ?? 0 });
+    }
     return result;
   } catch (err) {
     if (err instanceof CancelledError) {
+      // Shouldn't happen (the inner loop breaks instead of throwing),
+      // but if it does there are no partials to salvage from here.
       return { ingested: [], flagged: [], errors: ['cancelled by operator'], cancelled: true };
     }
     await run.fail(err);
@@ -460,10 +469,18 @@ async function ingestBrandFontsInner(brand, run) {
   // 4–6. Classify, then mirror ingestable faces to Cloudinary.
   const ingested = [];
   const flagged = [];
+  let cancelled = false;
   run.stage('mirroring font faces');
   let faceIdx = 0;
+  const { CancelledError } = require('./progressService');
   for (const face of faces) {
-    await run.checkpoint();
+    // Break (don't throw) on cancel so faces already mirrored to
+    // Cloudinary make it into the returned arrays — the route persists
+    // them onto brand.customFonts, keeping the partial work.
+    try { await run.checkpoint(); } catch (err) {
+      if (err instanceof CancelledError) { cancelled = true; break; }
+      throw err;
+    }
     run.tick(++faceIdx, faces.length);
     const license = classifyFontSource(face.url);
     const entryBase = {
@@ -505,10 +522,10 @@ async function ingestBrandFontsInner(brand, run) {
   }
 
   console.log(
-    `🔤 brand font ingest for "${brand.name || brandId}": ${ingested.length} ingested, ${flagged.length} flagged commercial, ${errors.length} error(s) from ${sheets.length} sheet(s) (${faces.length} unique face(s)) in ${Date.now() - t0}ms`
+    `🔤 brand font ingest for "${brand.name || brandId}": ${ingested.length} ingested, ${flagged.length} flagged commercial, ${errors.length} error(s) from ${sheets.length} sheet(s) (${faces.length} unique face(s)) in ${Date.now() - t0}ms${cancelled ? ' [cancelled]' : ''}`
   );
 
-  return { ingested, flagged, errors };
+  return { ingested, flagged, errors, cancelled };
 }
 
 module.exports = {

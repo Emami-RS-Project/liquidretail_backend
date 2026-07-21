@@ -317,41 +317,49 @@ async function runSession(sessionId) {
     console.log(`🎨 ai-layouts.runSession(${sessionId}): generating ${combos.length} refs (quality=${q})`);
 
     // Per-combo: generate + extract + push to session.references[].
-    // Wrapped individually so one combo's failure can't reject the
-    // Promise.all and short-circuit the rest.
+    // Wrapped individually so one combo's failure can't short-circuit
+    // the rest. Rolling pool (not Promise.all over ALL combos): with
+    // unbounded fan-out every combo dispatches its image call at t=0
+    // and a mid-run cancel could never skip anything — the pool makes
+    // the claim-time cancel check real AND caps provider stampede.
     progressRun.stage('generating layout references');
     let combosDone = 0;
-    await Promise.all(combos.map(async (c) => {
-      let ref;
-      // Cooperative cancel BETWEEN combos: already-dispatched image
-      // calls run to completion; a cancelled run marks the remainder
-      // skipped and the session still settles.
-      if (progressRun.isCancelRequested()) {
-        ref = { ...c, status: 'error', error: 'cancelled by operator' };
-      } else {
-        try {
-          const imageUrl = await generateReferenceImage(ctx, c.variant, c.aspectRatio, q);
-          let extractedCanvas = null;
-          try { extractedCanvas = await extractLayoutFromImage(imageUrl); }
-          catch (err) { console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] extraction failed: ${err.message}`); }
-          ref = { ...c, imageUrl, extractedCanvas, status: 'ok' };
-        } catch (err) {
-          console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] generation failed: ${err.message}`);
-          ref = { ...c, status: 'error', error: err.message };
+    const COMBO_CONCURRENCY = 3;
+    let comboCursor = 0;
+    await Promise.all(Array.from({ length: Math.min(COMBO_CONCURRENCY, combos.length) }, async () => {
+      while (comboCursor < combos.length) {
+        const c = combos[comboCursor++];
+        let ref;
+        // Cooperative cancel between combo claims: in-flight image
+        // calls run to completion; unclaimed combos are marked skipped
+        // so the session still settles with every combo accounted for.
+        if (progressRun.isCancelRequested()) {
+          ref = { ...c, status: 'error', error: 'cancelled by operator' };
+        } else {
+          try {
+            const imageUrl = await generateReferenceImage(ctx, c.variant, c.aspectRatio, q);
+            let extractedCanvas = null;
+            try { extractedCanvas = await extractLayoutFromImage(imageUrl); }
+            catch (err) { console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] extraction failed: ${err.message}`); }
+            ref = { ...c, imageUrl, extractedCanvas, status: 'ok' };
+          } catch (err) {
+            console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] generation failed: ${err.message}`);
+            ref = { ...c, status: 'error', error: err.message };
+          }
         }
-      }
-      await progressRun.checkpoint().catch(() => {}); // refresh cancel cache; terminal handled below
-      progressRun.tick(++combosDone, combos.length);
-      // $push so each reference appears on the next client poll.
-      // Doesn't conflict with the final status update — that's a
-      // separate $set after Promise.all settles.
-      try {
-        await AiLayoutSession.updateOne(
-          { _id: sessionId },
-          { $push: { references: ref } }
-        );
-      } catch (err) {
-        console.warn(`   ⚠️  ai-layouts session push failed for ${c.variant}/${c.aspectRatio}: ${err.message}`);
+        await progressRun.checkpoint().catch(() => {}); // refresh cancel cache; terminal handled below
+        progressRun.tick(++combosDone, combos.length);
+        // $push so each reference appears on the next client poll.
+        // Doesn't conflict with the final status update — that's a
+        // separate $set after the pool settles.
+        try {
+          await AiLayoutSession.updateOne(
+            { _id: sessionId },
+            { $push: { references: ref } }
+          );
+        } catch (err) {
+          console.warn(`   ⚠️  ai-layouts session push failed for ${c.variant}/${c.aspectRatio}: ${err.message}`);
+        }
       }
     }));
 
