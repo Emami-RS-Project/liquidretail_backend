@@ -13,6 +13,7 @@ const IntegrationCredential = require('../models/IntegrationCredential');
 const CatalogProduct = require('../models/CatalogProduct');
 const { decrypt } = require('./integrationCryptoService');
 const { inferCoarseEnum, resolveCoarseCategoryRef } = require('./categoryClassifier');
+const { startRun, CancelledError } = require('./progressService');
 
 const META_API_VERSION = process.env.META_API_VERSION || 'v19.0';
 const META_GRAPH_ROOT  = `https://graph.facebook.com/${META_API_VERSION}`;
@@ -89,34 +90,69 @@ async function syncCatalog(brandId, options = {}) {
         : 'no active Instagram credential with a catalogId for this brand' };
   }
 
-  // Multi-credential path: aggregate per-credential results.
-  if (creds.length > 1 && !options.credentialId) {
-    const aggregated = { ok: true, fetched: 0, added: 0, updated: 0, errors: 0, totalCount: 0, perCredential: [] };
-    for (const c of creds) {
-      const r = await syncCatalogForCred(c);
-      aggregated.perCredential.push({ credentialId: String(c._id), igUsername: c.igUsername, ...r });
-      if (r.ok) {
-        aggregated.fetched += r.fetched || 0;
-        aggregated.added   += r.added   || 0;
-        aggregated.updated += r.updated || 0;
-        aggregated.errors  += r.errors  || 0;
-        aggregated.totalCount = r.totalCount; // last wins; total is brand-wide either way
-      }
-    }
-    aggregated.durationMs = Date.now() - t0;
-    return aggregated;
-  }
+  // Unified progress row (ActivityDock) — cancellable at page/item
+  // boundaries. options.run lets an orchestrator (scheduler sweep)
+  // supply its own handle; otherwise the sync owns one.
+  const run = options.run
+    || await startRun({
+      kind: 'catalog-sync',
+      advertiserId: creds[0].advertiserId,
+      brandId,
+      label: options.label || 'Catalog sync',
+      meta: { credentialCount: creds.length }
+    });
+  const ownRun = !options.run;
 
-  // Single-credential path.
-  const result = await syncCatalogForCred(creds[0]);
-  result.durationMs = Date.now() - t0;
-  return result;
+  try {
+    // Multi-credential path: aggregate per-credential results.
+    if (creds.length > 1 && !options.credentialId) {
+      const aggregated = { ok: true, fetched: 0, added: 0, updated: 0, errors: 0, totalCount: 0, perCredential: [] };
+      for (const c of creds) {
+        await run.checkpoint();
+        run.stage(`syncing @${c.igUsername || c._id}`);
+        const r = await syncCatalogForCred(c, run);
+        aggregated.perCredential.push({ credentialId: String(c._id), igUsername: c.igUsername, ...r });
+        if (r.ok) {
+          aggregated.fetched += r.fetched || 0;
+          aggregated.added   += r.added   || 0;
+          aggregated.updated += r.updated || 0;
+          aggregated.errors  += r.errors  || 0;
+          aggregated.totalCount = r.totalCount; // last wins; total is brand-wide either way
+        }
+      }
+      aggregated.durationMs = Date.now() - t0;
+      if (ownRun) await run.succeed({ fetched: aggregated.fetched, added: aggregated.added, updated: aggregated.updated });
+      return aggregated;
+    }
+
+    // Single-credential path.
+    run.stage('syncing catalog');
+    const result = await syncCatalogForCred(creds[0], run);
+    result.durationMs = Date.now() - t0;
+    if (ownRun) {
+      if (result.ok) await run.succeed({ fetched: result.fetched, added: result.added, updated: result.updated });
+      else await run.fail(new Error(result.reason || 'sync failed'));
+    }
+    return result;
+  } catch (err) {
+    if (err instanceof CancelledError) {
+      // Graceful stop: everything upserted so far stays; the run row is
+      // already marked cancelled by checkpoint(). The credential's
+      // lastCatalogSyncAt was NOT stamped, so the scheduler retries later.
+      console.log(`📦 catalog sync cancelled by operator: brand=${brandId}`);
+      return { ok: false, cancelled: true, reason: 'cancelled by operator', durationMs: Date.now() - t0 };
+    }
+    if (ownRun) await run.fail(err);
+    throw err;
+  }
 }
 
-async function syncCatalogForCred(cred) {
+async function syncCatalogForCred(cred, run = null) {
   const t0 = Date.now();
   const brandId = cred.brandId;
   if (!cred.catalogId) return { ok: false, reason: `credential ${cred._id} has no catalogId` };
+  // Progress is optional — direct callers without a run get a no-op.
+  const progress = run || { stage: () => {}, tick: () => {}, checkpoint: async () => true };
 
   let token;
   try { token = decrypt(cred.accessTokenEnc); }
@@ -129,6 +165,10 @@ async function syncCatalogForCred(cred) {
   let added = 0, updated = 0, errors = 0, fetched = 0;
 
   while (url && fetched < MAX_ITEMS) {
+    // Cooperative cancel boundary: between pages (and every 25 items
+    // below). Throws CancelledError — syncCatalog handles it; partial
+    // upserts stay in Mongo.
+    await progress.checkpoint();
     let res;
     try {
       res = await axios.get(url, { params, timeout: 20000 });
@@ -146,7 +186,9 @@ async function syncCatalogForCred(cred) {
 
     const items = res.data?.data || [];
     fetched += items.length;
+    let pageIdx = 0;
     for (const item of items) {
+      if (++pageIdx % 25 === 0) await progress.checkpoint();
       const externalId = String(item.id || '').trim();
       if (!externalId) { errors++; continue; }
 
@@ -222,6 +264,10 @@ async function syncCatalogForCred(cred) {
       }
     }
 
+    // Total is unknown until Meta stops paginating — report count-so-far
+    // (the dock renders an indeterminate bar with a live counter).
+    progress.tick(fetched, null, `${added} added · ${updated} updated${errors ? ` · ${errors} errors` : ''}`);
+
     const next = res.data?.paging?.next;
     if (next && fetched < MAX_ITEMS) {
       // Use the absolute `next` URL Meta gives us — it contains the
@@ -247,6 +293,7 @@ async function syncCatalogForCred(cred) {
   // doesn't yet have an imageMediaId. Each product gets one DetectRun
   // for the hero + up to MAX_ALT_IMAGES alt runs. Idempotent — re-syncs
   // skip products whose imageMediaId is already populated.
+  progress.stage('queueing product detects');
   try {
     const { enqueueBrandProductDetects } = require('./catalogProductDetectService');
     await enqueueBrandProductDetects(brandId);
