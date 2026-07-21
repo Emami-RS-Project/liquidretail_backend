@@ -601,8 +601,22 @@ async function buildMetaForAd(ad, brand) {
   // go through this alias, not layoutInput directly, or nothing lands.
   const li = layoutInput?.input || null;
 
-  const rating      = li?.social_proof?.rating_value  ?? catalogProduct?.rating      ?? null;
-  const reviewCount = li?.social_proof?.review_count  ?? catalogProduct?.reviewCount ?? null;
+  // Rating + reviewCount cascade — extended to fall through to
+  // brand-level review aggregates so product ads never render with a
+  // blank proof bar when we have brand sentiment on file. Historically
+  // the artifact only fell back to brand-level for outcome='brand_match'
+  // ads, so many product-outcome artifacts had rating_value=undefined
+  // even when the brand had a well-populated brandReviews record.
+  // Cascade: LayoutInput (artifact) → CatalogProduct → Brand aggregate → null.
+  const brandReviews = brand?.brandReviews || null;
+  const rating =
+       li?.social_proof?.rating_value
+    ?? catalogProduct?.rating
+    ?? (typeof brandReviews?.rating === 'number' ? brandReviews.rating : null);
+  const reviewCount =
+       li?.social_proof?.review_count
+    ?? catalogProduct?.reviewCount
+    ?? (typeof brandReviews?.reviewCount === 'number' ? brandReviews.reviewCount : null);
 
   const ctaText = ad.copy?.cta_text || li?.cta?.text || li?.copy?.cta_text || 'SHOP NOW';
 
