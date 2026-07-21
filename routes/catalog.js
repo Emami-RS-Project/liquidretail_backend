@@ -122,6 +122,9 @@ function projectListRow(p, matchCount) {
     isPrimaryVariant: p.isPrimaryVariant !== false,
     variantCount:     typeof p.variantCount === 'number' ? p.variantCount : 0,
     detectedFromMediaId: p.detectedFromMediaId ? String(p.detectedFromMediaId) : null,
+    // Per-product video-generation overrides — surfaced so a PATCH is
+    // confirmable and clients can read-modify-write the whole object.
+    videoSettings: p.videoSettings || null,
     firstSeenAt:  p.firstSeenAt,
     lastSyncedAt: p.lastSyncedAt
   };
@@ -167,6 +170,9 @@ function projectDetail(p, category) {
     detailsRefreshedAt:  p.detailsRefreshedAt || null,
 
     detectedFromMediaId: p.detectedFromMediaId ? String(p.detectedFromMediaId) : null,
+    // Per-product video-generation overrides (model / modelByCanvas /
+    // referenceImageCount) — see models/CatalogProduct.js.
+    videoSettings: p.videoSettings || null,
     firstSeenAt:  p.firstSeenAt,
     lastSyncedAt: p.lastSyncedAt
   };

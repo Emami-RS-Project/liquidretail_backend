@@ -1386,7 +1386,11 @@ function serializeBrand(b) {
     tags:         b.tags || [],
     source:       b.source,
     enrichmentSources: b.enrichmentSources || [],
-    curatedFields:     b.curatedFields || []
+    curatedFields:     b.curatedFields || [],
+    // Per-brand video-generation overrides — included so the PATCH
+    // response confirms a videoSettings save (GET already returns the
+    // raw lean doc, which carries it).
+    videoSettings: b.videoSettings || null
   };
 }
 
