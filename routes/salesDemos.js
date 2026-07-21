@@ -14,6 +14,7 @@ const {
   createDemoBrand,
   normalizeIgHandle,
   normalizeShopifyUrl,
+  normalizeMethod,
   isAllowedBootstrapper
 } = require('../services/salesDemosService');
 const { syncBrandApify } = require('../services/apifyIngestService');
@@ -156,11 +157,12 @@ router.get('/brands', async (req, res) => {
 });
 
 // POST /api/sales-demos/brands — create a demo brand.
-// Body: { name, igHandle?, shopifyUrl? }
+// Body: { name, igHandle?, shopifyUrl?, method? }
+// method: 'shopify-direct' (default when shopifyUrl set) | 'apify'
 router.post('/brands', async (req, res) => {
   try {
-    const { name, igHandle, shopifyUrl } = req.body || {};
-    const brand = await createDemoBrand({ name, igHandle, shopifyUrl });
+    const { name, igHandle, shopifyUrl, method } = req.body || {};
+    const brand = await createDemoBrand({ name, igHandle, shopifyUrl, method });
     res.status(201).json({ brand });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'create demo brand failed' });
@@ -169,14 +171,18 @@ router.post('/brands', async (req, res) => {
 
 // PATCH /api/sales-demos/brands/:id — update Apify config on an
 // existing demo brand.
+// Body: { igHandle?, shopifyUrl?, method? }
+// method: 'shopify-direct' | 'apify' (invalid values ignored)
 router.patch('/brands/:id', async (req, res) => {
   try {
     const brand = await Brand.findOne({ _id: req.params.id, advertiserId: req.salesDemosAdvertiserId, isDemo: true });
     if (!brand) return res.status(404).json({ error: 'demo brand not found' });
 
-    const { igHandle, shopifyUrl } = req.body || {};
+    const { igHandle, shopifyUrl, method } = req.body || {};
     if (igHandle !== undefined)   brand.apifyDemo.igHandle   = normalizeIgHandle(igHandle);
     if (shopifyUrl !== undefined) brand.apifyDemo.shopifyUrl = normalizeShopifyUrl(shopifyUrl);
+    const normalizedMethod = normalizeMethod(method);
+    if (normalizedMethod) brand.apifyDemo.method = normalizedMethod;
     await brand.save();
     res.json({ brand });
   } catch (err) {
@@ -184,16 +190,27 @@ router.patch('/brands/:id', async (req, res) => {
   }
 });
 
-// POST /api/sales-demos/brands/:id/sync — kicks off an Apify pull in
-// the background and returns 202 immediately. Apify actor runs
+// POST /api/sales-demos/brands/:id/sync — kicks off a demo-brand pull
+// in the background and returns 202 immediately. Apify actor runs
 // routinely exceed Netlify's ~30s proxy timeout, so we can't block
 // the HTTP request on them. The sync writes Media / CatalogProduct
 // rows as it goes and stamps Brand.apifyDemo.lastSyncedAt on
 // completion — the UI polls the brands list to see progress.
+// Optional body.method ('shopify-direct' | 'apify') is persisted on
+// the brand BEFORE the orchestrator starts so the catalog stage
+// picks it up for this run.
 router.post('/brands/:id/sync', async (req, res) => {
   try {
-    const brand = await Brand.findOne({ _id: req.params.id, advertiserId: req.salesDemosAdvertiserId, isDemo: true }).select('_id');
+    const brand = await Brand.findOne({ _id: req.params.id, advertiserId: req.salesDemosAdvertiserId, isDemo: true }).select('_id apifyDemo');
     if (!brand) return res.status(404).json({ error: 'demo brand not found' });
+
+    // Persist method override (if valid) before kicking off sync so
+    // syncBrandApify resolves the right catalog path.
+    const normalizedMethod = normalizeMethod(req.body?.method);
+    if (normalizedMethod) {
+      brand.apifyDemo.method = normalizedMethod;
+      await brand.save();
+    }
 
     // Fire-and-forget. Errors are logged but not surfaced to the
     // caller since the response has already been sent.

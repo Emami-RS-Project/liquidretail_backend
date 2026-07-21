@@ -47,7 +47,11 @@ async function syncBrandApify(brandId) {
   const run = await startRun({ kind: 'demo-sync', advertiserId: brand.advertiserId, brandId: brand._id, label: 'Demo data sync' });
 
   const cfg = brand.apifyDemo || {};
-  const out = { ok: true, brandId: String(brand._id), ig: null, shopify: null, _run: run };
+  // Catalog source method: 'shopify-direct' (default) hits the public
+  // products.json path; 'apify' keeps the legacy Apify shopify-scraper.
+  // IG stays on Apify regardless (hybrid).
+  const method = cfg.method === 'apify' ? 'apify' : 'shopify-direct';
+  const out = { ok: true, brandId: String(brand._id), ig: null, shopify: null, method, _run: run };
   const t0 = Date.now();
 
   if (cfg.igHandle) {
@@ -57,11 +61,27 @@ async function syncBrandApify(brandId) {
   }
   // Check between the two sources too — an abort during IG shouldn't
   // fall through into Shopify.
-  const stillAborted = await isBrandAborted(brand._id, run);
+  let stillAborted = await isBrandAborted(brand._id, run);
   if (cfg.shopifyUrl && !stillAborted) {
     run.stage('shopify catalog');
-    try       { out.shopify = await syncBrandShopify(brand, run); }
-    catch (err) { out.shopify = { ok: false, reason: err.message }; }
+    try {
+      if (method === 'shopify-direct') {
+        const r = await require('./shopifyPublicIngestService')
+          .syncBrandShopifyDirect(brand, run, { isBrandAborted });
+        out.shopify = {
+          added:   r.productsUpserted,
+          videos:  r.videosIngested,
+          reviews: r.reviewsCaptured,
+          errors:  r.errors.length
+        };
+        // Direct path signals cooperative cancel via r.cancelled —
+        // mirror the isBrandAborted=true exit so lastSyncedAt +
+        // markCancelled still stamp exactly as today.
+        if (r.cancelled) stillAborted = true;
+      } else {
+        out.shopify = await syncBrandShopify(brand, run);
+      }
+    } catch (err) { out.shopify = { ok: false, reason: err.message }; }
   } else if (cfg.shopifyUrl && stillAborted) {
     out.shopify = { ok: false, reason: 'aborted before Shopify sync started' };
   }
@@ -312,6 +332,8 @@ async function syncBrandShopify(brand, run = null) {
 
 module.exports = {
   syncBrandApify,
+  syncDemoBrand: syncBrandApify, // alias — method-aware orchestrator
   syncBrandInstagram,
-  syncBrandShopify
+  syncBrandShopify,
+  isBrandAborted
 };

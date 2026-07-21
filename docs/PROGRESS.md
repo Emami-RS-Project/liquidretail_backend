@@ -31,7 +31,7 @@ partial work kept. Shipped in waves, 2026-07-21.
 |---|---|---|
 | catalog-sync | catalogSyncService | per page + per 25 items; partials kept, credential unstamped |
 | social-ingest | postSyncService | per 5 posts; ingested media kept |
-| demo-sync | apifyIngestService | generic cancel AND legacy /abort flag, checked between records |
+| demo-sync | apifyIngestService (+ shopifyPublicIngestService for the shopify-direct method) | generic cancel AND legacy /abort flag, checked between pages/records; stages: instagram posts → product pages → product media & videos → reviews & ratings |
 | enrichment | brandEnrichmentService | between tiers (brandfetch/scrape/gpt/reviews) |
 | font-ingest | brandFontIngestService | per font face |
 | campaign-sync | campaignSyncService | between credentials |

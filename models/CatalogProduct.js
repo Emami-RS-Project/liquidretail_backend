@@ -23,7 +23,7 @@ const catalogProductSchema = new mongoose.Schema({
   // opted in.
   source:       {
     type: String,
-    enum: ['ig-catalog', 'manual-upload', 'detect-identified', 'apify-shopify'],
+    enum: ['ig-catalog', 'manual-upload', 'detect-identified', 'apify-shopify', 'shopify-direct'],
     required: true,
     index: true
   },

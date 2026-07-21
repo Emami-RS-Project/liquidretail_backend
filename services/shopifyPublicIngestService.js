@@ -1,0 +1,798 @@
+// services/shopifyPublicIngestService.js
+//
+// Free, Apify-less Shopify catalog ingester for the sales-demo tool.
+// Hits Shopify's documented public storefront endpoints directly —
+// no private app token, no Apify actor.
+//
+// Endpoints used:
+//   1. GET {store}/products.json?limit=250&page=N
+//        Bulk catalog. price is a STRING decimal ("19.99"). tags is an
+//        ARRAY. No currency field (leave null). No videos.
+//   2. GET {store}/products/{handle}.js
+//        AJAX product payload. price is INTEGER CENTS (do NOT reuse for
+//        CatalogProduct.price — we already wrote the decimal from #1).
+//        media[] carries video / external_video entries on OS 2.0 themes.
+//   3. GET {store}/products/{handle}  (HTML)
+//        JSON-LD blocks (application/ld+json) for aggregateRating + review[]
+//        injected by review apps (judge.me, yotpo, loox, stamped, okendo).
+//
+// Rate-limit posture (empirically verified):
+//   Shopify's Cloudflare edge 429s penalized datacenter/cloud IPs and the
+//   bucket may never clear. We honor Retry-After up to 3 times (cap 90s),
+//   pace ≥400ms between requests, concurrency 1, detect CF challenge HTML,
+//   and on persistent 429/403 fail the run with a clear note while keeping
+//   already-ingested partials. Live e2e runs from production egress — dev
+//   containers are 429-blocked. Ship scripts/probeShopifyStore.js as the
+//   operator diagnostic.
+//
+// Gotchas from the endpoint shapes:
+//   - products.json price = STRING decimal; /products/{handle}.js price = cents
+//   - products.json tags = ARRAY; /products/{handle}.json tags = comma STRING
+//   - no currency anywhere on the public endpoints → currency: null
+//   - video duration is MILLISECONDS on the AJAX media entry
+
+const CatalogProduct = require('../models/CatalogProduct');
+const Media          = require('../models/Media');
+
+// ── constants ──────────────────────────────────────────────────────
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const REQUEST_TIMEOUT_MS = 20_000;
+const PACE_MS            = 400;
+const MAX_RETRIES_429    = 3;
+const MAX_RETRY_AFTER_S  = 90;
+const MAX_VIDEO_BYTES    = 20 * 1024 * 1024; // 20 MB
+const DEFAULT_PRODUCT_CAP = 200;
+
+// ── helpers ────────────────────────────────────────────────────────
+
+// Normalize gtin to a clean digit string. Copied from catalogSyncService
+// so cross-source lookups match regardless of formatting.
+function normalizeGtin(raw) {
+  if (raw == null) return null;
+  const cleaned = String(raw).trim().replace(/[^\d]/g, '');
+  // Valid GTINs are 8/12/13/14 digits (UPC-A/E, EAN-13, ITF-14).
+  // Reject anything outside that range — likely junk.
+  if (![8, 12, 13, 14].includes(cleaned.length)) return null;
+  return cleaned;
+}
+
+// Strip HTML tags → plain text, collapse whitespace, truncate.
+function stripHtml(html, maxLen = 2000) {
+  if (!html) return null;
+  const text = String(html)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return null;
+  return text.length > maxLen ? text.slice(0, maxLen) : text;
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function isCloudflareChallenge(status, bodyText) {
+  if (status === 403 || status === 503) {
+    // fall through to body check
+  }
+  if (typeof bodyText !== 'string') return false;
+  if (/<title[^>]*>\s*Just a moment/i.test(bodyText)) return true;
+  if (/cf-challenge|cdn-cgi\/challenge|cf-browser-verification/i.test(bodyText)) return true;
+  return false;
+}
+
+// Resolve the store origin from brand.apifyDemo.shopifyUrl (or similar).
+// Accepts "https://foo.com", "foo.com", "https://foo.com/", etc.
+function resolveStoreOrigin(brand) {
+  const raw = brand?.apifyDemo?.shopifyUrl || brand?.shopifyUrl || brand?.websiteUrl;
+  if (!raw) return null;
+  let s = String(raw).trim();
+  if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+  try {
+    const u = new URL(s);
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
+
+// Polite fetch: UA, 20s timeout, ≥400ms pacing (caller spaces calls),
+// honor 429 Retry-After up to 3× (cap 90s), CF-challenge detection.
+// Throws on persistent rate-limit with a clear message so the run can
+// keep partials and surface the note to the operator.
+async function politeFetch(url, { asText = false, asBuffer = false } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= MAX_RETRIES_429; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'User-Agent': UA,
+          'Accept': asText ? 'text/html,application/xhtml+xml,*/*;q=0.8' : 'application/json,text/javascript,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9'
+        },
+        signal: ctrl.signal,
+        redirect: 'follow'
+      });
+
+      // Rate limited — honor Retry-After bounded.
+      if (res.status === 429 || res.status === 403) {
+        const bodyPreview = await res.text().catch(() => '');
+        if (isCloudflareChallenge(res.status, bodyPreview)) {
+          throw new Error('store rate-limited this server');
+        }
+        if (res.status === 429) {
+          if (attempt >= MAX_RETRIES_429) {
+            throw new Error('store rate-limited this server');
+          }
+          const ra = parseInt(res.headers.get('retry-after') || '60', 10);
+          const waitS = Math.min(Number.isFinite(ra) && ra > 0 ? ra : 60, MAX_RETRY_AFTER_S);
+          console.warn(`   ⚠️  🛍  429 on ${url} — waiting ${waitS}s (attempt ${attempt + 1}/${MAX_RETRIES_429})`);
+          await sleep(waitS * 1000);
+          continue;
+        }
+        // bare 403 without CF markers — treat as rate-limit too
+        throw new Error('store rate-limited this server');
+      }
+
+      if (!res.ok) {
+        const err = new Error(`HTTP ${res.status} for ${url}`);
+        err.status = res.status;
+        throw err;
+      }
+
+      // Optional content-length guard for video downloads.
+      if (asBuffer) {
+        const cl = parseInt(res.headers.get('content-length') || '0', 10);
+        if (cl > MAX_VIDEO_BYTES) {
+          throw new Error(`video too large (${cl} bytes > ${MAX_VIDEO_BYTES})`);
+        }
+        const ab = await res.arrayBuffer();
+        if (ab.byteLength > MAX_VIDEO_BYTES) {
+          throw new Error(`video too large (${ab.byteLength} bytes > ${MAX_VIDEO_BYTES})`);
+        }
+        return Buffer.from(ab);
+      }
+
+      const text = await res.text();
+      if (isCloudflareChallenge(res.status, text)) {
+        throw new Error('store rate-limited this server');
+      }
+      if (asText) return text;
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        const err = new Error(`JSON parse failed for ${url}: ${e.message}`);
+        err.body = text;
+        throw err;
+      }
+    } catch (err) {
+      if (err.message === 'store rate-limited this server') throw err;
+      if (err.name === 'AbortError') {
+        lastErr = new Error(`timeout after ${REQUEST_TIMEOUT_MS}ms for ${url}`);
+      } else {
+        lastErr = err;
+      }
+      // Network blip — one soft retry then surface.
+      if (attempt >= MAX_RETRIES_429) throw lastErr;
+      await sleep(PACE_MS * 2);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastErr || new Error(`fetch failed for ${url}`);
+}
+
+async function pace() {
+  await sleep(PACE_MS);
+}
+
+// ── main export ────────────────────────────────────────────────────
+
+/**
+ * syncBrandShopifyDirect(brand, run, { isBrandAborted })
+ *
+ * brand  – hydrated Brand doc (needs _id, advertiserId, name, apifyDemo.shopifyUrl)
+ * run    – progressService run handle (stage/tick/checkpoint)
+ * opts.isBrandAborted(brandId, run) – cooperative-cancel helper (same
+ *   signature as apifyIngestService.isBrandAborted)
+ *
+ * Returns { productsUpserted, videosIngested, reviewsCaptured, errors: [], cancelled?: true }
+ */
+async function syncBrandShopifyDirect(brand, run, { isBrandAborted } = {}) {
+  const t0 = Date.now();
+  const errors = [];
+  let productsUpserted = 0;
+  let videosIngested   = 0;
+  let reviewsCaptured  = 0;
+
+  const abortCheck = typeof isBrandAborted === 'function'
+    ? isBrandAborted
+    : async () => false;
+
+  const origin = resolveStoreOrigin(brand);
+  if (!origin) {
+    return {
+      productsUpserted: 0,
+      videosIngested: 0,
+      reviewsCaptured: 0,
+      errors: ['no shopifyUrl configured on brand'],
+      ok: false,
+      reason: 'no shopifyUrl configured on brand'
+    };
+  }
+
+  const CAP = Math.max(1, parseInt(process.env.SHOPIFY_DIRECT_LIMIT, 10) || DEFAULT_PRODUCT_CAP);
+
+  console.log(`🛍  Shopify-direct sync starting: brand=${brand._id} store=${origin} cap=${CAP}`);
+
+  // ── Stage 1: product pages (products.json pagination) ────────────
+  run?.stage?.('product pages');
+
+  const products = []; // { id, handle, raw } in fetch order
+  let page = 1;
+  let totalPlanned = CAP; // refined after page 1
+  let hitRateLimit = false;
+
+  try {
+    while (products.length < CAP) {
+      if (await abortCheck(brand._id, run)) {
+        console.log(`   · 🛍  aborted during product pages for brand=${brand._id}`);
+        return {
+          productsUpserted,
+          videosIngested,
+          reviewsCaptured,
+          errors,
+          cancelled: true,
+          durationMs: Date.now() - t0
+        };
+      }
+      if (run?.checkpoint) await run.checkpoint();
+
+      const url = `${origin}/products.json?limit=250&page=${page}`;
+      let data;
+      try {
+        await pace();
+        data = await politeFetch(url);
+      } catch (err) {
+        if (err.message === 'store rate-limited this server') {
+          hitRateLimit = true;
+          errors.push(`products.json page ${page}: ${err.message}`);
+          console.warn(`   ⚠️  🛍  ${err.message} — keeping ${products.length} partials`);
+          break;
+        }
+        errors.push(`products.json page ${page}: ${err.message}`);
+        console.warn(`   ⚠️  🛍  products.json page ${page} failed: ${err.message}`);
+        break;
+      }
+
+      const batch = Array.isArray(data?.products) ? data.products : [];
+      if (!batch.length) break;
+
+      for (const p of batch) {
+        if (products.length >= CAP) break;
+        products.push(p);
+      }
+
+      // After page 1, set totalPlanned for the progress bar.
+      if (page === 1) {
+        // If page 1 came back full (250) we don't know the true total —
+        // use the cap. Otherwise the running count is the whole catalog.
+        totalPlanned = batch.length < 250
+          ? Math.min(CAP, batch.length)
+          : CAP;
+        run?.tick?.(0, totalPlanned, 'fetching product pages');
+      }
+
+      // Short page → done.
+      if (batch.length < 250) break;
+      page += 1;
+    }
+  } catch (err) {
+    if (err.message === 'store rate-limited this server') {
+      hitRateLimit = true;
+      errors.push(err.message);
+    } else {
+      errors.push(`product pages: ${err.message}`);
+      throw err;
+    }
+  }
+
+  console.log(`🛍  fetched ${products.length} products from ${origin} (pages=${page})`);
+
+  // ── Upsert each product ──────────────────────────────────────────
+  let idx = 0;
+  for (const p of products) {
+    idx += 1;
+    if (await abortCheck(brand._id, run)) {
+      console.log(`   · 🛍  aborted mid-upsert for brand=${brand._id}`);
+      return {
+        productsUpserted,
+        videosIngested,
+        reviewsCaptured,
+        errors,
+        cancelled: true,
+        durationMs: Date.now() - t0
+      };
+    }
+    if (run?.checkpoint) await run.checkpoint();
+
+    try {
+      const externalId = String(p.id);
+      const variants = Array.isArray(p.variants) ? p.variants : [];
+      const images   = Array.isArray(p.images)   ? p.images   : [];
+      const v0 = variants[0] || {};
+
+      const price = v0.price != null && v0.price !== ''
+        ? Number(v0.price)
+        : null;
+      const availability = variants.some(v => v && v.available)
+        ? 'in stock'
+        : 'out of stock';
+      const imageUrl = images[0]?.src || null;
+      const additionalImages = images.slice(1, 9).map(i => i.src).filter(Boolean);
+      const productUrl = `${origin}/products/${p.handle}`;
+      const description = stripHtml(p.body_html, 2000);
+
+      await CatalogProduct.findOneAndUpdate(
+        { brandId: brand._id, externalId },
+        {
+          $set: {
+            advertiserId:     brand.advertiserId,
+            brandId:          brand._id,
+            source:           'shopify-direct',
+            externalId,
+            itemGroupId:      externalId,
+            title:            p.title || '(untitled)',
+            description,
+            brand:            p.vendor || brand.name || null,
+            price:            Number.isFinite(price) ? price : null,
+            currency:         null,
+            availability,
+            imageUrl,
+            additionalImages,
+            productUrl,
+            gtin:             normalizeGtin(v0.barcode),
+            mpn:              v0.sku || null,
+            category:         p.product_type || null,
+            rawData:          p,
+            lastSyncedAt:     new Date()
+          },
+          $setOnInsert: { firstSeenAt: new Date() }
+        },
+        { upsert: true, new: true }
+      );
+      productsUpserted += 1;
+    } catch (err) {
+      console.warn(`   ⚠️  🛍  upsert failed for ${p?.id}: ${err.message}`);
+      errors.push(`upsert ${p?.id}: ${err.message}`);
+    }
+
+    run?.tick?.(
+      idx,
+      totalPlanned,
+      `products ${idx}/${totalPlanned} · ${videosIngested} videos · ${reviewsCaptured} reviews`
+    );
+  }
+
+  if (hitRateLimit && !products.length) {
+    // Nothing ingested and we're blocked — surface clearly.
+    return {
+      productsUpserted,
+      videosIngested,
+      reviewsCaptured,
+      errors,
+      ok: false,
+      reason: 'store rate-limited this server — partials kept; try the Apify method',
+      durationMs: Date.now() - t0
+    };
+  }
+
+  // ── Stage 2: product media & videos ──────────────────────────────
+  run?.stage?.('product media & videos');
+  const cloudinaryService = require('./cloudinaryService');
+
+  for (let i = 0; i < products.length; i++) {
+    if (i > 0 && i % 5 === 0) {
+      if (await abortCheck(brand._id, run)) {
+        console.log(`   · 🛍  aborted during media stage for brand=${brand._id}`);
+        return {
+          productsUpserted,
+          videosIngested,
+          reviewsCaptured,
+          errors,
+          cancelled: true,
+          durationMs: Date.now() - t0
+        };
+      }
+      if (run?.checkpoint) await run.checkpoint();
+    }
+
+    const p = products[i];
+    if (!p?.handle) continue;
+
+    let ajax;
+    try {
+      await pace();
+      ajax = await politeFetch(`${origin}/products/${encodeURIComponent(p.handle)}.js`);
+    } catch (err) {
+      if (err.message === 'store rate-limited this server') {
+        errors.push(`media stage rate-limited at handle=${p.handle}`);
+        console.warn(`   ⚠️  🛍  ${err.message} during media stage — skipping remaining videos`);
+        break;
+      }
+      // 404 / parse-fail → skip silently, count error.
+      if (err.status === 404) continue;
+      errors.push(`products/${p.handle}.js: ${err.message}`);
+      continue;
+    }
+
+    const mediaArr = Array.isArray(ajax?.media) ? ajax.media : [];
+    // external_video → metadata-only note on the product rawData (no mirror).
+    const externalVideos = mediaArr.filter(m => m && m.media_type === 'external_video');
+    if (externalVideos.length) {
+      try {
+        await CatalogProduct.updateOne(
+          { brandId: brand._id, externalId: String(p.id) },
+          {
+            $set: {
+              'rawData._externalVideos': externalVideos.map(m => ({
+                host: m.host || null,
+                externalId: m.external_id || null,
+                mediaId: m.id || null
+              }))
+            }
+          }
+        );
+      } catch (err) {
+        // best-effort note
+        errors.push(`external_video note ${p.id}: ${err.message}`);
+      }
+    }
+
+    const videoEntries = mediaArr.filter(m => m && m.media_type === 'video');
+    for (const media of videoEntries) {
+      try {
+        const sources = Array.isArray(media.sources) ? media.sources : [];
+        // Prefer mp4 with largest width; skip m3u8/mov.
+        const mp4s = sources.filter(s => s && s.format === 'mp4' && s.url);
+        if (!mp4s.length) continue;
+        mp4s.sort((a, b) => (b.width || 0) - (a.width || 0));
+        const best = mp4s[0];
+
+        await pace();
+        let buf;
+        try {
+          buf = await politeFetch(best.url, { asBuffer: true });
+        } catch (err) {
+          console.warn(`   ⚠️  🛍  video download failed ${p.handle}/${media.id}: ${err.message}`);
+          errors.push(`video download ${p.id}/${media.id}: ${err.message}`);
+          continue;
+        }
+
+        let upload;
+        try {
+          // cloudinaryService.uploadBufferToCloudinary(buffer, opts) —
+          // same call shape as brandFontIngestService / materializeImage.
+          upload = await cloudinaryService.uploadBufferToCloudinary(buf, {
+            folder: 'shopify-direct/videos',
+            resourceType: 'video'
+          });
+        } catch (err) {
+          console.warn(`   ⚠️  🛍  cloudinary video upload failed ${p.handle}/${media.id}: ${err.message}`);
+          errors.push(`video upload ${p.id}/${media.id}: ${err.message}`);
+          continue;
+        }
+
+        const secureUrl = upload?.secure_url || upload?.url;
+        if (!secureUrl) {
+          errors.push(`video upload ${p.id}/${media.id}: no secure_url returned`);
+          continue;
+        }
+
+        const externalId = `cp_${p.id}_video_${media.id}`;
+        try {
+          await Media.findOneAndUpdate(
+            { brandId: brand._id, source: 'catalog-product', externalId },
+            {
+              $setOnInsert: {
+                advertiserId: brand.advertiserId,
+                brandId:      brand._id,
+                source:       'catalog-product',
+                externalId,
+                fileType:     'video',
+                fileUrl:      secureUrl,
+                sourceUrl:    best.url,
+                metadata: {
+                  catalogProductId: null, // filled below if we can resolve
+                  imageRole:        'video',
+                  brand:            brand.name || null,
+                  productTitle:     p.title || ajax?.title || null,
+                  durationMs:       media.duration ?? null,
+                  aspectRatio:      media.aspect_ratio ?? null,
+                  ingestedFrom:     'shopify-direct'
+                }
+              }
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+          );
+
+          // Stamp catalogProductId from the upserted CatalogProduct when present.
+          try {
+            const cp = await CatalogProduct.findOne({ brandId: brand._id, externalId: String(p.id) })
+              .select('_id').lean();
+            if (cp?._id) {
+              await Media.updateOne(
+                { brandId: brand._id, source: 'catalog-product', externalId },
+                { $set: { 'metadata.catalogProductId': cp._id } }
+              );
+            }
+          } catch (_) { /* best-effort */ }
+
+          videosIngested += 1;
+        } catch (err) {
+          if (err.code !== 11000) {
+            console.warn(`   ⚠️  🛍  Media upsert failed for video ${p.id}/${media.id}: ${err.message}`);
+            errors.push(`video media ${p.id}/${media.id}: ${err.message}`);
+          }
+        }
+      } catch (err) {
+        console.warn(`   ⚠️  🛍  video handle failed ${p.handle}/${media?.id}: ${err.message}`);
+        errors.push(`video ${p.id}/${media?.id}: ${err.message}`);
+      }
+    }
+
+    run?.tick?.(
+      i + 1,
+      products.length,
+      `products ${i + 1}/${products.length} · ${videosIngested} videos · ${reviewsCaptured} reviews`
+    );
+  }
+
+  // ── Stage 3: reviews & ratings (JSON-LD on product HTML) ─────────
+  run?.stage?.('reviews & ratings');
+
+  for (let i = 0; i < products.length; i++) {
+    if (i > 0 && i % 5 === 0) {
+      if (await abortCheck(brand._id, run)) {
+        console.log(`   · 🛍  aborted during reviews stage for brand=${brand._id}`);
+        return {
+          productsUpserted,
+          videosIngested,
+          reviewsCaptured,
+          errors,
+          cancelled: true,
+          durationMs: Date.now() - t0
+        };
+      }
+      if (run?.checkpoint) await run.checkpoint();
+    }
+
+    const p = products[i];
+    if (!p?.handle) continue;
+
+    let html;
+    try {
+      await pace();
+      html = await politeFetch(`${origin}/products/${encodeURIComponent(p.handle)}`, { asText: true });
+    } catch (err) {
+      if (err.message === 'store rate-limited this server') {
+        errors.push(`reviews stage rate-limited at handle=${p.handle}`);
+        console.warn(`   ⚠️  🛍  ${err.message} during reviews stage — skipping remaining reviews`);
+        break;
+      }
+      if (err.status === 404) continue;
+      errors.push(`product HTML ${p.handle}: ${err.message}`);
+      continue;
+    }
+
+    try {
+      const reviewApp = detectReviewApp(html);
+      const { rating, reviewCount, quotes } = extractReviewsFromHtml(html, reviewApp);
+
+      if (rating != null || (quotes && quotes.length)) {
+        const productReviews = {
+          quotes:      quotes || [],
+          rating:      rating,
+          reviewCount: reviewCount,
+          summary:     null,
+          fetchedAt:   new Date()
+        };
+        const $set = { productReviews };
+        if (rating != null) $set.rating = rating;
+
+        await CatalogProduct.updateOne(
+          { brandId: brand._id, externalId: String(p.id) },
+          { $set }
+        );
+        reviewsCaptured += 1;
+      }
+    } catch (err) {
+      console.warn(`   ⚠️  🛍  review parse failed for ${p.handle}: ${err.message}`);
+      errors.push(`reviews ${p.id}: ${err.message}`);
+    }
+
+    run?.tick?.(
+      i + 1,
+      products.length,
+      `products ${i + 1}/${products.length} · ${videosIngested} videos · ${reviewsCaptured} reviews`
+    );
+  }
+
+  // ── End-of-run trio (same as catalogSyncService ~298-342) ────────
+  const cancelled = await abortCheck(brand._id, run);
+  if (!cancelled) {
+    try {
+      const { enqueueBrandProductDetects } = require('./catalogProductDetectService');
+      await enqueueBrandProductDetects(brand._id);
+    } catch (err) {
+      console.warn(`   ⚠️  🛍  product-path detect enqueue failed: ${err.message}`);
+      errors.push(`detect enqueue: ${err.message}`);
+    }
+
+    setImmediate(() => {
+      require('./catalogProductEnrichmentService')
+        .enqueueBrandProductEnrichment(brand._id)
+        .catch(err => console.warn(`   ⚠️  🛍  catalog enrichment enqueue failed: ${err.message}`));
+    });
+
+    setImmediate(() => {
+      (async () => {
+        try {
+          const inference = require('./productCategoryInferenceService');
+          const candidates = await CatalogProduct.find({
+            brandId: brand._id,
+            productUrl: { $ne: null, $exists: true, $ne: '' },
+            $or: [
+              { inferredCategoryAt: null },
+              { inferredCategoryAt: { $lt: new Date(Date.now() - inference.TTL_DAYS * 24 * 60 * 60 * 1000) } }
+            ]
+          }).select('_id').lean();
+          if (!candidates.length) return;
+          console.log(`🔎 categoryInference: brand=${brand._id} scheduling ${candidates.length} product page scrapes`);
+          const result = await inference.inferBatch(candidates.map(c => c._id), { concurrency: 6 });
+          console.log(`🔎 categoryInference: brand=${brand._id} done — ok=${result.ok} cfChallenged=${result.challenged || 0} skipped=${result.skipped} failed=${result.failed}`);
+        } catch (err) {
+          console.warn(`   ⚠️  🛍  category inference enqueue failed: ${err.message}`);
+        }
+      })();
+    });
+  }
+
+  const durationMs = Date.now() - t0;
+  console.log(
+    `🛍  Shopify-direct sync done: brand=${brand._id} ` +
+    `upserted=${productsUpserted} videos=${videosIngested} reviews=${reviewsCaptured} ` +
+    `errors=${errors.length} cancelled=${!!cancelled} in ${durationMs}ms`
+  );
+
+  const out = {
+    productsUpserted,
+    videosIngested,
+    reviewsCaptured,
+    errors,
+    durationMs
+  };
+  if (cancelled) out.cancelled = true;
+  if (hitRateLimit) {
+    out.ok = false;
+    out.reason = 'store rate-limited this server — partials kept; try the Apify method';
+  }
+  return out;
+}
+
+// ── review helpers ─────────────────────────────────────────────────
+
+function detectReviewApp(html) {
+  if (!html) return null;
+  if (/judge\.me|judgeme/i.test(html)) return 'judge.me';
+  if (/yotpo/i.test(html)) return 'yotpo';
+  if (/loox\.io|loox/i.test(html)) return 'loox';
+  if (/stamped\.io|stamped/i.test(html)) return 'stamped';
+  if (/okendo/i.test(html)) return 'okendo';
+  return null;
+}
+
+function extractReviewsFromHtml(html, reviewAppName) {
+  let rating = null;
+  let reviewCount = null;
+  const quotes = [];
+
+  // Pull every <script type="application/ld+json">…</script> block.
+  const re = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  const blocks = [];
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const raw = (m[1] || '').trim();
+    if (!raw) continue;
+    try {
+      blocks.push(JSON.parse(raw));
+    } catch {
+      // lenient — try to salvage trailing-comma / junk
+      try {
+        const cleaned = raw.replace(/,\s*([}\]])/g, '$1');
+        blocks.push(JSON.parse(cleaned));
+      } catch {
+        // skip bad block
+      }
+    }
+  }
+
+  const nodes = flattenLdNodes(blocks);
+  for (const node of nodes) {
+    if (!node || typeof node !== 'object') continue;
+    const type = node['@type'];
+    const types = Array.isArray(type) ? type : [type];
+    if (!types.some(t => t && String(t).toLowerCase() === 'product')) continue;
+
+    // aggregateRating
+    const ar = node.aggregateRating;
+    if (ar && typeof ar === 'object') {
+      const rv = Number(ar.ratingValue);
+      if (Number.isFinite(rv)) {
+        rating = Math.max(0, Math.min(5, rv));
+      }
+      const rc = Number(ar.reviewCount ?? ar.ratingCount);
+      if (Number.isFinite(rc)) reviewCount = rc;
+    }
+
+    // review[] 
+    const rev = node.review;
+    const revArr = Array.isArray(rev) ? rev : rev ? [rev] : [];
+    for (const r of revArr) {
+      if (!r || typeof r !== 'object') continue;
+      const text = (r.reviewBody != null ? String(r.reviewBody) : '').trim().slice(0, 400);
+      if (!text) continue;
+      let author = null;
+      if (r.author != null) {
+        if (typeof r.author === 'string') author = r.author;
+        else if (typeof r.author === 'object') author = r.author.name || null;
+      }
+      quotes.push({
+        text,
+        author: author ? String(author).slice(0, 120) : null,
+        source: reviewAppName || 'store'
+      });
+      if (quotes.length >= 10) break;
+    }
+    if (quotes.length >= 10 && rating != null) break;
+  }
+
+  return { rating, reviewCount, quotes: quotes.slice(0, 10) };
+}
+
+function flattenLdNodes(blocks) {
+  const out = [];
+  const walk = (node) => {
+    if (node == null) return;
+    if (Array.isArray(node)) {
+      for (const n of node) walk(n);
+      return;
+    }
+    if (typeof node !== 'object') return;
+    out.push(node);
+    if (Array.isArray(node['@graph'])) {
+      for (const n of node['@graph']) walk(n);
+    }
+  };
+  for (const b of blocks) walk(b);
+  return out;
+}
+
+module.exports = {
+  syncBrandShopifyDirect,
+  // exported for unit tests / probe scripts
+  normalizeGtin,
+  stripHtml,
+  detectReviewApp,
+  extractReviewsFromHtml,
+  resolveStoreOrigin
+};
