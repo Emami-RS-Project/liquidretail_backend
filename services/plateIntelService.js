@@ -95,23 +95,28 @@ async function analyzeFrameBands(framePath) {
 }
 
 async function semanticScan(frames, hints) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY unset');
-  const { GoogleGenerativeAI } = require('@google/generative-ai');
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({
-    model: process.env.TITLE_SCAN_MODEL || 'gemini-2.5-flash',
-    generationConfig: { responseMimeType: 'application/json', temperature: 0 },
-  });
+  // Atlas gateway (Gemini served OpenAI-compatible; direct Google
+  // OpenAI-compat endpoint as fallback inside the transport).
+  const { chatCompletion } = require('./atlasLlmService');
 
-  const parts = [{
+  const content = [{
+    type: 'text',
     text: `These are frames from a product video ad, in time order (${frames.map((f) => f.atSec + 's').join(', ')}). Title text will be overlaid in horizontal bands: top (upper third), middle, bottom (lower third). For EACH frame, mark bands that titles must AVOID because they would cover a face, the product itself, or the visual focal point. Respond as JSON: {"frames":[{"atSec":<n>,"avoid":["top"|"middle"|"bottom", ...]}]} — empty avoid array when everything is clear.`,
   }];
   for (const f of frames) {
-    parts.push({ inlineData: { mimeType: 'image/png', data: (await fsp.readFile(f.path)).toString('base64') } });
+    content.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${(await fsp.readFile(f.path)).toString('base64')}` } });
   }
-  const res = await model.generateContent(parts);
-  const parsed = JSON.parse(res.response.text());
+  const res = await chatCompletion(
+    { stage: 'title_plate_scan', service: 'plateIntelService', visionImages: frames.length },
+    {
+      model: process.env.TITLE_SCAN_MODEL || 'gemini-2.5-flash',
+      messages: [{ role: 'user', content }],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+      max_tokens: 1024,
+    }
+  );
+  const parsed = JSON.parse(res.choices[0].message.content);
   for (const fr of parsed.frames || []) {
     const sample = hints.samples.find((s) => Math.abs(s.atSec - Number(fr.atSec)) < 0.6);
     if (!sample) continue;

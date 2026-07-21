@@ -24,10 +24,9 @@
 // media and are any of them useful as ad subjects." The YOLO class label
 // alone is too coarse ("bottle" vs "Pelagic Gear 16oz stainless water bottle").
 
-const OpenAI = require('openai');
 const JSON5 = require('json5');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 90_000 });
+const { chatCompletion } = require('./atlasLlmService');
 
 const MAX_DETECTIONS_PER_CALL = 24;
 
@@ -119,7 +118,7 @@ async function identifyChunk(chunk, hints, offset) {
     `- Return one item entry for every index 1..${imageParts.length}, even if products is [].\n` +
     `Return ONLY valid JSON — no prose outside.`;
 
-  const response = await openai.chat.completions.create({
+  const response = await chatCompletion({ stage: 'yolo_identify', service: 'yoloIdentifyService' }, {
     model: 'gpt-4.1',
     response_format: { type: 'json_object' },
     messages: [{

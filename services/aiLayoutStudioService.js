@@ -14,6 +14,9 @@
 
 const OpenAI = require('openai');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Chat goes through the Atlas gateway; the OpenAI client below remains
+// ONLY for images.generate/edit until atlasImageService lands (M3).
+const { chatCompletion } = require('./atlasLlmService');
 
 const Media                = require('../models/Media');
 const DetectionArtifact    = require('../models/DetectionArtifact');
@@ -215,7 +218,7 @@ async function extractLayoutFromImage(imageUrl) {
     `Identify 4-8 distinct zones. Focus on structural layout — don't try to read garbled AI text. Use tight bounding rectangles (no extra padding).`
   ].join('\n');
 
-  const response = await openai.chat.completions.create({
+  const response = await chatCompletion({ stage: 'layout_vision', service: 'aiLayoutStudioService' }, {
     model: 'gpt-4.1',
     response_format: { type: 'json_object' },
     messages: [{

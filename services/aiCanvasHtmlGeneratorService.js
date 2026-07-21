@@ -16,7 +16,6 @@
 // 6.3 will branch the renderer on outputKind. This service produces
 // the HTML in shadow so we have material to validate + render against.
 
-const OpenAI = require('openai');
 
 const AiCanvasArtifact          = require('../models/AiCanvasArtifact');
 const AiHtmlValidationArtifact  = require('../models/AiHtmlValidationArtifact');
@@ -26,7 +25,7 @@ const { loadContext }           = require('./layoutInputService');
 const { trackLlmCall }          = require('./costTracker');
 const { validateCandidate }     = require('./htmlValidationService');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 const MODEL_ID            = 'gpt-4.1';
 const TEMPERATURE         = 0.85;
@@ -229,7 +228,7 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false, operat
 
   const oneGeneration = async (genIndex) => {
     const t0 = Date.now();
-    const completion = await trackLlmCall(
+    const completion = await chatCompletion(
       {
         stage:       'layout_generator_html',
         provider:    'openai',
@@ -241,7 +240,7 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false, operat
         visionImages: images.length,
         cacheKey:    `htmlcanvas:${canvas._id}:${HTML_SCHEMA_VERSION}`
       },
-      () => openai.chat.completions.create({
+      {
         model: MODEL_ID,
         response_format: { type: 'json_schema', json_schema: responseSchema },
         messages: [
@@ -250,7 +249,7 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false, operat
         ],
         temperature: TEMPERATURE,
         max_tokens:  MAX_TOKENS
-      })
+      }
     );
     const elapsedMs = Date.now() - t0;
     const raw = completion.choices?.[0]?.message?.content;

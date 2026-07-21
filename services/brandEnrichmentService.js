@@ -16,13 +16,12 @@
 // next time its website URL shows up on a new media upload.
 
 const axios = require('axios');
-const OpenAI = require('openai');
 
 const Brand = require('../models/Brand');
 const { lookupBrand: brandfetchLookup } = require('./brandfetchService');
 const { lookupBrandReviews } = require('./providers/geminiSearchProvider');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 const MAX_HTML_CHARS = 25000;
 
 const ENRICHMENT_SCHEMA = {
@@ -209,7 +208,7 @@ async function runEnrichment(brand, brandId) {
       `Ground personas in the brand's actual positioning; don't invent irrelevant personas. If the brand is niche, 2 personas is fine.`;
 
     try {
-      const response = await openai.chat.completions.create({
+      const response = await chatCompletion({ stage: 'brand_enrichment_gpt', service: 'brandEnrichmentService' }, {
         model: 'gpt-4.1',
         response_format: { type: 'json_object' },
         messages: [{ role: 'user', content: prompt }],

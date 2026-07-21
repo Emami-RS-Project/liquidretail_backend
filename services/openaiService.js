@@ -1,5 +1,8 @@
 const OpenAI = require('openai');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Chat goes through the Atlas gateway; the OpenAI client below remains
+// ONLY for images.generate/edit until atlasImageService lands (M3).
+const { chatCompletion } = require('./atlasLlmService');
 const JSON5 = require('json5');
 
 // Identify a product from a cropped image via GPT-4.1 vision. DALL-E marketing
@@ -11,7 +14,7 @@ async function processImage(imageUrl) {
 
   // ── 1. Identification (required) ──
   try {
-    const response = await openai.chat.completions.create({
+    const response = await chatCompletion({ stage: 'inventory_identify', service: 'openaiService' }, {
       model: 'gpt-4.1',
       messages: [
         {

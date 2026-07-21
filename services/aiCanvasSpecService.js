@@ -30,14 +30,13 @@
 // to bypass.
 
 const crypto = require('crypto');
-const OpenAI = require('openai');
 
 const AiCanvasArtifact = require('../models/AiCanvasArtifact');
 const { buildAiCanvasContext } = require('./aiCanvasInputBuilder');
 const { loadContext } = require('./layoutInputService');
 const { trackLlmCall, recordCacheHit } = require('./costTracker');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 const MODEL_ID = 'gpt-4.1';
 const SPEC_SCHEMA_VERSION = '4.0.0';   // 4.0: retired V1 panel-zone layering constraints. The "panels sit ON TOP of media zones (z-index by layer: media=0, background=1, copy=3)" + "panel cannot cover or substantially overlap media" + ">60% media area forbidden" + three-prescriptive-patterns rules were V1 deterministic-renderer protections. V2 (HTML Gen) renders zones as CSS divs with full expressiveness (translucent panels, blend modes, gradients, photo backdrops) — none of the V1 layering concerns apply. Replaced with a "zones are semantic, not pixel-level layers" framing that explicitly enables panel-covers-media compositions, text-on-media without backing panels, and arbitrary visual_direction interpretation by HTML Gen. Unlocks magazine-editorial dominance, full-bleed scrims, editorial spreads, and other layouts the V1 rules forbade. 3.1: Phase 4 platform-format safe-area boxes (kept). 3.0: video topology mandate rolled back.
@@ -1317,7 +1316,7 @@ async function getOrGenerate({
 
   const oneGeneration = async (genIndex) => {
     const t0 = Date.now();
-    const completion = await trackLlmCall(
+    const completion = await chatCompletion(
       {
         stage:       isV2 ? 'layout_generator' : 'legacy_ai_canvas_spec',
         provider:    'openai',
@@ -1327,7 +1326,7 @@ async function getOrGenerate({
         visionImages: images.length,
         cacheKey:    costCacheKey
       },
-      () => openai.chat.completions.create({
+      {
         model: MODEL_ID,
         response_format: { type: 'json_schema', json_schema: responseSchema },
         messages: [
@@ -1336,7 +1335,7 @@ async function getOrGenerate({
         ],
         temperature: 0.9,
         max_tokens:  4000
-      })
+      }
     );
     const elapsedMs = Date.now() - t0;
     const raw = completion.choices?.[0]?.message?.content;

@@ -3,8 +3,7 @@
 // certainty score. The per-provider URLs stay on the response as evidence,
 // but the UI hero card is driven by this synthesis.
 
-const OpenAI = require('openai');
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 async function identifyProduct({
   brand,
@@ -105,7 +104,7 @@ async function identifyProduct({
     }
   ];
 
-  const response = await openai.chat.completions.create({
+  const response = await chatCompletion({ stage: 'product_reasoning', service: 'productReasoner' }, {
     model: 'gpt-4.1',
     messages,
     response_format: { type: 'json_object' },
