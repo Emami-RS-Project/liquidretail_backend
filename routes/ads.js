@@ -433,11 +433,18 @@ async function runRenderLoop(run, job, adIds, renderToken) {
     dispatch();
   });
 
-  // Cancelled mid-batch: unclaimed queued ads become skipped so the run
-  // settles honestly and the frontend poller resolves.
+  // Cancelled mid-batch: unclaimed ads (bulk-flipped to 'rendering' at
+  // claim time, before the loop) go BACK to the queue — they count as
+  // skipped for this run and the next run's selectAdsForRun re-drains
+  // them. Matching on status:'rendering' is load-bearing: the old
+  // status:'queued' filter matched nothing post-claim, stranding
+  // unclaimed ads in 'rendering' forever (adversarial-review find).
   if (cancelled && next < queue.length) {
     const remaining = queue.slice(next).map((q) => q.adId);
-    await Ad.updateMany({ _id: { $in: remaining }, status: 'queued' }, { $set: { status: 'draft', campaignRunId: null } }).catch(() => {});
+    await Ad.updateMany(
+      { _id: { $in: remaining }, status: 'rendering' },
+      { $set: { status: 'queued', updatedAt: new Date() } }
+    ).catch(() => {});
     await CampaignRun.updateOne({ _id: run._id }, { $inc: { skipped: remaining.length } }).catch(() => {});
   }
 
