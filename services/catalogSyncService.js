@@ -323,9 +323,12 @@ async function syncCatalogForCred(cred, run = null) {
     (async () => {
       try {
         const inference = require('./productCategoryInferenceService');
+        // NOTE: not { $ne: null, …, $ne: '' } — duplicate keys in a JS
+        // object literal keep only the LAST one, so the null exclusion
+        // was silently dropped and null productUrls reached inferBatch.
         const candidates = await CatalogProduct.find({
           brandId,
-          productUrl: { $ne: null, $exists: true, $ne: '' },
+          productUrl: { $exists: true, $nin: [null, ''] },
           $or: [
             { inferredCategoryAt: null },
             { inferredCategoryAt: { $lt: new Date(Date.now() - inference.TTL_DAYS * 24 * 60 * 60 * 1000) } }

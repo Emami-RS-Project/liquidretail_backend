@@ -51,7 +51,17 @@ const pause = (ms) => new Promise(r => setTimeout(r, ms));
     console.error('Usage: node scripts/probeShopifyStore.js <store url>');
     process.exit(1);
   }
-  const store = /^https?:\/\//i.test(storeArg) ? storeArg.replace(/\/$/, '') : `https://${storeArg.replace(/\/$/, '')}`;
+  // Normalize to the ORIGIN — operators paste collection/product URLs
+  // (e.g. …/collections/all) and a path prefix would silently probe the
+  // wrong endpoints (…/collections/all/products/<handle>.js → 404 →
+  // false "no videos" verdict).
+  let store;
+  try {
+    store = new URL(/^https?:\/\//i.test(storeArg) ? storeArg : `https://${storeArg}`).origin;
+  } catch {
+    console.error(`not a valid store URL: ${storeArg}`);
+    process.exit(1);
+  }
   console.log(`🛍  probing ${store} from this host…\n`);
   let verdict = { catalog: false, videos: false, reviews: false };
 

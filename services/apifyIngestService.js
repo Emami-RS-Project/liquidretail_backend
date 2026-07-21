@@ -86,8 +86,15 @@ async function syncBrandApify(brandId) {
     out.shopify = { ok: false, reason: 'aborted before Shopify sync started' };
   }
 
-  brand.apifyDemo.lastSyncedAt = new Date();
-  await brand.save();
+  // lastSyncedAt stamp must not be able to strand the progress row —
+  // a transient save failure would otherwise skip markCancelled/succeed
+  // below and leave the run "in progress" forever in the dock.
+  try {
+    brand.apifyDemo.lastSyncedAt = new Date();
+    await brand.save();
+  } catch (err) {
+    console.warn(`   ⚠️  lastSyncedAt stamp failed for brand=${brand._id} (non-fatal): ${err.message}`);
+  }
 
   out.durationMs = Date.now() - t0;
   out.aborted    = stillAborted || (await isBrandAborted(brand._id, run));
@@ -128,11 +135,11 @@ async function syncBrandInstagram(brand, run = null) {
     }
     try {
       const r = await ingestIgPost(brand, post);
+      // runId can accompany a skipped result — resume-after-abort
+      // re-enqueues detect for already-ingested media.
+      if (r?.runId) summary.queuedRunIds.push(String(r.runId));
       if (r?.skipped) summary.skipped++;
-      else if (r?.mediaId) {
-        summary.ingested++;
-        if (r.runId) summary.queuedRunIds.push(String(r.runId));
-      }
+      else if (r?.mediaId) summary.ingested++;
     } catch (err) {
       console.warn(`   ⚠️  Apify IG ingest failed for ${post.externalId}: ${err.message}`);
       summary.errors++;
@@ -162,19 +169,25 @@ async function ingestIgPost(brand, post) {
   if (!externalId || !mediaUrl) return { skipped: true };
 
   // Idempotent: dedup on (brandId, source, externalId). Apify pulls of
-  // the same handle are the natural re-sync case.
+  // the same handle are the natural re-sync case. Existing rows skip
+  // the download/upload but MUST still fall through to the DetectRun
+  // check below — an early return here made the documented
+  // resume-after-abort path unreachable (aborted runs are marked
+  // failed; re-sync is what re-queues detect for ingested media).
   const existing = await Media.findOne({ brandId: brand._id, source: 'apify-ig', externalId }).select('_id').lean();
-  if (existing) return { skipped: true };
 
   const isVideo = mediaType === 'VIDEO';
   const fileType = isVideo ? 'video' : 'image';
 
+  let media;
+  if (existing) {
+    media = existing;
+  } else {
   const upload = await uploadUrlToCloudinary(mediaUrl, {
     resourceType: isVideo ? 'video' : 'image',
     folder:       'apify-demo/ig'
   });
 
-  let media;
   try {
     media = await Media.findOneAndUpdate(
       { brandId: brand._id, source: 'apify-ig', externalId },
@@ -217,6 +230,7 @@ async function ingestIgPost(brand, post) {
     if (err.code === 11000) return { skipped: true };
     throw err;
   }
+  }
 
   // Skip enqueue only if there's an ACTIVE run (queued/processing/
   // completed). A run marked failed by /abort should NOT block a fresh
@@ -227,7 +241,9 @@ async function ingestIgPost(brand, post) {
     mediaId: media._id,
     status:  { $in: ['queued', 'processing', 'completed'] }
   }).select('_id').lean();
-  if (existingActive) return { mediaId: media._id, runId: null };
+  // skipped reflects INGESTION (media already existed) — a resumed post
+  // can be skipped for counting yet still re-enqueue detect below.
+  if (existingActive) return { mediaId: media._id, runId: null, skipped: !!existing };
 
   let run;
   try {
@@ -243,11 +259,11 @@ async function ingestIgPost(brand, post) {
   } catch (err) {
     if (err.code === 11000) {
       const inflight = await DetectRun.findOne({ mediaId: media._id, status: { $in: ['queued', 'processing'] } }).lean();
-      return { mediaId: media._id, runId: inflight?._id || null };
+      return { mediaId: media._id, runId: inflight?._id || null, skipped: !!existing };
     }
     throw err;
   }
-  return { mediaId: media._id, runId: run._id };
+  return { mediaId: media._id, runId: run._id, skipped: !!existing };
 }
 
 // ── Shopify side ───────────────────────────────────────────────────

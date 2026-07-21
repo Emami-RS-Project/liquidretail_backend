@@ -234,6 +234,12 @@ const brandSchema = new mongoose.Schema({
     igHandle:      { type: String, default: null },  // '@' stripped, lowercase
     shopifyUrl:    { type: String, default: null },  // e.g. 'https://store.example.com'
     lastSyncedAt:  { type: Date,   default: null },
+    // Catalog ingest method: 'shopify-direct' (free, documented public
+    // endpoints — default when shopifyUrl is set) | 'apify' (paid actor).
+    // IG posts ride Apify in both modes. Typed subdoc — a value missing
+    // from this schema is silently dropped by strict mode, so keep this
+    // field list in sync with salesDemosService.normalizeMethod.
+    method:        { type: String, enum: ['shopify-direct', 'apify'], default: null },
     // Cooperative cancellation flag. /abort sets true; the ingest
     // service resets it to false at the start of every sync and
     // checks it between records, bailing early when flipped mid-run.

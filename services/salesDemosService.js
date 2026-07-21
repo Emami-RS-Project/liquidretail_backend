@@ -95,19 +95,25 @@ async function createDemoBrand({ name, igHandle, shopifyUrl, method }) {
       name:           trimmedName,
       nameNormalized,
       isDemo:         true,
-      source:         'stub',
-      // Default catalog method on first insert only — explicit method
-      // in $set below wins when the caller provided a valid one.
-      'apifyDemo.method': normalizedUrl ? 'shopify-direct' : 'apify'
+      source:         'stub'
     },
-    $set: {
-      'apifyDemo.igHandle':   normalizeIgHandle(igHandle),
-      'apifyDemo.shopifyUrl': normalizedUrl
-    }
+    // Only write the fields the caller actually provided — an
+    // idempotent re-create with just {name, method} must not null out
+    // a stored igHandle/shopifyUrl (adversarial-review find).
+    $set: {}
   };
+  if (igHandle   !== undefined) update.$set['apifyDemo.igHandle']   = normalizeIgHandle(igHandle);
+  if (shopifyUrl !== undefined) update.$set['apifyDemo.shopifyUrl'] = normalizedUrl;
+  // method: explicit valid value → $set (applies to insert AND update).
+  // Otherwise default it on INSERT ONLY. The same path must never sit
+  // in both $set and $setOnInsert — MongoDB rejects that update
+  // outright as a path conflict (adversarial-review critical).
   if (normalizedMethod) {
     update.$set['apifyDemo.method'] = normalizedMethod;
+  } else {
+    update.$setOnInsert['apifyDemo.method'] = normalizedUrl ? 'shopify-direct' : 'apify';
   }
+  if (!Object.keys(update.$set).length) delete update.$set;
   const brand = await Brand.findOneAndUpdate(
     { advertiserId: adv._id, nameNormalized },
     update,

@@ -468,6 +468,16 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted } = {}) {
         mp4s.sort((a, b) => (b.width || 0) - (a.width || 0));
         const best = mp4s[0];
 
+        // Idempotency: the Media row is $setOnInsert-only, so a re-sync
+        // that re-downloaded + re-uploaded would orphan a fresh
+        // Cloudinary asset every run AND inflate videosIngested
+        // (adversarial-review find). Skip before spending bandwidth.
+        const already = await Media.findOne({
+          brandId: brand._id, source: 'catalog-product',
+          externalId: `cp_${p.id}_video_${media.id}`
+        }).select('_id').lean();
+        if (already) continue;
+
         await pace();
         let buf;
         try {
@@ -648,9 +658,13 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted } = {}) {
       (async () => {
         try {
           const inference = require('./productCategoryInferenceService');
+          // NOTE: not { $ne: null, …, $ne: '' } — duplicate keys in a JS
+          // object literal keep only the LAST one, silently dropping the
+          // null exclusion (adversarial-review find; same bug fixed in
+          // catalogSyncService's copy of this query).
           const candidates = await CatalogProduct.find({
             brandId: brand._id,
-            productUrl: { $ne: null, $exists: true, $ne: '' },
+            productUrl: { $exists: true, $nin: [null, ''] },
             $or: [
               { inferredCategoryAt: null },
               { inferredCategoryAt: { $lt: new Date(Date.now() - inference.TTL_DAYS * 24 * 60 * 60 * 1000) } }
