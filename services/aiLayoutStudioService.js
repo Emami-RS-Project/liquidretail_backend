@@ -284,6 +284,11 @@ async function runSession(sessionId) {
     return;
   }
 
+  const { startRun, CancelledError } = require('./progressService');
+  const progressRun = await startRun({
+    kind: 'ai-layout', advertiserId: session.advertiserId, brandId: session.brandId || null,
+    total: session.totalCombos || null, label: 'AI layout session'
+  });
   try {
     const ctx = await loadContext(session.mediaId);
     if (!ctx) {
@@ -314,18 +319,29 @@ async function runSession(sessionId) {
     // Per-combo: generate + extract + push to session.references[].
     // Wrapped individually so one combo's failure can't reject the
     // Promise.all and short-circuit the rest.
+    progressRun.stage('generating layout references');
+    let combosDone = 0;
     await Promise.all(combos.map(async (c) => {
       let ref;
-      try {
-        const imageUrl = await generateReferenceImage(ctx, c.variant, c.aspectRatio, q);
-        let extractedCanvas = null;
-        try { extractedCanvas = await extractLayoutFromImage(imageUrl); }
-        catch (err) { console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] extraction failed: ${err.message}`); }
-        ref = { ...c, imageUrl, extractedCanvas, status: 'ok' };
-      } catch (err) {
-        console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] generation failed: ${err.message}`);
-        ref = { ...c, status: 'error', error: err.message };
+      // Cooperative cancel BETWEEN combos: already-dispatched image
+      // calls run to completion; a cancelled run marks the remainder
+      // skipped and the session still settles.
+      if (progressRun.isCancelRequested()) {
+        ref = { ...c, status: 'error', error: 'cancelled by operator' };
+      } else {
+        try {
+          const imageUrl = await generateReferenceImage(ctx, c.variant, c.aspectRatio, q);
+          let extractedCanvas = null;
+          try { extractedCanvas = await extractLayoutFromImage(imageUrl); }
+          catch (err) { console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] extraction failed: ${err.message}`); }
+          ref = { ...c, imageUrl, extractedCanvas, status: 'ok' };
+        } catch (err) {
+          console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] generation failed: ${err.message}`);
+          ref = { ...c, status: 'error', error: err.message };
+        }
       }
+      await progressRun.checkpoint().catch(() => {}); // refresh cancel cache; terminal handled below
+      progressRun.tick(++combosDone, combos.length);
       // $push so each reference appears on the next client poll.
       // Doesn't conflict with the final status update — that's a
       // separate $set after Promise.all settles.
@@ -343,9 +359,12 @@ async function runSession(sessionId) {
       { _id: sessionId },
       { $set: { status: 'completed', completedAt: new Date() } }
     );
+    if (progressRun.isCancelRequested()) await progressRun.markCancelled('Stopped — generated references kept');
+    else await progressRun.succeed();
     console.log(`🎨 ai-layouts.runSession(${sessionId}): completed in ${Date.now() - t0}ms`);
   } catch (err) {
     console.warn(`🎨 ai-layouts.runSession(${sessionId}): top-level failure — ${err.message}`);
+    await progressRun.fail(err);
     try {
       await AiLayoutSession.updateOne(
         { _id: sessionId },

@@ -377,13 +377,31 @@ async function runRenderLoop(run, job, adIds, renderToken) {
     `concurrency=${concurrency}${isVeoRun ? ' (veo)' : ''} brand=${job.brandId} campaign=${job.campaignId} kind=${job.campaignKind || '-'}`
   );
 
+  // Unified progress row (ActivityDock) — mirrors the CampaignRun
+  // counters and adds cooperative cancel: the pool stops claiming new
+  // ads, in-flight renders finish, unclaimed ads flip to skipped.
+  const { startRun } = require('../services/progressService');
+  const brandDoc = await require('../models/Brand').findById(job.brandId).select('advertiserId').lean().catch(() => null);
+  const progressRun = await startRun({
+    kind: 'ad-batch',
+    advertiserId: brandDoc?.advertiserId,
+    brandId: job.brandId,
+    total: adIds.length,
+    label: isVeoRun ? 'Video ad generation' : 'Ad generation',
+  });
+  progressRun.stage('rendering');
+
   const queue = adIds.map((adId, i) => ({ adId, index: i }));
   let inflight = 0;
   let next     = 0;
+  let done     = 0;
+  let cancelled = false;
 
   await new Promise((resolve) => {
     const dispatch = () => {
-      while (inflight < concurrency && next < queue.length) {
+      // Refresh the cancel flag (non-throwing) before claiming more work.
+      progressRun.checkpoint().catch(() => { cancelled = true; });
+      while (!cancelled && inflight < concurrency && next < queue.length) {
         const { adId, index } = queue[next++];
         inflight++;
         renderOne(run, job, adId, index, renderToken)
@@ -392,13 +410,23 @@ async function runRenderLoop(run, job, adIds, renderToken) {
           })
           .finally(() => {
             inflight--;
-            if (next >= queue.length && inflight === 0) resolve();
+            progressRun.tick(++done, adIds.length);
+            if ((next >= queue.length || cancelled) && inflight === 0) resolve();
             else dispatch();
           });
       }
+      if (cancelled && inflight === 0) resolve();
     };
     dispatch();
   });
+
+  // Cancelled mid-batch: unclaimed queued ads become skipped so the run
+  // settles honestly and the frontend poller resolves.
+  if (cancelled && next < queue.length) {
+    const remaining = queue.slice(next).map((q) => q.adId);
+    await Ad.updateMany({ _id: { $in: remaining }, status: 'queued' }, { $set: { status: 'draft', campaignRunId: null } }).catch(() => {});
+    await CampaignRun.updateOne({ _id: run._id }, { $inc: { skipped: remaining.length } }).catch(() => {});
+  }
 
   await CampaignRun.updateOne(
     { _id: run._id },
@@ -406,9 +434,11 @@ async function runRenderLoop(run, job, adIds, renderToken) {
   );
   const totalMs = Date.now() - t0;
   const final = await CampaignRun.findById(run._id).select('succeeded skipped failed').lean();
+  if (cancelled) await progressRun.markCancelled(`Stopped — ${final?.succeeded || 0} finished, rest skipped`);
+  else await progressRun.succeed({ succeeded: final?.succeeded || 0, skipped: final?.skipped || 0, failed: final?.failed || 0 });
   console.log(
     `🎉 [campaignRun ${run.runId}] done in ${totalMs}ms — ` +
-    `${final?.succeeded || 0} succeeded · ${final?.skipped || 0} skipped · ${final?.failed || 0} failed`
+    `${final?.succeeded || 0} succeeded · ${final?.skipped || 0} skipped · ${final?.failed || 0} failed${cancelled ? ' (cancelled by operator)' : ''}`
   );
 }
 

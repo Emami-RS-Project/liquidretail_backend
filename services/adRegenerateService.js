@@ -122,20 +122,38 @@ async function regenerateAd({ ad, prompt, mode, requestedBy }) {
     }
   );
 
+  // Unified progress row (ActivityDock). Cancel is honored between
+  // stages (veo → composite / image-gen) — the in-flight provider call
+  // finishes, then the regenerate stops and the ad keeps its previous
+  // render.
+  const { startRun, CancelledError } = require('./progressService');
+  const brandDoc = await require('../models/Brand').findById(ad.brandId).select('advertiserId').lean().catch(() => null);
+  const progressRun = await startRun({
+    kind: 'ad-regenerate', advertiserId: brandDoc?.advertiserId, brandId: ad.brandId,
+    label: kind === 'video' ? 'Video ad regenerate' : 'Ad regenerate'
+  });
+
   try {
     if (kind === 'video') {
-      await runVideoFull(adId, prompt);
+      await runVideoFull(adId, prompt, progressRun);
     } else {
-      await runImage(adId, prompt);
+      await runImage(adId, prompt, progressRun);
     }
 
     const durationMs = Date.now() - startedAt;
     await markComplete(adId, { status: 'done', durationMs });
+    await progressRun.succeed({ durationMs });
     console.log(`🔁 regenerate[ad=${adId}]: done in ${Math.round(durationMs / 1000)}s`);
   } catch (err) {
     const durationMs = Date.now() - startedAt;
+    if (err instanceof CancelledError) {
+      console.log(`🔁 regenerate[ad=${adId}]: cancelled by operator after ${Math.round(durationMs / 1000)}s`);
+      await markComplete(adId, { status: 'failed', durationMs, error: 'cancelled by operator' });
+      return;
+    }
     console.error(`❌ regenerate[ad=${adId}]: failed after ${Math.round(durationMs / 1000)}s — ${err.message}`);
     await markComplete(adId, { status: 'failed', durationMs, error: err.message || String(err) });
+    await progressRun.fail(err);
   }
 }
 
@@ -154,11 +172,12 @@ async function loadBrand(adId) {
 
 // Video regen — always full. Regenerates the storyboard + Grok base
 // video, then applies brand-script chrome (or no chrome, per resolver).
-async function runVideoFull(adId, prompt) {
+async function runVideoFull(adId, prompt, progressRun = null) {
   // Stage 1 — context prep (model + aspect resolution, layoutInput
   // warm). storyboard is null on the Atlas path — the Ken Burns prompt
   // directs motion; the operator's refinement prompt is threaded into
   // the video prompt itself in Stage 2.
+  if (progressRun) { await progressRun.checkpoint(); progressRun.stage('generating video'); }
   await setStage(adId, 'veo');
   const ad1 = await Ad.findById(adId).lean();
   const { storyboard } = await veoService.prepareStoryboard({ ad: ad1, operatorPrompt: prompt });
@@ -189,6 +208,7 @@ async function runVideoFull(adId, prompt) {
   // script by format; returns skipped when no chrome is configured
   // (raw Grok video stays as renderUrl in that case). Failure is
   // non-fatal for the same reason.
+  if (progressRun) { await progressRun.checkpoint(); progressRun.stage('compositing'); }
   await setStage(adId, 'composite');
   const brand = await loadBrand(adId);
   if (brand) {
@@ -205,7 +225,8 @@ async function runVideoFull(adId, prompt) {
 // operatorPrompt) then screenshots the new outputHtml with Puppeteer
 // at the canvas's normalized dims, uploads to Cloudinary, and updates
 // the Ad's renderUrl.
-async function runImage(adId, prompt) {
+async function runImage(adId, prompt, progressRun = null) {
+  if (progressRun) { await progressRun.checkpoint(); progressRun.stage('generating image'); }
   await setStage(adId, 'image-gen');
   const ad = await Ad.findById(adId).lean();
   if (!ad.aiCanvasArtifactId) {

@@ -496,7 +496,7 @@ function isRateLimit(summary) {
   return /(\bcode\b\s*[:=]\s*429|\bstatus\b\s*[:=]\s*429|http status code:\s*429|rate[- ]?limit|too many requests)/i.test(body);
 }
 
-async function pollPrediction(predictionId) {
+async function pollPrediction(predictionId, { shouldCancel = null } = {}) {
   const t0 = Date.now();
   let pollCount = 0;
   let consecutiveErrors = 0;
@@ -509,6 +509,14 @@ async function pollPrediction(predictionId) {
     // burst even before the submission traffic weighs in.
     const jitter = Math.floor(Math.random() * 3000);
     await new Promise(r => setTimeout(r, POLL_INTERVAL + jitter));
+    // Cooperative cancel: stop WAITING on the provider job (it may still
+    // complete server-side — no provider cancel API assumed) and let the
+    // caller mark its run cancelled.
+    if (shouldCancel && await shouldCancel()) {
+      const e = new Error('video poll cancelled by operator');
+      e.code = 'CANCELLED';
+      throw e;
+    }
     pollCount++;
     let res;
     try {
