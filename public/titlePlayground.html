@@ -357,7 +357,8 @@
       // own sample times (until the operator edits the field) and re-render
       // once — you're then literally previewing on the scanned frames.
       if (adId && !state.frameTimesTouched && Array.isArray(data.scanSampleTimes) && data.scanSampleTimes.length) {
-        const scanVal = data.scanSampleTimes.join(', ');
+        // Render path caps at 4 frames — never imply a 5th that won't exist.
+        const scanVal = data.scanSampleTimes.slice(0, 4).join(', ');
         if ($('frameTimes').value.replace(/\s/g, '') !== scanVal.replace(/\s/g, '')) {
           $('frameTimes').value = scanVal;
           state.pendingRender = true;
@@ -425,6 +426,13 @@
       fig.append(visual, cap);
       if (samp) {
         const chips = document.createElement('div'); chips.className = 'chips';
+        // Honesty gate: the engine really does use the NEAREST sample, but
+        // when it's far from this frame, say which moment the intel is from.
+        if (Math.abs(samp.atSec - t) >= 0.35) {
+          const src = document.createElement('i');
+          src.textContent = 'scan @' + samp.atSec + 's';
+          chips.appendChild(src);
+        }
         for (const band of ['top', 'middle', 'bottom']) {
           const b = samp.bands[band]; if (!b) continue;
           const i = document.createElement('i');
