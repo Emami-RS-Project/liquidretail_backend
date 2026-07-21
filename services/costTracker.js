@@ -28,8 +28,22 @@ const MODEL_RATES = Object.freeze({
   'claude-haiku-4.5':  { input: 1.00,  output: 5.00,  cachedInput: 0.10 },
   // Google (https://ai.google.dev/pricing)
   'gemini-2.5-pro':    { input: 1.25,  output: 5.00,  cachedInput: 0.31 },
-  'gemini-2.5-flash':  { input: 0.10,  output: 0.40,  cachedInput: 0.025 }
+  'gemini-2.5-flash':  { input: 0.10,  output: 0.40,  cachedInput: 0.025 },
+  // Atlas Cloud gateway IDs (https://api.atlascloud.ai/api/v1/models —
+  // pricing fields verified live 2026-07-21). Same underlying vendors,
+  // provider-prefixed slugs.
+  'openai/gpt-5.6-terra':        { input: 2.50,  output: 15.00, cachedInput: 0.25 },
+  'openai/gpt-5.6-luna':         { input: 1.00,  output: 6.00,  cachedInput: 0.10 },
+  'openai/gpt-5.6-sol':          { input: 5.00,  output: 30.00, cachedInput: 0.50 },
+  'openai/gpt-5.4':              { input: 2.50,  output: 15.00, cachedInput: 0.25 },
+  'google/gemini-2.5-flash':     { input: 0.30,  output: 2.50,  cachedInput: 0.075 },
+  'google/gemini-2.5-pro':       { input: 1.25,  output: 10.00, cachedInput: 0.31 },
+  'anthropic/claude-sonnet-4.6': { input: 3.00,  output: 15.00, cachedInput: 0.30 }
 });
+
+// Unknown models silently log $0 — warn once per model id so a new/renamed
+// Atlas slug can't quietly zero the ledger.
+const warnedUnknownModels = new Set();
 
 // Vision image surcharge — gpt-4.1 charges per image (low ≈ 85 tokens,
 // high ≈ 765 tokens per 512×512 tile). We log image count and add a
@@ -75,6 +89,15 @@ async function recordCacheHit(meta) {
   await persistCost({ ...meta, cacheHit: true, costUsd: 0, durationMs: 0, status: 'ok' });
 }
 
+// Flat-fee (non-token) call logging — video renders and other calls
+// priced per generation rather than per token. The caller supplies
+// costUsd (e.g. atlasVideoService.estimateRenderCostUsd); token fields
+// stay 0 so the per-brand/per-stage rollups aggregate cleanly alongside
+// LLM entries. Never throws (persistCost warns internally).
+async function recordFlatCost(meta) {
+  await persistCost({ status: 'ok', ...meta, costUsd: meta.costUsd || 0 });
+}
+
 async function persistCost(record) {
   try {
     await CostLog.create({
@@ -111,6 +134,17 @@ async function persistCost(record) {
 
 function extractUsage(result, provider) {
   if (!result) return { input: 0, output: 0, cached: 0 };
+  // Atlas Cloud gateway (and Google's OpenAI-compat endpoint, used as the
+  // direct fallback for gemini rows) — OpenAI-compatible usage shape
+  // regardless of the underlying vendor.
+  if (provider === 'atlas' || provider === 'google-openai') {
+    const u = result.usage || {};
+    return {
+      input:  u.prompt_tokens     || 0,
+      output: u.completion_tokens || 0,
+      cached: u.prompt_tokens_details?.cached_tokens || u.cached_tokens || 0
+    };
+  }
   // OpenAI chat / image gen
   if (provider === 'openai') {
     const u = result.usage || {};
@@ -141,7 +175,13 @@ function extractUsage(result, provider) {
 
 function computeCost(model, usage, visionImages) {
   const rate = MODEL_RATES[model];
-  if (!rate) return { costUsd: 0, inputTokens: usage.input, outputTokens: usage.output, cachedInputTokens: usage.cached };
+  if (!rate) {
+    if (model && !warnedUnknownModels.has(model)) {
+      warnedUnknownModels.add(model);
+      console.warn(`💰 costTracker: no rate for model '${model}' — logging $0 (add it to MODEL_RATES)`);
+    }
+    return { costUsd: 0, inputTokens: usage.input, outputTokens: usage.output, cachedInputTokens: usage.cached };
+  }
   const fullInput = Math.max(0, usage.input - (usage.cached || 0));
   const usd = (
     (fullInput        / 1_000_000) * rate.input +
@@ -159,6 +199,7 @@ function computeCost(model, usage, visionImages) {
 module.exports = {
   trackLlmCall,
   recordCacheHit,
+  recordFlatCost,
   MODEL_RATES,
   VISION_IMAGE_COST_PER_IMAGE_USD
 };

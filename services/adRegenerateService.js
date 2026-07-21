@@ -84,7 +84,7 @@ async function preflight(adId, brandId) {
 // route responds 202 with { regenerating: true } and the worker runs
 // in the background. The frontend polls /api/catalog/:id/ads-detail
 // every 5s watching Ad.regenerating.
-async function regenerateAd({ ad, prompt, mode, requestedBy }) {
+async function regenerateAd({ ad, prompt, mode, requestedBy, videoModel = null }) {
   const adId      = String(ad._id);
   const kind      = ad.kind || 'image';
   // Video always regens fully (new Grok video + brand-script chrome).
@@ -96,20 +96,23 @@ async function regenerateAd({ ad, prompt, mode, requestedBy }) {
     prompt:      String(prompt || '').slice(0, 1000),
     mode:        effMode,
     requestedBy: requestedBy || null,
+    videoModel:  videoModel || null,
     at:          new Date(startedAt),
     status:      'pending'
   };
 
   console.log(
-    `🔁 regenerate[ad=${adId}]: kind=${kind} mode=${effMode} ` +
-    `prompt="${historyEntry.prompt.slice(0, 60)}${historyEntry.prompt.length > 60 ? '…' : ''}"`
+    `🔁 regenerate[ad=${adId}]: kind=${kind} mode=${effMode}` +
+    (videoModel ? ` videoModel=${videoModel}` : '') +
+    ` prompt="${historyEntry.prompt.slice(0, 60)}${historyEntry.prompt.length > 60 ? '…' : ''}"`
   );
 
-  // Lock the ad + append the in-flight history entry. The lock is
-  // belt-and-suspenders alongside the preflight check — race-window
-  // between preflight + setImmediate is small but non-zero.
-  await Ad.updateOne(
-    { _id: adId },
+  // Atomic lock + append in-flight history entry. Filter requires
+  // regenerating ≠ true so two concurrent workers cannot both win the
+  // race past preflight; the loser sees modifiedCount === 0 and exits
+  // without spending provider quota or touching progress.
+  const lockResult = await Ad.updateOne(
+    { _id: adId, regenerating: { $ne: true } },
     {
       $set: {
         regenerating:      true,
@@ -121,21 +124,49 @@ async function regenerateAd({ ad, prompt, mode, requestedBy }) {
       }
     }
   );
+  if (lockResult.modifiedCount === 0) {
+    console.log(`🔁 regenerate[ad=${adId}]: already in flight — skipped`);
+    return;
+  }
+
+  // Unified progress row (ActivityDock). Cancel is honored between
+  // stages (veo → composite / image-gen) — the in-flight provider call
+  // finishes, then the regenerate stops and the ad keeps its previous
+  // render.
+  const { startRun, CancelledError } = require('./progressService');
+  const brandDoc = await require('../models/Brand').findById(ad.brandId).select('advertiserId').lean().catch(() => null);
+  const progressRun = await startRun({
+    kind: 'ad-regenerate', advertiserId: brandDoc?.advertiserId, brandId: ad.brandId,
+    label: kind === 'video' ? 'Video ad regenerate' : 'Ad regenerate'
+  });
 
   try {
     if (kind === 'video') {
-      await runVideoFull(adId, prompt);
+      await runVideoFull(adId, prompt, progressRun, videoModel);
     } else {
-      await runImage(adId, prompt);
+      await runImage(adId, prompt, progressRun);
     }
 
     const durationMs = Date.now() - startedAt;
     await markComplete(adId, { status: 'done', durationMs });
+    // progress-row failures must not re-enter the outer catch (which
+    // would markComplete status:'failed' over a real success).
+    try {
+      await progressRun.succeed({ durationMs });
+    } catch (progErr) {
+      console.warn(`🔁 regenerate[ad=${adId}]: progressRun.succeed failed (non-fatal) — ${progErr.message}`);
+    }
     console.log(`🔁 regenerate[ad=${adId}]: done in ${Math.round(durationMs / 1000)}s`);
   } catch (err) {
     const durationMs = Date.now() - startedAt;
+    if (err instanceof CancelledError) {
+      console.log(`🔁 regenerate[ad=${adId}]: cancelled by operator after ${Math.round(durationMs / 1000)}s`);
+      await markComplete(adId, { status: 'failed', durationMs, error: 'cancelled by operator' });
+      return;
+    }
     console.error(`❌ regenerate[ad=${adId}]: failed after ${Math.round(durationMs / 1000)}s — ${err.message}`);
     await markComplete(adId, { status: 'failed', durationMs, error: err.message || String(err) });
+    await progressRun.fail(err);
   }
 }
 
@@ -147,26 +178,31 @@ async function loadBrand(adId) {
   const ad = await Ad.findById(adId).select('mediaId').lean();
   const media = ad?.mediaId ? await Media.findById(ad.mediaId).select('brandId').lean() : null;
   return media?.brandId
-    ? await Brand.findById(media.brandId).select('name styleScript styleScriptVertical styleTheme').lean()
+    ? await Brand.findById(media.brandId)
+        .select('name styleScript styleScriptVertical styleScriptLandscape styleTheme tagline logoUrl websiteUrl primaryColor secondaryColor accentColor fontFamily videoSettings titleStyleSpec titleStylePreset customFonts').lean()
     : null;
 }
 
 // Video regen — always full. Regenerates the storyboard + Grok base
 // video, then applies brand-script chrome (or no chrome, per resolver).
-async function runVideoFull(adId, prompt) {
-  // Stage 1 — storyboard. The operator's refinement prompt threads
-  // through here so the creative direction updates in step with the
-  // new video.
+async function runVideoFull(adId, prompt, progressRun = null, videoModel = null) {
+  // Stage 1 — context prep (model + aspect resolution, layoutInput
+  // warm). storyboard is null on the Atlas path — the Ken Burns prompt
+  // directs motion; the operator's refinement prompt is threaded into
+  // the video prompt itself in Stage 2. videoModel (the regenerate
+  // dropdown's per-run override) goes to BOTH stages so they resolve
+  // the same model.
+  if (progressRun) { await progressRun.checkpoint(); progressRun.stage('generating video'); }
   await setStage(adId, 'veo');
   const ad1 = await Ad.findById(adId).lean();
-  const { storyboard } = await veoService.prepareStoryboard({ ad: ad1, operatorPrompt: prompt });
+  const { storyboard } = await veoService.prepareStoryboard({ ad: ad1, operatorPrompt: prompt, modelOverride: videoModel });
 
   if (storyboard) {
     await Ad.updateOne({ _id: adId }, { $set: { veoStoryboard: storyboard, updatedAt: new Date() } });
   }
 
-  // Stage 2 — new Grok base video.
-  const veoResult = await veoService.generateForAd({ ad: ad1, operatorPrompt: prompt, storyboard });
+  // Stage 2 — new base video (model per override → settings → default).
+  const veoResult = await veoService.generateForAd({ ad: ad1, operatorPrompt: prompt, storyboard, modelOverride: videoModel });
   if (veoResult.skipped) throw new Error(`Veo skipped: ${veoResult.reason}`);
 
   // Stamp the raw render before chrome so a chrome failure still
@@ -177,6 +213,7 @@ async function runVideoFull(adId, prompt) {
       veoAspectRatio: veoResult.aspectRatio || null,
       veoPrompt:      veoResult.prompt || null,
       veoStoryboard:  veoResult.storyboard || storyboard || null,
+      veoModel:       veoResult.model || null,
       renderUrl:      veoResult.videoUrl,
       updatedAt:      new Date()
     }
@@ -186,6 +223,7 @@ async function runVideoFull(adId, prompt) {
   // script by format; returns skipped when no chrome is configured
   // (raw Grok video stays as renderUrl in that case). Failure is
   // non-fatal for the same reason.
+  if (progressRun) { await progressRun.checkpoint(); progressRun.stage('compositing'); }
   await setStage(adId, 'composite');
   const brand = await loadBrand(adId);
   if (brand) {
@@ -202,7 +240,8 @@ async function runVideoFull(adId, prompt) {
 // operatorPrompt) then screenshots the new outputHtml with Puppeteer
 // at the canvas's normalized dims, uploads to Cloudinary, and updates
 // the Ad's renderUrl.
-async function runImage(adId, prompt) {
+async function runImage(adId, prompt, progressRun = null) {
+  if (progressRun) { await progressRun.checkpoint(); progressRun.stage('generating image'); }
   await setStage(adId, 'image-gen');
   const ad = await Ad.findById(adId).lean();
   if (!ad.aiCanvasArtifactId) {
@@ -284,28 +323,23 @@ async function setStage(adId, stage) {
 }
 
 async function markComplete(adId, { status, durationMs, error }) {
-  // Tail history entry was pushed with status='pending'; update it in
-  // place via positional. The entry is always the LAST one (we just
-  // pushed it at lock time + capped to HISTORY_CAP), so $position via
-  // an array path with $slice already kept the right order.
-  const ad = await Ad.findById(adId).select('regenerationHistory').lean();
-  const hist = Array.isArray(ad?.regenerationHistory) ? ad.regenerationHistory.slice() : [];
-  if (hist.length) {
-    const tail = hist[hist.length - 1];
-    tail.status     = status;
-    tail.durationMs = durationMs;
-    if (error) tail.error = error;
-  }
+  // Atomic update of the pending history entry via arrayFilters.
+  // With the atomic lock in regenerateAd at most one pending entry
+  // exists, so matching e.status:'pending' is safe and avoids the
+  // prior read-modify-write that could stomp a concurrent push.
   await Ad.updateOne(
     { _id: adId },
     {
       $set: {
-        regenerating:        false,
-        regenerationStage:   null,
-        regenerationHistory: hist,
-        updatedAt:           new Date()
+        regenerating:                          false,
+        regenerationStage:                     null,
+        'regenerationHistory.$[e].status':     status,
+        'regenerationHistory.$[e].durationMs': durationMs,
+        'regenerationHistory.$[e].error':      error || null,
+        updatedAt:                             new Date()
       }
-    }
+    },
+    { arrayFilters: [{ 'e.status': 'pending' }] }
   );
 }
 

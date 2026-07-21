@@ -1,5 +1,32 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const axios = require('axios');
+// Atlas gateway primary (nano-banana edit lineage); the direct Gemini
+// implementation below remains as the fallback path (operator directive:
+// keep fallbacks with direct providers).
+const atlasImage = require('./atlasImageService');
+const ATLAS_GEMINI_IMAGE_MODEL = process.env.ATLAS_GEMINI_IMAGE_MODEL || 'google/nano-banana-2/edit';
+
+// Try Atlas first, fall back to the direct Gemini runImageGen path when a
+// GEMINI_API_KEY is configured. Returns a PNG/JPEG Buffer either way.
+async function viaAtlasOrDirect(prompt, sourceUrl, aspectRatio, stage) {
+  if (atlasImage.isConfigured()) {
+    try {
+      const res = await atlasImage.editImage({
+        prompt,
+        images: [sourceUrl],
+        model: ATLAS_GEMINI_IMAGE_MODEL,
+        aspectRatio: aspectRatio || undefined,
+        meta: { stage, service: 'geminiImageService' }
+      });
+      return Buffer.from(res.data[0].b64_json, 'base64');
+    } catch (err) {
+      if (!genAI) throw err;
+      console.warn(`🖼  geminiImage: Atlas edit failed (${err.message}) — falling back to direct Gemini`);
+    }
+  }
+  if (!genAI) throw new Error('neither ATLAS_API_KEY nor GEMINI_API_KEY set');
+  return null; // caller runs the direct path
+}
 
 // Override via GEMINI_IMAGE_MODEL if you want to lock to a specific model name.
 // Otherwise we probe ListModels at startup and pick the first image-capable one.
@@ -31,7 +58,7 @@ const genAI = _trimmedKey ? new GoogleGenerativeAI(_trimmedKey) : null;
 let cachedWorkingModel = null;
 let discoveredCandidates = null; // populated by probe on first use
 
-function isEnabled() { return !!genAI; }
+function isEnabled() { return atlasImage.isConfigured() || !!genAI; }
 
 // Discover every model this API key can see (ListModels via REST — the SDK
 // doesn't expose this directly). Filter to anything plausibly image-generation
@@ -86,7 +113,6 @@ async function candidateModels() {
 }
 
 async function extendImage(sourceUrl, baseCrop, targetRatio, subjectDescription, background) {
-  if (!genAI) throw new Error('GEMINI_API_KEY not set');
   const cropUrl = buildCropUrl(sourceUrl, baseCrop);
 
   const prompt =
@@ -96,11 +122,12 @@ async function extendImage(sourceUrl, baseCrop, targetRatio, subjectDescription,
     formatBackgroundForExtension(background) +
     `Do not introduce new objects. Output a single image at ${targetRatio} aspect ratio.`;
 
+  const viaAtlas = await viaAtlasOrDirect(prompt, cropUrl, targetRatio, 'gemini_image_extend');
+  if (viaAtlas) return viaAtlas;
   return Buffer.from(await runImageGen(prompt, cropUrl), 'base64');
 }
 
 async function generateFresh(sourceUrl, baseCrop, targetRatio, subjectDescription, background) {
-  if (!genAI) throw new Error('GEMINI_API_KEY not set');
   const cropUrl = buildCropUrl(sourceUrl, baseCrop);
 
   const prompt =
@@ -111,6 +138,8 @@ async function generateFresh(sourceUrl, baseCrop, targetRatio, subjectDescriptio
     `The subject is the clear focal point. ` +
     `Output a single image at ${targetRatio} aspect ratio.`;
 
+  const viaAtlas = await viaAtlasOrDirect(prompt, cropUrl, targetRatio, 'gemini_image_fresh');
+  if (viaAtlas) return viaAtlas;
   return Buffer.from(await runImageGen(prompt, cropUrl), 'base64');
 }
 
@@ -205,7 +234,8 @@ if (genAI) discoverModels();
 // catalog product extension but a composed scene we want to lift to
 // photoreal. Returns a PNG Buffer.
 async function polishImage(prompt, sourceUrl) {
-  if (!genAI) throw new Error('GEMINI_API_KEY not set');
+  const viaAtlas = await viaAtlasOrDirect(prompt, sourceUrl, null, 'gemini_image_polish');
+  if (viaAtlas) return viaAtlas;
   return Buffer.from(await runImageGen(prompt, sourceUrl), 'base64');
 }
 

@@ -867,12 +867,112 @@ async function resolveBrandRenderer(brand, ad) {
   return { path: 'canonical', script, canonicalSource: source, format };
 }
 
+// Which title compositor renders this ad. Chain (most specific wins):
+//   custom styleScript for the ad's format → 'canvas' (forced — bespoke
+//   scripts only exist in the canvas sandbox, logged)
+//   → Brand.videoSettings.titlingEngine → TITLING_ENGINE env → 'canvas'
+// Unknown values warn and fall through (same defensive idiom as
+// atlasVideoService.resolveVideoModel).
+function resolveTitlingEngine(brand, ad) {
+  const format = classifyFormat(ad);
+  const custom = brand?.[BRAND_SCRIPT_FIELD[format]];
+  if (custom && String(custom).trim()) {
+    return { engine: 'canvas', source: 'custom-script', format };
+  }
+  const links = [
+    ['Brand.videoSettings.titlingEngine', brand?.videoSettings?.titlingEngine],
+    ['TITLING_ENGINE env', process.env.TITLING_ENGINE],
+  ];
+  for (const [source, val] of links) {
+    if (!val) continue;
+    if (val === 'canvas' || val === 'remotion') return { engine: val, source, format };
+    console.warn(`⚠️  resolveTitlingEngine: unknown engine '${val}' from ${source} — falling through`);
+  }
+  return { engine: 'canvas', source: 'default', format };
+}
+
+// Shared tail of both engines: upload the rendered mp4, stamp
+// Ad.renderUrl, clean up. Retains tempDir on failure when
+// BRAND_SCRIPT_RETAIN_TMP is set for post-mortem.
+async function uploadRenderAndStamp({ ad, finalPath, tempDir, timings }) {
+  const fs = require('fs');
+  const { uploadBufferToCloudinary } = require('./cloudinaryService');
+  const Ad = require('../models/Ad');
+  try {
+    const buffer = await fs.promises.readFile(finalPath);
+    const uploaded = await uploadBufferToCloudinary(buffer, {
+      folder:       'liquidretail/brand_script',
+      resourceType: 'video',
+      overwrite:    true
+    });
+    await Ad.updateOne(
+      { _id: ad._id },
+      { $set: { renderUrl: uploaded.secure_url, updatedAt: new Date() } }
+    );
+    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    return { renderUrl: uploaded.secure_url, timings };
+  } catch (err) {
+    if (!process.env.BRAND_SCRIPT_RETAIN_TMP) {
+      await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+    throw err;
+  }
+}
+
+// Remotion path: spec + tokens resolved server-side, composition rendered
+// by services/remotionRenderService. Never "no chrome" — the canonical
+// preset always exists.
+async function renderWithRemotionAndSave({ ad, brand, format }) {
+  if (!ad?.veoVideoUrl) {
+    const e = new Error('ad has no veoVideoUrl — Grok has not rendered yet');
+    e.status = 400;
+    throw e;
+  }
+  const { resolveSpecForBrand, buildBrandTokens } = require('./titleSpecService');
+  const { renderTitles } = require('./remotionRenderService');
+
+  const meta = await buildMetaForAd(ad, brand);
+  const { spec, source } = resolveSpecForBrand(brand, format);
+  // Same LayoutInputArtifact tier buildMetaForAd uses — brands without
+  // explicit color/font fields still inherit the creative director's
+  // brand block (input.brand.primary_color / font_family / …).
+  let layoutInputBrand = null;
+  try {
+    const LayoutInputArtifact = require('../models/LayoutInputArtifact');
+    const li = ad.mediaId
+      ? await LayoutInputArtifact.findOne({ mediaId: ad.mediaId }).sort({ createdAt: -1 }).select('input.brand').lean()
+      : null;
+    layoutInputBrand = li?.input?.brand || null;
+  } catch {}
+  const tokens = await buildBrandTokens(brand, { layoutInputBrand, specFontOverrides: spec.tokenOverrides?.fonts || {} });
+  console.log(`🎨 brandScript[ad=${ad._id}]: engine=remotion format=${format} spec=${source} fonts=${['heading', 'body', 'quote'].map(r => `${r}:${tokens.fonts[r].family}(${tokens.fonts[r].source})`).join(' ')}`);
+
+  const result = await renderTitles({
+    videoUrl:  ad.veoVideoUrl,
+    meta,
+    spec,
+    tokens,
+    format,
+    brandName: brand?.name,
+    adId:      String(ad._id)
+  });
+  return uploadRenderAndStamp({ ad, finalPath: result.finalPath, tempDir: result.tempDir, timings: result.timings });
+}
+
 // End-to-end: render the brand's chosen path over the ad's Grok video,
 // upload to Cloudinary, update Ad.renderUrl. Returns the new URL +
 // timings. Caller decides how to handle errors — this helper doesn't
 // swallow them, so both fatal (pipeline) and non-fatal (script preview)
 // call sites can choose behavior.
 async function renderBrandScriptAndSave({ ad, brand }) {
+  const engineChoice = resolveTitlingEngine(brand, ad);
+  if (engineChoice.engine === 'remotion') {
+    return renderWithRemotionAndSave({ ad, brand, format: engineChoice.format });
+  }
+  if (engineChoice.source === 'custom-script') {
+    console.log(`🎨 brandScript[ad=${ad._id}]: custom ${engineChoice.format} script → canvas engine`);
+  }
+
   const renderer = await resolveBrandRenderer(brand, ad);
   if (!renderer.script) {
     // No chrome configured for this ad's format. Not an error — the ad
@@ -898,30 +998,8 @@ async function renderBrandScriptAndSave({ ad, brand }) {
     brandName:   brand.name
   });
 
-  // Upload + persist renderUrl. Cleanup on success; retain tempDir on
-  // failure when BRAND_SCRIPT_RETAIN_TMP is set for post-mortem.
-  const fs = require('fs');
-  const { uploadBufferToCloudinary } = require('./cloudinaryService');
-  const Ad = require('../models/Ad');
-  try {
-    const buffer = await fs.promises.readFile(result.finalPath);
-    const uploaded = await uploadBufferToCloudinary(buffer, {
-      folder:       'liquidretail/brand_script',
-      resourceType: 'video',
-      overwrite:    true
-    });
-    await Ad.updateOne(
-      { _id: ad._id },
-      { $set: { renderUrl: uploaded.secure_url, updatedAt: new Date() } }
-    );
-    await fs.promises.rm(result.tempDir, { recursive: true, force: true }).catch(() => {});
-    return { renderUrl: uploaded.secure_url, timings: result.timings };
-  } catch (err) {
-    if (!process.env.BRAND_SCRIPT_RETAIN_TMP) {
-      await fs.promises.rm(result.tempDir, { recursive: true, force: true }).catch(() => {});
-    }
-    throw err;
-  }
+  // Upload + persist renderUrl (shared tail with the remotion path).
+  return uploadRenderAndStamp({ ad, finalPath: result.finalPath, tempDir: result.tempDir, timings: result.timings });
 }
 
-module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript, previewBrandScriptAsVideo, resolveBrandRenderer, isVerticalFormat, isLandscapeFormat, classifyFormat };
+module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript, previewBrandScriptAsVideo, resolveBrandRenderer, resolveTitlingEngine, isVerticalFormat, isLandscapeFormat, classifyFormat };

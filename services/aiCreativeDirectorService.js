@@ -13,7 +13,6 @@
 // Generator to read concepts from here.
 
 const crypto = require('crypto');
-const OpenAI = require('openai');
 
 const Brand                 = require('../models/Brand');
 const CatalogProduct        = require('../models/CatalogProduct');
@@ -24,7 +23,7 @@ const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact')
 const { ROLES, COMPONENT_STYLE_BY_ROLE } = require('./aiVocabulary');
 const { trackLlmCall, recordCacheHit } = require('./costTracker');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 // ── Tunables ─────────────────────────────────────────────────────────
 
@@ -141,7 +140,7 @@ async function directConcepts({
   const responseSchema = buildResponseSchema();
 
   const t0 = Date.now();
-  const completion = await trackLlmCall(
+  const completion = await chatCompletion(
     {
       stage:      'creative_director',
       provider:   'openai',
@@ -151,7 +150,7 @@ async function directConcepts({
       visionImages: 0,
       cacheKey
     },
-    () => openai.chat.completions.create({
+    {
       model: MODEL_ID,
       response_format: { type: 'json_schema', json_schema: responseSchema },
       messages: [
@@ -160,7 +159,7 @@ async function directConcepts({
       ],
       temperature: TEMPERATURE,
       max_tokens:  MAX_TOKENS
-    })
+    }
   );
   const elapsedMs = Date.now() - t0;
 
@@ -927,7 +926,7 @@ async function directConceptsRound({
     : user;
 
   const t0 = Date.now();
-  const completion = await trackLlmCall(
+  const completion = await chatCompletion(
     {
       stage:      'creative_director_round',
       provider:   'openai',
@@ -937,7 +936,7 @@ async function directConceptsRound({
       visionImages: visionImages.length,
       cacheKey:   `directorRound:${brandId}:${productId}:${platformFormat}:${roundIndex}`
     },
-    () => openai.chat.completions.create({
+    {
       model: DIRECTOR_ROUND_MODEL,
       response_format: { type: 'json_schema', json_schema: responseSchema },
       messages: [
@@ -946,7 +945,7 @@ async function directConceptsRound({
       ],
       temperature: DIRECTOR_ROUND_TEMP,
       max_tokens:  DIRECTOR_ROUND_TOKENS
-    })
+    }
   );
   const elapsedMs = Date.now() - t0;
 

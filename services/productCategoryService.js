@@ -10,11 +10,10 @@
 // integration lands; the API surface is designed so the eventual feed-
 // based lookup can be a drop-in replacement.
 
-const OpenAI = require('openai');
 const JSON5  = require('json5');
 const { getCoarseBreadcrumb } = require('./categoryClassifier');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 function isEnabled() { return !!process.env.OPENAI_API_KEY; }
 
@@ -61,7 +60,7 @@ async function enrichProductCategory({ brandName, brandUrl, productLabel, produc
 
   let res;
   try {
-    res = await openai.chat.completions.create({
+    res = await chatCompletion({ stage: 'product_category', service: 'productCategoryService' }, {
       model: 'gpt-4.1',
       response_format: { type: 'json_object' },
       messages: [{ role: 'user', content: prompt }],

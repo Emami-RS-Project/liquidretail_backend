@@ -44,6 +44,16 @@ function normalizeIgHandle(raw) {
   return cleaned || null;
 }
 
+// Catalog ingest method for demo brands. 'shopify-direct' (default when
+// a shopifyUrl is present) hits the public products.json path; 'apify'
+// keeps the legacy Apify shopify-scraper. Invalid values → null so
+// callers can ignore them without clobbering the stored method.
+function normalizeMethod(raw) {
+  if (!raw) return null;
+  const m = String(raw).trim().toLowerCase();
+  return (m === 'shopify-direct' || m === 'apify') ? m : null;
+}
+
 // Normalize a Shopify store URL to a canonical form. Accepts bare
 // hostnames ("brand.myshopify.com") or full URLs. Returns null when
 // the input isn't URL-shaped enough to be useful.
@@ -63,7 +73,10 @@ function normalizeShopifyUrl(raw) {
 // Create a demo Brand under the Sales Demos advertiser. Idempotent on
 // (advertiserId, nameNormalized) via Brand's existing compound index —
 // re-creating with the same name updates the apifyDemo config.
-async function createDemoBrand({ name, igHandle, shopifyUrl }) {
+// Optional `method` ('shopify-direct' | 'apify') selects the catalog
+// source; invalid values are ignored. On INSERT, defaults to
+// shopify-direct when a shopifyUrl is present, else apify.
+async function createDemoBrand({ name, igHandle, shopifyUrl, method }) {
   if (!name || !String(name).trim()) {
     const e = new Error('Demo brand name is required');
     e.status = 400;
@@ -73,6 +86,9 @@ async function createDemoBrand({ name, igHandle, shopifyUrl }) {
   const trimmedName = String(name).trim();
   const nameNormalized = normalizeBrandName(trimmedName);
 
+  const normalizedUrl    = normalizeShopifyUrl(shopifyUrl);
+  const normalizedMethod = normalizeMethod(method);
+
   const update = {
     $setOnInsert: {
       advertiserId:   adv._id,
@@ -81,11 +97,23 @@ async function createDemoBrand({ name, igHandle, shopifyUrl }) {
       isDemo:         true,
       source:         'stub'
     },
-    $set: {
-      'apifyDemo.igHandle':   normalizeIgHandle(igHandle),
-      'apifyDemo.shopifyUrl': normalizeShopifyUrl(shopifyUrl)
-    }
+    // Only write the fields the caller actually provided — an
+    // idempotent re-create with just {name, method} must not null out
+    // a stored igHandle/shopifyUrl (adversarial-review find).
+    $set: {}
   };
+  if (igHandle   !== undefined) update.$set['apifyDemo.igHandle']   = normalizeIgHandle(igHandle);
+  if (shopifyUrl !== undefined) update.$set['apifyDemo.shopifyUrl'] = normalizedUrl;
+  // method: explicit valid value → $set (applies to insert AND update).
+  // Otherwise default it on INSERT ONLY. The same path must never sit
+  // in both $set and $setOnInsert — MongoDB rejects that update
+  // outright as a path conflict (adversarial-review critical).
+  if (normalizedMethod) {
+    update.$set['apifyDemo.method'] = normalizedMethod;
+  } else {
+    update.$setOnInsert['apifyDemo.method'] = normalizedUrl ? 'shopify-direct' : 'apify';
+  }
+  if (!Object.keys(update.$set).length) delete update.$set;
   const brand = await Brand.findOneAndUpdate(
     { advertiserId: adv._id, nameNormalized },
     update,
@@ -111,6 +139,7 @@ module.exports = {
   ensureSalesDemosAdvertiser,
   normalizeIgHandle,
   normalizeShopifyUrl,
+  normalizeMethod,
   createDemoBrand,
   isAllowedBootstrapper
 };

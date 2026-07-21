@@ -1,50 +1,58 @@
 // Video provider router — chooses between Vertex AI Veo (direct) and
-// Atlas Cloud (Grok / Veo-via-Atlas / others) based on VIDEO_PROVIDER.
+// Atlas Cloud (Gemini Omni by default; Grok/Veo via overrides) based
+// on VIDEO_PROVIDER.
 //
 // Callers import this instead of importing aiVideoReferenceService
 // directly. The returned shape is uniform across providers:
 //
 //   { videoUrl, cloudinaryPublicId, operationName, aspectRatio, track,
-//     prompt, storyboard, elapsedMs, model }
+//     prompt, storyboard, elapsedMs, model, costUsd? }
 //
 // Every provider emits a motion-only video. Text overlays are
 // composited downstream by the canonical brand-script overlay
 // (brandScriptExecutor) reading ad.copy + LayoutInputArtifact +
-// Brand.styleTheme. The storyboard directs Grok motion only —
-// camera/audio/beats/vibe.
+// Brand.styleTheme.
 //
-// Provider selection (env-driven for now; per-brand override is a
-// future extension via Brand.videoProvider):
-//   VIDEO_PROVIDER=vertex  → aiVideoReferenceService (default)
-//   VIDEO_PROVIDER=atlas   → atlasVideoService
+// Provider selection is env-driven; WITHIN the atlas provider, the
+// model is additionally resolvable per brand / per product / per canvas
+// (atlasVideoService.resolveVideoModel via Brand.videoSettings /
+// CatalogProduct.videoSettings). A per-brand PROVIDER override
+// (videoSettings.provider, vertex-vs-atlas) is the natural future
+// extension of that same settings block.
+//   VIDEO_PROVIDER=atlas   → atlasVideoService (default — Atlas migration)
+//   VIDEO_PROVIDER=vertex  → aiVideoReferenceService (deprecated direct-Veo path, kept as fallback)
 
 const aiVideoReferenceService = require('./aiVideoReferenceService');
 const atlasVideoService       = require('./atlasVideoService');
 
 function activeProvider() {
-  return String(process.env.VIDEO_PROVIDER || 'vertex').toLowerCase();
+  return String(process.env.VIDEO_PROVIDER || 'atlas').toLowerCase();
 }
 
-// Pre-generate the storyboard so the orchestrator can pass it to both
-// the video model and the chrome service for parallel execution.
-// Only the Atlas provider currently exposes this hook; on Vertex the
-// caller should pass null and accept sequential execution.
-async function prepareStoryboard({ ad, operatorPrompt = null }) {
+// Pre-flight context hook. On Atlas this resolves the per-ad model +
+// aspect and warms the layoutInput cache; the returned storyboard is
+// always null there (the GPT storyboard stage is retired — the Ken
+// Burns prompt fully directs motion). Only the Atlas provider exposes
+// this hook; on Vertex the caller should pass null and accept
+// sequential execution.
+async function prepareStoryboard({ ad, operatorPrompt = null, modelOverride = null }) {
   if (activeProvider() !== 'atlas') return { storyboard: null };
-  return atlasVideoService.prepareStoryboard({ ad, operatorPrompt });
+  return atlasVideoService.prepareStoryboard({ ad, operatorPrompt, modelOverride });
 }
 
 // storyboard (optional) — when supplied by the orchestrator (parallel
 // execution path), it's passed through so the provider uses it instead
 // of generating a new one. Lets chrome and the video model share the
 // same script.
-async function generateForAd({ ad, operatorPrompt = null, storyboard = null }) {
+// modelOverride (optional) — per-run model slug from the operator's
+// regenerate dropdown; Atlas provider only (Vertex has a single model).
+async function generateForAd({ ad, operatorPrompt = null, storyboard = null, modelOverride = null }) {
   const provider = activeProvider();
   const t0 = Date.now();
 
   let result;
   if (provider === 'atlas') {
-    result = await atlasVideoService.generateForAd({ ad, operatorPrompt, storyboard });
+    result = await atlasVideoService.generateForAd({ ad, operatorPrompt, storyboard, modelOverride });
   } else {
     // Default: Vertex Veo direct. Backward compatible — no behavioral
     // change for deployments that haven't set VIDEO_PROVIDER.

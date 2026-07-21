@@ -16,8 +16,7 @@
 const crypto       = require('crypto');
 const axios        = require('axios');
 const sharp        = require('sharp');
-const OpenAI       = require('openai');
-const { toFile }   = require('openai');
+const atlasImage = require('./atlasImageService');
 
 const Brand                     = require('../models/Brand');
 const CatalogProduct            = require('../models/CatalogProduct');
@@ -27,9 +26,8 @@ const AiCanvasArtifact          = require('../models/AiCanvasArtifact');
 const AiFullRenderArtifact      = require('../models/AiFullRenderArtifact');
 const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact');
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
-const { trackLlmCall, recordCacheHit } = require('./costTracker');
+const { recordCacheHit } = require('./costTracker');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // Env-driven so model swaps don't require a code deploy. Default
 // stays gpt-image-1; flip AI_IMAGE_REF_MODEL_ID on Render to evaluate
@@ -81,8 +79,8 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   if (!enabled() && !refresh) {
     return { skipped: true, reason: 'AI_IMAGE_REFERENCE_ENABLED=false' };
   }
-  if (!process.env.OPENAI_API_KEY) {
-    return { skipped: true, reason: 'OPENAI_API_KEY not set' };
+  if (!atlasImage.isConfigured() && !process.env.OPENAI_API_KEY) {
+    return { skipped: true, reason: 'neither ATLAS_API_KEY nor OPENAI_API_KEY set' };
   }
 
   const canvas = await AiCanvasArtifact.findById(aiCanvasArtifactId).lean();
@@ -172,7 +170,7 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
     try {
       const png = await renderHtmlToPng(outputHtml, { width, height });
       seedPng    = png;
-      seedFile   = await toFile(png, 'seed.png', { type: 'image/png' });
+      seedFile   = png; // raw PNG buffer — atlasImageService uploads it
       seedSource = 'html_render';
     } catch (err) {
       console.warn(`   ⚠️  image-ref: HTML render seed failed (${err.message}) — falling back to product hero`);
@@ -185,7 +183,7 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
         const raw = await fetchImageBuffer(fallbackUrl);
         const png = await sharp(raw).png().toBuffer();
         seedPng    = png;
-        seedFile   = await toFile(png, 'seed.png', { type: 'image/png' });
+        seedFile   = png;
         seedSource = product?.imageUrl ? 'catalog-hero' : 'ugc-source';
       } catch (err) {
         console.warn(`   ⚠️  image-ref: seed prep failed (${err.message}) — falling back to text-only generate`);
@@ -207,7 +205,7 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
     try {
       const raw = await fetchImageBuffer(product.imageUrl);
       const png = await sharp(raw).png().toBuffer();
-      refFiles.push(await toFile(png, 'product.png', { type: 'image/png' }));
+      refFiles.push(png);
       productRefAttached = true;
     } catch (err) {
       console.warn(`   ⚠️  image-ref: product reference fetch failed (${err.message}) — proceeding without it`);
@@ -229,69 +227,34 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   });
   const promptHash = sha256(prompt);
 
-  const callOpenAi = () => refFiles.length
-    ? openai.images.edit({
-        model:   MODEL_ID,
-        image:   refFiles.length === 1 ? refFiles[0] : refFiles,
-        prompt,
-        size,
-        quality: QUALITY,
-        n:       1
-      })
-    : openai.images.generate({
-        model:   MODEL_ID,
-        prompt,
-        size,
-        quality: QUALITY,
-        n:       1
-      });
+  // Atlas gateway (direct gpt-image-1 fallback inside atlasImageService,
+  // which also owns the cost ledger for image calls).
+  const refMeta = {
+    stage:      'image_reference',
+    service:    'aiImageReferenceService',
+    purposeTag: canvas.template || 'untagged',
+    brandId:    canvas.brandId,
+    productId:  canvas.productId,
+    mediaId:    canvas.mediaId,
+    cacheKey:   JSON.stringify(filter)
+  };
+  const callAtlas = () => refFiles.length
+    ? atlasImage.editImage({ prompt, images: refFiles, size, quality: QUALITY, fallbackModel: MODEL_ID, meta: refMeta })
+    : atlasImage.generateImage({ prompt, size, quality: QUALITY, fallbackModel: MODEL_ID, meta: refMeta });
 
   const t0 = Date.now();
   let res;
   try {
-    res = await trackLlmCall(
-      {
-        stage:      'image_reference',
-        provider:   'openai',
-        model:      MODEL_ID,
-        purposeTag: canvas.template || 'untagged',
-        brandId:    canvas.brandId,
-        productId:  canvas.productId,
-        mediaId:    canvas.mediaId,
-        cacheKey:   JSON.stringify(filter),
-        visionImages: seedFile ? 1 : 0
-      },
-      callOpenAi
-    );
+    res = await callAtlas();
   } catch (err) {
-    // images.edit can reject for a variety of input-format reasons
-    // (resolution caps, content moderation tripped by seed, MIME
-    // sniffing mismatch). When that happens, retry as text-only
-    // images.generate so we still get a reference render rather than
-    // an empty panel.
+    // Edits can reject for a variety of input-format reasons (resolution
+    // caps, content moderation tripped by seed, MIME sniffing mismatch).
+    // When that happens, retry as text-only generation so we still get a
+    // reference render rather than an empty panel.
     if (seedFile) {
-      console.warn(`   ⚠️  image-ref: images.edit failed (${err.message}) — retrying as text-only generate`);
+      console.warn(`   ⚠️  image-ref: edit failed (${err.message}) — retrying as text-only generate`);
       seedSource = null;
-      res = await trackLlmCall(
-        {
-          stage:      'image_reference',
-          provider:   'openai',
-          model:      MODEL_ID,
-          purposeTag: canvas.template || 'untagged',
-          brandId:    canvas.brandId,
-          productId:  canvas.productId,
-          mediaId:    canvas.mediaId,
-          cacheKey:   JSON.stringify(filter),
-          visionImages: 0
-        },
-        () => openai.images.generate({
-          model:   MODEL_ID,
-          prompt,
-          size,
-          quality: QUALITY,
-          n:       1
-        })
-      );
+      res = await atlasImage.generateImage({ prompt, size, quality: QUALITY, fallbackModel: MODEL_ID, meta: refMeta });
     } else {
       throw err;
     }
@@ -299,7 +262,7 @@ async function generateForArtifact({ aiCanvasArtifactId, refresh = false }) {
   const elapsedMs = Date.now() - t0;
 
   const b64 = res?.data?.[0]?.b64_json;
-  if (!b64) throw new Error('gpt-image-1 returned no image data');
+  if (!b64) throw new Error('image generation returned no image data');
   const buf = Buffer.from(b64, 'base64');
 
   const uploaded = await uploadBufferToCloudinary(buf, {
@@ -430,7 +393,7 @@ async function loadProofData({ product, media }) {
   return out;
 }
 
-// Download an image URL to a PNG buffer for openai.images.edit. gpt-image-1
+// Download an image URL to a PNG buffer for the edit reference stack. gpt-image
 // accepts JPEG too but PNG round-trips cleanly through Cloudinary fetch
 // transforms, so we don't risk format-related failures.
 async function fetchImageBuffer(url) {

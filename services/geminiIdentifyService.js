@@ -14,15 +14,16 @@
 // detection — reconciler treats this as "no Gemini signal" and falls back
 // to GPT-only identifications with a single-engine confidence penalty.
 
-const axios = require('axios');
 const JSON5 = require('json5');
+// Atlas gateway (Gemini served OpenAI-compatible; Google's own
+// OpenAI-compat endpoint as the direct fallback inside the transport).
+const { chatCompletion, isConfigured } = require('./atlasLlmService');
 
-const MODEL    = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
-const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+const MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
 
 const MAX_DETECTIONS_PER_CALL = 16;   // smaller than GPT (24) — Gemini Vision is more sensitive to large multi-image batches
 
-function isEnabled() { return !!process.env.GEMINI_API_KEY; }
+function isEnabled() { return isConfigured() || !!process.env.GEMINI_API_KEY; }
 
 async function identifyYoloDetectionsGemini(detections, hints = {}) {
   if (!Array.isArray(detections) || detections.length === 0) return [];
@@ -61,7 +62,7 @@ async function identifyChunkGemini(chunk, hints) {
     const promptIndex = imageParts.length + 1;
     promptIndexToChunk[promptIndex] = i;
     imageParts.push({
-      inlineData: { mimeType: 'image/jpeg', data: det.cropBuffer.toString('base64') }
+      type: 'image_url', image_url: { url: `data:image/jpeg;base64,${det.cropBuffer.toString('base64')}` }
     });
     indexLines.push(`#${promptIndex} — YOLO class "${det.className || 'unknown'}" (conf=${(det.confidence ?? 0).toFixed(2)})`);
   });
@@ -101,45 +102,32 @@ async function identifyChunkGemini(chunk, hints) {
 
   let parsed;
   try {
-    const res = await axios.post(
-      `${ENDPOINT}?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`,
+    // Multi-product per-crop verbose JSON adds up fast: ~150 chars per
+    // product entry; a batch of 16 crops × 2-3 products each can hit
+    // ~6-8k chars. The OpenAI-compat path can't set thinkingBudget:0 the
+    // way raw generateContent could — Gemini's hidden reasoning spends
+    // from max_tokens instead, so the transport's reasoning reserve plus
+    // this base budget keeps the visible JSON from truncating mid-array.
+    const res = await chatCompletion(
+      { stage: 'gemini_identify', service: 'geminiIdentifyService', visionImages: imageParts.length },
       {
-        contents: [{
-          role: 'user',
-          parts: [{ text: prompt }, ...imageParts]
-        }],
-        generationConfig: {
-          temperature: 0.2,
-          // Multi-product per-crop verbose JSON adds up fast: ~150 chars per
-          // product entry; a batch of 16 crops × 2-3 products each can hit
-          // ~6-8k chars. 2000 was getting truncated mid-array. 6000 leaves
-          // comfortable headroom while still bounding cost.
-          maxOutputTokens: 6000,
-          responseMimeType: 'application/json',
-          // gemini-2.5-flash defaults to a non-zero thinking budget that
-          // counts against maxOutputTokens but produces no visible output.
-          // For a structured-extraction task (image → JSON of detected
-          // products), chain-of-thought adds nothing — the schema is fixed
-          // and the model just transcribes what it sees. Without disabling
-          // thinking, large multi-crop batches hit MAX_TOKENS with the
-          // visible JSON truncated mid-array (out=2613 chars=9581 in
-          // observed logs).
-          thinkingConfig: { thinkingBudget: 0 }
-        }
-      },
-      { timeout: 45000 }
+        model: MODEL,
+        messages: [{ role: 'user', content: [{ type: 'text', text: prompt }, ...imageParts] }],
+        temperature: 0.2,
+        max_tokens: 6000,
+        response_format: { type: 'json_object' }
+      }
     );
-    const candidate = res.data?.candidates?.[0];
-    const finishReason = candidate?.finishReason || 'unknown';
-    const text = (candidate?.content?.parts || [])
-      .map(p => p.text || '').join('').trim();
+    const choice = res.choices?.[0];
+    const finishReason = choice?.finish_reason || 'unknown';
+    const text = String(choice?.message?.content || '').trim();
 
-    // Surface truncation visibly — silent MAX_TOKENS leads to JSON parse
+    // Surface truncation visibly — silent length-stops lead to JSON parse
     // failures that look like model confusion but are actually a token
     // ceiling problem.
-    if (finishReason === 'MAX_TOKENS') {
-      const usage = res.data?.usageMetadata || {};
-      console.warn(`   ⚠️  gemini-identify hit MAX_TOKENS (out=${usage.candidatesTokenCount || 0} chars=${text.length}) — response likely truncated`);
+    if (finishReason === 'length') {
+      const usage = res.usage || {};
+      console.warn(`   ⚠️  gemini-identify hit max_tokens (out=${usage.completion_tokens || 0} chars=${text.length}) — response likely truncated`);
     }
 
     try { parsed = JSON.parse(text); }

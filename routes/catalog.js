@@ -122,6 +122,9 @@ function projectListRow(p, matchCount) {
     isPrimaryVariant: p.isPrimaryVariant !== false,
     variantCount:     typeof p.variantCount === 'number' ? p.variantCount : 0,
     detectedFromMediaId: p.detectedFromMediaId ? String(p.detectedFromMediaId) : null,
+    // Per-product video-generation overrides — surfaced so a PATCH is
+    // confirmable and clients can read-modify-write the whole object.
+    videoSettings: p.videoSettings || null,
     firstSeenAt:  p.firstSeenAt,
     lastSyncedAt: p.lastSyncedAt
   };
@@ -167,6 +170,9 @@ function projectDetail(p, category) {
     detailsRefreshedAt:  p.detailsRefreshedAt || null,
 
     detectedFromMediaId: p.detectedFromMediaId ? String(p.detectedFromMediaId) : null,
+    // Per-product video-generation overrides (model / modelByCanvas /
+    // referenceImageCount) — see models/CatalogProduct.js.
+    videoSettings: p.videoSettings || null,
     firstSeenAt:  p.firstSeenAt,
     lastSyncedAt: p.lastSyncedAt
   };
@@ -800,7 +806,8 @@ router.get('/:id', async (req, res) => {
 // from the upstream sync. Validators reject any unknown keys.
 const EDITABLE_FIELDS = new Set([
   'title', 'brand', 'category', 'price', 'currency',
-  'productUrl', 'imageUrl', 'description', 'draft'
+  'productUrl', 'imageUrl', 'description', 'draft',
+  'videoSettings'
 ]);
 router.patch('/:id', express.json(), async (req, res) => {
   try {
@@ -818,6 +825,17 @@ router.patch('/:id', express.json(), async (req, res) => {
         continue;
       }
       if (k === 'draft') { updates.draft = !!v; continue; }
+      // Per-product video model / reference-count overrides. Validate
+      // slugs against the model registry at write time; null clears.
+      if (k === 'videoSettings') {
+        if (v != null) {
+          const { validateVideoSettings } = require('../services/atlasVideoService');
+          const err = validateVideoSettings(v);
+          if (err) return res.status(400).json({ error: err });
+        }
+        updates.videoSettings = v ?? null;
+        continue;
+      }
       updates[k] = v ?? null;
     }
     if (!Object.keys(updates).length) {
@@ -826,6 +844,8 @@ router.patch('/:id', express.json(), async (req, res) => {
 
     const wasDraft = product.draft === true;
     Object.assign(product, updates);
+    // Mixed field — guarantee persistence (especially clearing to null).
+    if (Object.prototype.hasOwnProperty.call(updates, 'videoSettings')) product.markModified('videoSettings');
     // Belt & braces: detect-identified rows should always be primary
     // variants (they're not Shopify variant siblings). Older drafts
     // created before the draft service was fixed to stamp this on

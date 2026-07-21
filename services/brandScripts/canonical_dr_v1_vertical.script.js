@@ -1,38 +1,32 @@
 // Canonical DR v1 — vertical (9:16) overlay for Reels / Shorts / Stories.
 //
-// Three timed phases over the 8-second Grok lifestyle plate:
+// Two timed phases over the 8-second base video plate:
 //
 //   0:00–0:03  HOOK      hook headline over scrim, fade in @ 0-0.4s,
 //                        fade out @ 2.6-3s
 //   0:03–0:06  PROOF     punchy quote snippet + attribution, fade in
 //                        @ 3-3.4s, fade out @ 5.6-6s
-//   0:06–0:08  END CARD  product-only image dominates the frame with
-//                        product name + ★★★★★ proof bar + optional
-//                        promo callout; fade in @ 6-6.3s, holds to 8s
+//   0:06–0:08  (open)    no overlay — the base video's closing beat
+//                        (the Ken Burns zoom-out product reveal) runs
+//                        clean. The full-frame END CARD phase that
+//                        used to occupy this window was removed
+//                        deliberately; when an endcard is desired,
+//                        prompt it in a custom titling script —
+//                        brandScriptExecutor still supplies
+//                        meta.productOnlyImagePath / meta.brandLogoPath
+//                        for scripts that want to draw one.
 //
 // meta fields consumed:
 //   headline               (hook copy)
 //   quoteSnippet | quote   (proof copy — snippet preferred, ≤50 chars)
 //   reviewer               (attribution below the quote)
-//   productName            (endcard title)
-//   productOnlyImagePath   (local file path — parent downloads it)
-//   rating, reviewCount    (proof bar)
-//   promoText              (optional callout on the endcard)
-//   brandName              (small brand mark on the endcard)
 //   theme                  (brand colors + font families)
 //
-// Assumes 24 fps plates from the Grok pipeline (frames 0-191 = 8s).
+// Assumes 24 fps plates from the video pipeline (frames 0-191 = 8s).
 // Timing calculations use `frameIndex / 24` for time-in-seconds so
 // higher/lower fps sources still hit the intended second marks.
 
 const FPS = 24;
-
-// Endcard imagery is loaded lazily and cached across frames. Product
-// endcard uses productImage; brand endcard uses brandLogo. Only the
-// one relevant to the ad's endcardMode is actually needed, but caching
-// both promises keeps the code parallel.
-let productImagePromise = null;
-let brandLogoPromise    = null;
 
 module.exports = {
   renderFrame: async (frameIndex, ctx, plate, meta, h) => {
@@ -54,13 +48,7 @@ module.exports = {
       hookText:      theme.textPrimary || [255, 255, 255],
       quoteScrim:    theme.scrimColor || [0, 0, 0],
       quoteText:     theme.textPrimary || [255, 255, 255],
-      reviewerText:  theme.textSecondary || theme.accentColor || [220, 220, 220],
-      endcardBg:     theme.endcardBgColor || theme.scrimColor || [8, 8, 10],
-      endcardText:   theme.textPrimary || [255, 255, 255],
-      endcardBody:   theme.textSecondary || [200, 200, 210],
-      stars:         theme.starColor || theme.accentColor || theme.accentGold || [245, 183, 10],
-      promoBg:       theme.promoBgColor || theme.badgeBgColor || theme.accentColor || [245, 183, 10],
-      promoText:     theme.promoTextColor || theme.badgeTextColor || [22, 22, 26]
+      reviewerText:  theme.textSecondary || theme.accentColor || [220, 220, 220]
     };
     const fonts = {
       headline: theme.headingFontFamily || theme.productFontFamily || 'PlayfairDisplay',
@@ -72,14 +60,6 @@ module.exports = {
     const headline     = String(meta.headline || meta.hookHeadline || '').trim();
     const quote        = String(meta.quoteSnippet || meta.quote || '').trim();
     const reviewer     = String(meta.reviewer || 'Verified customer').trim().toUpperCase();
-    const productName  = String(meta.productName || meta.product || '').trim();
-    const rating       = Number(meta.rating);
-    const reviewCount  = Number(meta.reviewCount);
-    const promoText    = String(meta.promoText || '').trim();
-    const brandName    = String(meta.brandName || '').trim();
-    const brandTagline = String(meta.brandTagline || '').trim();
-    const brandWebsite = normalizeWebsite(meta.brandWebsiteUrl);
-    const endcardMode  = meta.endcardMode === 'brand' ? 'brand' : 'product';
 
     // ── Phase gating ───────────────────────────────────────────────
     if (t < 3) {
@@ -88,40 +68,10 @@ module.exports = {
     } else if (t < 6) {
       const alpha = fadeInOut(t, 3.0, 3.4, 5.6, 6.0, smooth);
       if (alpha > 0.01 && quote) drawProof(ctx, W, H, quote, reviewer, alpha, colors, fonts, rgba);
-    } else {
-      const alpha = fadeInOut(t, 6.0, 6.3, 8.0, 8.0, smooth);
-      if (alpha > 0.01) {
-        if (endcardMode === 'brand') {
-          if (meta.brandLogoPath && !brandLogoPromise) {
-            brandLogoPromise = canvas.loadImage(meta.brandLogoPath).catch(() => null);
-          }
-          const brandLogo = brandLogoPromise ? await brandLogoPromise : null;
-          drawBrandEndCard(ctx, W, H, {
-            brandLogo, brandName, brandTagline, brandWebsite, quote, reviewer
-          }, alpha, colors, fonts, rgba);
-        } else {
-          if (meta.productOnlyImagePath && !productImagePromise) {
-            productImagePromise = canvas.loadImage(meta.productOnlyImagePath).catch(() => null);
-          }
-          const productImage = productImagePromise ? await productImagePromise : null;
-          drawEndCard(ctx, W, H, {
-            productImage, productName, rating, reviewCount, promoText, brandName
-          }, alpha, colors, fonts, rgba);
-        }
-      }
     }
+    // 0:06–0:08 intentionally renders no overlay — see header note.
   }
 };
-
-// Strip protocol + trailing slash for compact display: "reach-social.io"
-// reads cleaner than "https://reach-social.io/" on a small footer line.
-function normalizeWebsite(url) {
-  if (!url) return '';
-  return String(url).trim()
-    .replace(/^https?:\/\//i, '')
-    .replace(/^www\./i, '')
-    .replace(/\/+$/, '');
-}
 
 // ── Timing ─────────────────────────────────────────────────────────
 
@@ -316,264 +266,6 @@ function computeUpperThirdYStart(H, blockH) {
   return yCenter - blockH / 2;
 }
 
-// END CARD: product-only image dominates the frame; below it the
-// product name, star + reviews proof bar, and an optional promo pill.
-// Falls back to a text-only endcard when the product image failed to
-// load (data hole surfaced upstream).
-function drawEndCard(ctx, W, H, data, alpha, colors, fonts, rgba) {
-  const { productImage, productName, rating, reviewCount, promoText, brandName } = data;
-
-  ctx.save();
-  ctx.globalAlpha = alpha;
-
-  // Full-frame endcard background — solid brand tone over the plate.
-  ctx.fillStyle = rgba(colors.endcardBg, 0.94);
-  ctx.fillRect(0, 0, W, H);
-
-  const padX = Math.round(W * 0.08);
-
-  // Product image slot (60% of canvas height, aspect-fit, centered).
-  const imageMaxW = W - padX * 2;
-  const imageMaxH = Math.round(H * 0.52);
-  const imageCenterY = Math.round(H * 0.35);
-
-  if (productImage && productImage.width && productImage.height) {
-    const scale = Math.min(imageMaxW / productImage.width, imageMaxH / productImage.height);
-    const drawW = Math.round(productImage.width * scale);
-    const drawH = Math.round(productImage.height * scale);
-    const drawX = Math.round((W - drawW) / 2);
-    const drawY = Math.round(imageCenterY - drawH / 2);
-    ctx.drawImage(productImage, drawX, drawY, drawW, drawH);
-  }
-
-  // Divider — thin line under the product image.
-  const dividerY = imageCenterY + Math.round(imageMaxH / 2) + Math.round(H * 0.02);
-  ctx.strokeStyle = rgba(colors.endcardBody, 0.35);
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(padX, dividerY);
-  ctx.lineTo(W - padX, dividerY);
-  ctx.stroke();
-
-  // Product name — bold, centered, below the divider.
-  const nameY = dividerY + Math.round(H * 0.028);
-  const nameSize = clampNum(Math.round(H * 0.038), 44, 72);
-  ctx.font = `700 ${nameSize}px "${fonts.headline}"`;
-  ctx.fillStyle = rgba(colors.endcardText, 1);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  const nameLines = wrapLines(ctx, productName || '', W - padX * 2, 2);
-  const nameLineH = Math.round(nameSize * 1.12);
-  for (let i = 0; i < nameLines.length; i++) {
-    ctx.fillText(nameLines[i], W / 2, nameY + i * nameLineH);
-  }
-  const nameBlockH = nameLines.length * nameLineH;
-
-  // Proof bar — stars + rating + review count, on one row.
-  let cursorY = nameY + nameBlockH + Math.round(H * 0.018);
-  if (isFinite(rating) && rating > 0) {
-    drawProofBar(ctx, W, cursorY, {
-      rating, reviewCount, starColor: colors.stars,
-      textColor: colors.endcardBody, fontFamily: fonts.body
-    }, H, rgba);
-    cursorY += Math.round(H * 0.038);
-  }
-
-  // Promo callout — pill, only if present.
-  if (promoText) {
-    cursorY += Math.round(H * 0.018);
-    drawPromoPill(ctx, W, cursorY, promoText, {
-      bg: colors.promoBg, text: colors.promoText, fontFamily: fonts.body
-    }, H, rgba);
-    cursorY += Math.round(H * 0.048);
-  }
-
-  // Brand mark — small, at the very bottom, if provided.
-  if (brandName) {
-    const brandSize = clampNum(Math.round(H * 0.014), 16, 24);
-    ctx.font = `600 ${brandSize}px "${fonts.body}"`;
-    ctx.fillStyle = rgba(colors.endcardBody, 0.85);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(brandName.toUpperCase(), W / 2, H - Math.round(H * 0.04));
-  }
-
-  ctx.restore();
-}
-
-// BRAND END CARD (0:06-0:08 brand-mode variant): brand logo dominates
-// the upper half; tagline sits below on a divider-separated row; small
-// brand-mark + website footer anchors the bottom. Composition mirrors
-// the product endcard's rhythm but reads as identity rather than a
-// transactional product moment.
-function drawBrandEndCard(ctx, W, H, data, alpha, colors, fonts, rgba) {
-  const { brandLogo, brandName, brandTagline, brandWebsite } = data;
-
-  ctx.save();
-  ctx.globalAlpha = alpha;
-
-  // Full-frame background wash — same treatment as product endcard.
-  ctx.fillStyle = rgba(colors.endcardBg, 0.94);
-  ctx.fillRect(0, 0, W, H);
-
-  const padX = Math.round(W * 0.08);
-
-  // Brand logo slot — smaller than product endcard's product image
-  // (logos are simpler shapes and don't need to dominate 60% of the
-  // frame the way a product does). ~35% frame height, centered above
-  // the tagline.
-  const logoMaxW = W - padX * 2;
-  const logoMaxH = Math.round(H * 0.32);
-  const logoCenterY = Math.round(H * 0.34);
-
-  if (brandLogo && brandLogo.width && brandLogo.height) {
-    const scale = Math.min(logoMaxW / brandLogo.width, logoMaxH / brandLogo.height);
-    const drawW = Math.round(brandLogo.width * scale);
-    const drawH = Math.round(brandLogo.height * scale);
-    const drawX = Math.round((W - drawW) / 2);
-    const drawY = Math.round(logoCenterY - drawH / 2);
-    ctx.drawImage(brandLogo, drawX, drawY, drawW, drawH);
-  } else if (brandName) {
-    // No logo image — fall back to the brand name at hero scale as
-    // the identity anchor. Same slot, same y-anchor.
-    const wordmarkSize = clampNum(Math.round(H * 0.052), 60, 96);
-    ctx.font = `700 ${wordmarkSize}px "${fonts.headline}"`;
-    ctx.fillStyle = rgba(colors.endcardText, 1);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(brandName.toUpperCase(), W / 2, logoCenterY);
-  }
-
-  // Divider under the logo slot.
-  const dividerY = logoCenterY + Math.round(logoMaxH / 2) + Math.round(H * 0.03);
-  ctx.strokeStyle = rgba(colors.endcardBody, 0.35);
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(padX, dividerY);
-  ctx.lineTo(W - padX, dividerY);
-  ctx.stroke();
-
-  // Brand tagline — editorial serif at a larger scale than the product
-  // endcard's product name. Positions the tagline as the primary line
-  // the viewer reads on the endcard.
-  let cursorY = dividerY + Math.round(H * 0.036);
-  if (brandTagline) {
-    const taglineSize = clampNum(Math.round(H * 0.034), 40, 64);
-    ctx.font = `500 ${taglineSize}px "${fonts.quote}"`;
-    ctx.fillStyle = rgba(colors.endcardText, 1);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    const lines = wrapLines(ctx, brandTagline, W - padX * 2, 3);
-    const lineH = Math.round(taglineSize * 1.18);
-    for (let i = 0; i < lines.length; i++) {
-      ctx.fillText(lines[i], W / 2, cursorY + i * lineH);
-    }
-    cursorY += lines.length * lineH;
-  }
-
-  // Footer row — brand name (small caps) + website. Only renders when
-  // there's a logo image (otherwise the wordmark above already carries
-  // the name and repeating it would be noisy). Website reads compact:
-  // "reach-social.io" not "https://www.reach-social.io/".
-  const footerY = H - Math.round(H * 0.04);
-  if (brandLogo && (brandName || brandWebsite)) {
-    const footerSize = clampNum(Math.round(H * 0.014), 16, 24);
-    ctx.font = `600 ${footerSize}px "${fonts.body}"`;
-    ctx.fillStyle = rgba(colors.endcardBody, 0.85);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    const footerLine = [brandName ? brandName.toUpperCase() : null, brandWebsite]
-      .filter(Boolean)
-      .join('  ·  ');
-    if (footerLine) ctx.fillText(footerLine, W / 2, footerY);
-  } else if (brandWebsite) {
-    // Logo missing (wordmark on top) — footer becomes just the website.
-    const footerSize = clampNum(Math.round(H * 0.014), 16, 24);
-    ctx.font = `600 ${footerSize}px "${fonts.body}"`;
-    ctx.fillStyle = rgba(colors.endcardBody, 0.85);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(brandWebsite, W / 2, footerY);
-  }
-
-  ctx.restore();
-}
-
-// ── Endcard sub-renderers ──────────────────────────────────────────
-
-function drawProofBar(ctx, W, y, { rating, reviewCount, starColor, textColor, fontFamily }, H, rgba) {
-  const starSize   = clampNum(Math.round(H * 0.024), 26, 42);
-  const scoreSize  = clampNum(Math.round(H * 0.020), 22, 34);
-  const reviewSize = clampNum(Math.round(H * 0.017), 18, 28);
-  const gapAfterStars = Math.round(W * 0.020);
-  const gapAroundSep  = Math.round(W * 0.016);
-
-  const stars = '\u2605\u2605\u2605\u2605\u2605';
-  const scoreText   = `${(rating || 0).toFixed(1)}/5`;
-  const reviewsText = isFinite(reviewCount) && reviewCount > 0
-    ? `${formatCount(reviewCount)} reviews` : '';
-
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-
-  ctx.font = `800 ${starSize}px "${fontFamily}"`;
-  const starsW = ctx.measureText(stars).width;
-  ctx.font = `700 ${scoreSize}px "${fontFamily}"`;
-  const scoreW = ctx.measureText(scoreText).width;
-  ctx.font = `500 ${reviewSize}px "${fontFamily}"`;
-  const reviewsW = reviewsText ? ctx.measureText(reviewsText).width : 0;
-
-  const totalW = starsW + gapAfterStars + scoreW +
-                 (reviewsText ? gapAroundSep * 2 + 2 + reviewsW : 0);
-  let cursor = (W - totalW) / 2;
-  const centerY = y + starSize / 2;
-
-  ctx.font = `800 ${starSize}px "${fontFamily}"`;
-  ctx.fillStyle = rgba(starColor, 1);
-  ctx.fillText(stars, cursor, centerY);
-  cursor += starsW + gapAfterStars;
-
-  ctx.font = `700 ${scoreSize}px "${fontFamily}"`;
-  ctx.fillStyle = rgba(textColor, 1);
-  ctx.fillText(scoreText, cursor, centerY);
-  cursor += scoreW;
-
-  if (reviewsText) {
-    cursor += gapAroundSep;
-    const sepH = starSize * 0.5;
-    ctx.strokeStyle = rgba(textColor, 0.6);
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(cursor, centerY - sepH / 2);
-    ctx.lineTo(cursor, centerY + sepH / 2);
-    ctx.stroke();
-    cursor += gapAroundSep;
-    ctx.font = `500 ${reviewSize}px "${fontFamily}"`;
-    ctx.fillStyle = rgba(textColor, 0.95);
-    ctx.fillText(reviewsText, cursor, centerY);
-  }
-}
-
-function drawPromoPill(ctx, W, y, text, { bg, text: textColor, fontFamily }, H, rgba) {
-  const fontSize = clampNum(Math.round(H * 0.020), 22, 34);
-  const padX = Math.round(fontSize * 0.9);
-  const pillH = Math.round(fontSize * 1.9);
-
-  ctx.font = `700 ${fontSize}px "${fontFamily}"`;
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  const textW = ctx.measureText(text).width;
-  const pillW = textW + padX * 2;
-  const pillX = Math.round((W - pillW) / 2);
-
-  ctx.fillStyle = rgba(bg, 1);
-  roundedRect(ctx, pillX, y, pillW, pillH, pillH / 2);
-  ctx.fill();
-
-  ctx.fillStyle = rgba(textColor, 1);
-  ctx.fillText(text, pillX + padX, y + pillH / 2 + 1);
-}
-
 // ── Text utilities ─────────────────────────────────────────────────
 
 function wrapLines(ctx, text, maxWidth, maxLines) {
@@ -618,9 +310,4 @@ function roundedRect(ctx, x, y, w, h, r) {
 
 function clampNum(v, min, max) {
   return Math.max(min, Math.min(max, v));
-}
-
-function formatCount(n) {
-  if (n >= 1000) return `${Math.round(n / 100) / 10}k`;
-  return String(n);
 }

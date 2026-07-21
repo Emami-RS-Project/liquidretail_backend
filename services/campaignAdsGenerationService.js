@@ -279,6 +279,10 @@ async function expandWizardJob({
   // declared kinds (services/platformFormats.js) — picking 'image' on
   // Reels falls back to 'video'. null defers to campaign.adKinds.
   kinds = null,
+  // Wizard format-selection stage: requested video length in seconds
+  // (integer 1–15). null = standard 8s. Stamped on video Ad payloads
+  // only; not part of identityDigest.
+  videoDurationSec = null,
   // Dry-run mode — runs the entire seed assembly + cartesian + caps
   // but skips the Ad.insertMany. Returns the would-be payload counts
   // grouped by productId so the wizard can show "this will produce N
@@ -391,9 +395,41 @@ async function expandWizardJob({
       platformFormat: effectivePlatformFormat,
       kinds: resolvedKinds,
       includeCategoryMatched, includeBrandMatched,
-      excludePairings, creativeIntent: null
+      excludePairings, creativeIntent: null,
+      videoDurationSec
     });
     return result;
+  }
+
+  // Concept-driven dryRun — approximate V2 counts without running the
+  // Director. Real generate path emits ~3 judged concepts/product × kinds,
+  // then caps image→ADS_PER_PRODUCT_CAP / video→VEO_ADS_PER_PRODUCT_CAP.
+  // Concept count is decided at generate time; this is a cap-based estimate
+  // so the wizard's "will produce N ads" isn't inflated by the legacy
+  // cartesian (seeds × templates × ratios) fall-through below.
+  if (useConceptDriven && dryRun) {
+    const perProductEstimate = resolvedKinds.reduce((sum, kind) => {
+      if (kind === 'video') return sum + VEO_ADS_PER_PRODUCT_CAP;
+      // image (and any other non-video kind)
+      return sum + Math.min(3, ADS_PER_PRODUCT_CAP);
+    }, 0);
+    // Brand-only (no productIds) is one null-keyed group — same as
+    // runConceptDrivenExpansion's productIterations.
+    const estimateProducts = productIds.length > 0 ? productIds : [null];
+    const byProduct = {};
+    for (const pid of estimateProducts) {
+      byProduct[pid ? String(pid) : 'NULL'] = perProductEstimate;
+    }
+    const total = perProductEstimate * estimateProducts.length;
+    return {
+      campaignId: String(campaignId), brandId, campaignKind,
+      dryRun: true,
+      total,
+      byProduct,
+      byVariantKind: { ugc: 0, product_image: 0 },
+      seedCount:    0,
+      productCount: estimateProducts.length
+    };
   }
 
   // ── 1. Build seeds — flat list of {productId, mediaId, matchTier, variantKind, suitabilityScore, fileType} ──
@@ -542,6 +578,7 @@ async function expandWizardJob({
               aspectRatio:    cell.aspectRatio,
               campaignKind,
               platformFormat: effectivePlatformFormat,
+              videoDurationSec: kind === 'video' ? (videoDurationSec || null) : null,
               matchTier:      seed.matchTier,
               variantKind:    seed.variantKind,
               paletteSource,
@@ -561,8 +598,10 @@ async function expandWizardJob({
     }
   }
 
-  // Per-(product, kind) cap. Video is expensive (~$1.75/Veo call, or
-  // ~$0 for the Grok-skip Cloudinary segment) so it caps at
+  // Per-(product, kind) cap. Video is the expensive kind (≈$1.00 per
+  // 8s/720p render on the Gemini Omni default, ≈$4.00 on the Grok
+  // override — see atlasVideoService.estimateRenderCostUsd — or ~$0
+  // for the video-seed Cloudinary segment path) so it caps at
   // VEO_ADS_PER_PRODUCT_CAP (1); image uses ADS_PER_PRODUCT_CAP (3).
   // Brand-only seeds (productId null) form one product group per kind
   // — so brand + meta feed + both nets 3 image + 1 video rather than
@@ -1338,7 +1377,8 @@ async function runConceptDrivenExpansion({
   platformFormat,
   kinds,                                            // [] of 'image'|'video' — what pipelines to emit per concept
   includeCategoryMatched, includeBrandMatched,
-  excludePairings, creativeIntent
+  excludePairings, creativeIntent,
+  videoDurationSec = null                           // wizard-requested video length (sec); null = standard 8s
 }) {
   const { resolveKinds, renderRouteForKind } = require('./platformFormats');
   const resolvedKinds = (Array.isArray(kinds) && kinds.length)
@@ -1480,6 +1520,7 @@ async function runConceptDrivenExpansion({
             aspectRatio:       aspectRatioForPlatformFormat(platformFormat) || '1:1',
             campaignKind,
             platformFormat,
+            videoDurationSec:  kind === 'video' ? (videoDurationSec || null) : null,
             matchTier:         matchTierForUniverseRole(role),
             variantKind:       variantKindForUniverseRole(role),
             paletteSource:     'media',
@@ -1588,12 +1629,15 @@ async function runConceptDrivenExpansion({
     `alreadyQueued=${alreadyQueued} totalQueued=${queuedCount}`
   );
 
+  // byProduct from POST-CAP payloads (the array passed to insertMany) —
+  // r.payloads is pre-cap and would over-report vs what actually queued.
   return {
     campaignId: String(campaignId), brandId, campaignKind,
     queuedCount, newlyQueued: newAdIds.length, alreadyQueued,
     newAdIds, total: payloads.length,
-    byProduct: perProductResults.reduce((acc, r) => {
-      acc[r.productId ? String(r.productId) : 'NULL'] = r.payloads.length;
+    byProduct: payloads.reduce((acc, p) => {
+      const k = p.productId ? String(p.productId) : 'NULL';
+      acc[k] = (acc[k] || 0) + 1;
       return acc;
     }, {}),
     conceptDriven: true,

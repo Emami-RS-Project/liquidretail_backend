@@ -2,17 +2,35 @@
   "name": "liquidretail-backend",
   "version": "1.0.0",
   "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node index.js",
     "worker": "node worker.js",
-    "postinstall": "puppeteer browsers install chrome"
+    "postinstall": "puppeteer browsers install chrome && (npx remotion browser ensure || true)",
+    "video:dryrun": "node scripts/dryRunVideoSubmit.js",
+    "titles:test": "node scripts/testRemotionTitles.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "@napi-rs/canvas": "^1.0.2",
-    "axios": "^1.11.0",
+    "@remotion/animation-utils": "4.0.495",
+    "@remotion/bundler": "4.0.495",
+    "@remotion/fonts": "4.0.495",
+    "@remotion/google-fonts": "4.0.495",
+    "@remotion/layout-utils": "4.0.495",
+    "@remotion/media": "4.0.495",
+    "@remotion/media-parser": "4.0.495",
+    "@remotion/motion-blur": "4.0.495",
+    "@remotion/noise": "4.0.495",
+    "@remotion/paths": "4.0.495",
+    "@remotion/renderer": "4.0.495",
+    "@remotion/transitions": "4.0.495",
+    "axios": "^1.18.1",
     "cloudinary": "^2.7.0",
     "cors": "^2.8.6",
+    "css-tree": "^3.2.1",
     "dotenv": "^17.2.0",
     "express": "^4.18.2",
     "express-session": "^1.19.0",
@@ -25,6 +43,9 @@
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "puppeteer": "^24.43.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "4.0.495",
     "sharp": "^0.33.5",
     "streamifier": "^0.1.1"
   }

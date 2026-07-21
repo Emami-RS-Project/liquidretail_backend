@@ -134,6 +134,11 @@ async function reapOrphans() {
       `(stale > ${REAP_STALE_MIN}m)`
     );
   }
+
+  // OperationRun (unified progress rows): stale-heartbeat runs from
+  // dead processes → failed, so the ActivityDock never shows a ghost
+  // "running" forever. Never fatal to the reaper.
+  await require('./services/progressService').sweepStaleRuns().catch(() => {});
 }
 
 async function workerLoop(workerId) {

@@ -19,16 +19,18 @@
 // null as "no visual signal" and falls back to text-only matching.
 
 const axios = require('axios');
+// Atlas gateway (Gemini served OpenAI-compatible; Google's OpenAI-compat
+// endpoint as the direct fallback inside the transport).
+const { chatCompletion, isConfigured } = require('./atlasLlmService');
 
-const MODEL    = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
-const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+const MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
 
 // Compare ONE crop to ONE catalog candidate. Returns
 //   { isMatch: bool, score: 0..1, reasoning: string }
 // or null if the call failed or inputs were missing.
 async function compareCropToCandidate({ cropImageUrl, candidate }) {
-  if (!process.env.GEMINI_API_KEY) {
-    console.warn('   ⚠️  visualCatalogMatch: GEMINI_API_KEY not set');
+  if (!isConfigured() && !process.env.GEMINI_API_KEY) {
+    console.warn('   ⚠️  visualCatalogMatch: neither ATLAS_API_KEY nor GEMINI_API_KEY set');
     return null;
   }
   if (!cropImageUrl || !candidate?.imageUrl) return null;
@@ -57,52 +59,36 @@ async function compareCropToCandidate({ cropImageUrl, candidate }) {
 
   let res;
   try {
-    res = await axios.post(
-      `${ENDPOINT}?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`,
+    // No thinkingBudget knob on the OpenAI-compat path — Gemini's hidden
+    // reasoning spends from max_tokens instead, so the 800-token cap of
+    // the raw-API era is raised and the transport adds its own reserve.
+    // Schema-enforced output (strict json_schema — probed working on the
+    // Atlas gemini routes) keeps the parser belt-and-braces rather than
+    // load-bearing.
+    res = await chatCompletion(
+      { stage: 'visual_catalog_match', service: 'visualCatalogMatchService', visionImages: 2 },
       {
-        contents: [{
-          role: 'user',
-          parts: [
-            { text: prompt + '\n\nTARGET:' },
-            { inlineData: { mimeType: 'image/jpeg', data: cropBuf.toString('base64') } },
-            { text: '\nCATALOG CANDIDATE:' },
-            { inlineData: { mimeType: 'image/jpeg', data: candidateBuf.toString('base64') } },
-            { text: '\nReturn JSON only.' }
-          ]
-        }],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 800,
-          responseMimeType: 'application/json',
-          // Disable thinking mode. Gemini 2.5 flash defaults to a non-
-          // zero thinking budget that counts against maxOutputTokens
-          // but produces no visible output — so an 800-token cap was
-          // being eaten by ~750 hidden thinking tokens, leaving ~50
-          // for the JSON and truncating mid-string ("unparseable
-          // response", finishReason=MAX_TOKENS). This task is a
-          // direct yes/no SKU comparison; reasoning quality doesn't
-          // benefit from chain-of-thought, and dropping it makes the
-          // call faster and cheaper too.
-          thinkingConfig: { thinkingBudget: 0 },
-          // Schema-enforced output. Without this, Gemini sometimes
-          // returns prose with embedded JSON, malformed JSON missing
-          // a closing brace, or fields wrapped in markdown — all of
-          // which surfaced as "unparseable response" warnings.
-          // responseSchema forces a structurally valid JSON match
-          // for our exact field set; the parser below becomes
-          // belt-and-braces rather than load-bearing.
-          responseSchema: {
-            type: 'object',
-            properties: {
-              isMatch:   { type: 'boolean' },
-              score:     { type: 'number' },
-              reasoning: { type: 'string' }
-            },
-            required: ['isMatch', 'score', 'reasoning']
-          }
-        }
-      },
-      { timeout: 30000 }
+        model: MODEL,
+        messages: [{ role: 'user', content: [
+          { type: 'text', text: prompt + '\n\nTARGET:' },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${cropBuf.toString('base64')}` } },
+          { type: 'text', text: '\nCATALOG CANDIDATE:' },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${candidateBuf.toString('base64')}` } },
+          { type: 'text', text: '\nReturn JSON only.' }
+        ] }],
+        temperature: 0.1,
+        max_tokens: 800,
+        response_format: { type: 'json_schema', json_schema: { name: 'sku_match', strict: true, schema: {
+          type: 'object',
+          properties: {
+            isMatch:   { type: 'boolean' },
+            score:     { type: 'number' },
+            reasoning: { type: 'string' }
+          },
+          required: ['isMatch', 'score', 'reasoning'],
+          additionalProperties: false
+        } } }
+      }
     );
   } catch (err) {
     const detail = err.response?.data?.error?.message || err.message;
@@ -110,10 +96,9 @@ async function compareCropToCandidate({ cropImageUrl, candidate }) {
     return null;
   }
 
-  const respCandidate = res.data?.candidates?.[0];
-  const finishReason = respCandidate?.finishReason || null;
-  const text = (respCandidate?.content?.parts || [])
-    .map(p => p.text || '').join('').trim();
+  const choice = res.choices?.[0];
+  const finishReason = choice?.finish_reason || null;
+  const text = String(choice?.message?.content || '').trim();
   let parsed;
   try { parsed = JSON.parse(text); }
   catch {

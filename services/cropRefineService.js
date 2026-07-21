@@ -18,8 +18,7 @@
 // the original yoloProducts bboxes for downstream matching. Refinement
 // is an enhancement, not a hard dependency.
 
-const OpenAI = require('openai');
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 const MAX_DETECTIONS_PER_CALL = 16;   // smaller than yoloIdentify (24) — refinement prompt is heavier per item
 
@@ -248,7 +247,7 @@ async function refineChunk(chunk, sourceImageUrl, idOffset) {
 
   let parsed;
   try {
-    const response = await openai.chat.completions.create({
+    const response = await chatCompletion({ stage: 'crop_refine', service: 'cropRefineService' }, {
       model: 'gpt-4.1',
       response_format: { type: 'json_object' },
       messages: [{

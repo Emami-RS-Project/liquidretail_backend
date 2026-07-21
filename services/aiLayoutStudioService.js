@@ -12,8 +12,7 @@
 // prove viable the next step is a BrandCanvasVariant model that promotes
 // user-approved extractions into the template registry.
 
-const OpenAI = require('openai');
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 const Media                = require('../models/Media');
 const DetectionArtifact    = require('../models/DetectionArtifact');
@@ -135,12 +134,13 @@ async function generateReferenceImage(ctx, variant, aspectRatio, quality) {
   const prompt = buildGenerationPrompt(ctx, variant, aspectRatio);
   const size = RATIO_TO_SIZE[aspectRatio];
 
-  const res = await openai.images.generate({
-    model:  'gpt-image-1',
+  // Atlas gateway (direct gpt-image-1 fallback inside).
+  const atlasImage = require('./atlasImageService');
+  const res = await atlasImage.generateImage({
     prompt,
     size,
     quality,
-    n: 1
+    meta: { stage: 'ai_layout_image', service: 'aiLayoutStudioService' }
   });
 
   const b64 = res.data?.[0]?.b64_json;
@@ -215,7 +215,7 @@ async function extractLayoutFromImage(imageUrl) {
     `Identify 4-8 distinct zones. Focus on structural layout — don't try to read garbled AI text. Use tight bounding rectangles (no extra padding).`
   ].join('\n');
 
-  const response = await openai.chat.completions.create({
+  const response = await chatCompletion({ stage: 'layout_vision', service: 'aiLayoutStudioService' }, {
     model: 'gpt-4.1',
     response_format: { type: 'json_object' },
     messages: [{
@@ -284,6 +284,11 @@ async function runSession(sessionId) {
     return;
   }
 
+  const { startRun, CancelledError } = require('./progressService');
+  const progressRun = await startRun({
+    kind: 'ai-layout', advertiserId: session.advertiserId, brandId: session.brandId || null,
+    total: session.totalCombos || null, label: 'AI layout session'
+  });
   try {
     const ctx = await loadContext(session.mediaId);
     if (!ctx) {
@@ -312,30 +317,49 @@ async function runSession(sessionId) {
     console.log(`🎨 ai-layouts.runSession(${sessionId}): generating ${combos.length} refs (quality=${q})`);
 
     // Per-combo: generate + extract + push to session.references[].
-    // Wrapped individually so one combo's failure can't reject the
-    // Promise.all and short-circuit the rest.
-    await Promise.all(combos.map(async (c) => {
-      let ref;
-      try {
-        const imageUrl = await generateReferenceImage(ctx, c.variant, c.aspectRatio, q);
-        let extractedCanvas = null;
-        try { extractedCanvas = await extractLayoutFromImage(imageUrl); }
-        catch (err) { console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] extraction failed: ${err.message}`); }
-        ref = { ...c, imageUrl, extractedCanvas, status: 'ok' };
-      } catch (err) {
-        console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] generation failed: ${err.message}`);
-        ref = { ...c, status: 'error', error: err.message };
-      }
-      // $push so each reference appears on the next client poll.
-      // Doesn't conflict with the final status update — that's a
-      // separate $set after Promise.all settles.
-      try {
-        await AiLayoutSession.updateOne(
-          { _id: sessionId },
-          { $push: { references: ref } }
-        );
-      } catch (err) {
-        console.warn(`   ⚠️  ai-layouts session push failed for ${c.variant}/${c.aspectRatio}: ${err.message}`);
+    // Wrapped individually so one combo's failure can't short-circuit
+    // the rest. Rolling pool (not Promise.all over ALL combos): with
+    // unbounded fan-out every combo dispatches its image call at t=0
+    // and a mid-run cancel could never skip anything — the pool makes
+    // the claim-time cancel check real AND caps provider stampede.
+    progressRun.stage('generating layout references');
+    let combosDone = 0;
+    const COMBO_CONCURRENCY = 3;
+    let comboCursor = 0;
+    await Promise.all(Array.from({ length: Math.min(COMBO_CONCURRENCY, combos.length) }, async () => {
+      while (comboCursor < combos.length) {
+        const c = combos[comboCursor++];
+        let ref;
+        // Cooperative cancel between combo claims: in-flight image
+        // calls run to completion; unclaimed combos are marked skipped
+        // so the session still settles with every combo accounted for.
+        if (progressRun.isCancelRequested()) {
+          ref = { ...c, status: 'error', error: 'cancelled by operator' };
+        } else {
+          try {
+            const imageUrl = await generateReferenceImage(ctx, c.variant, c.aspectRatio, q);
+            let extractedCanvas = null;
+            try { extractedCanvas = await extractLayoutFromImage(imageUrl); }
+            catch (err) { console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] extraction failed: ${err.message}`); }
+            ref = { ...c, imageUrl, extractedCanvas, status: 'ok' };
+          } catch (err) {
+            console.warn(`   ⚠️  ai-layouts[${c.variant}/${c.aspectRatio}] generation failed: ${err.message}`);
+            ref = { ...c, status: 'error', error: err.message };
+          }
+        }
+        await progressRun.checkpoint().catch(() => {}); // refresh cancel cache; terminal handled below
+        progressRun.tick(++combosDone, combos.length);
+        // $push so each reference appears on the next client poll.
+        // Doesn't conflict with the final status update — that's a
+        // separate $set after the pool settles.
+        try {
+          await AiLayoutSession.updateOne(
+            { _id: sessionId },
+            { $push: { references: ref } }
+          );
+        } catch (err) {
+          console.warn(`   ⚠️  ai-layouts session push failed for ${c.variant}/${c.aspectRatio}: ${err.message}`);
+        }
       }
     }));
 
@@ -343,9 +367,12 @@ async function runSession(sessionId) {
       { _id: sessionId },
       { $set: { status: 'completed', completedAt: new Date() } }
     );
+    if (progressRun.isCancelRequested()) await progressRun.markCancelled('Stopped — generated references kept');
+    else await progressRun.succeed();
     console.log(`🎨 ai-layouts.runSession(${sessionId}): completed in ${Date.now() - t0}ms`);
   } catch (err) {
     console.warn(`🎨 ai-layouts.runSession(${sessionId}): top-level failure — ${err.message}`);
+    await progressRun.fail(err);
     try {
       await AiLayoutSession.updateOne(
         { _id: sessionId },

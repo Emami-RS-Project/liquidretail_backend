@@ -12,13 +12,12 @@
 // product specifics. Triggered manually via
 // POST /api/campaigns/:id/derive-brief and on campaign sync (debounced).
 
-const OpenAI = require('openai');
 const Campaign       = require('../models/Campaign');
 const CatalogProduct = require('../models/CatalogProduct');
 const Brand          = require('../models/Brand');
 const { trackLlmCall } = require('./costTracker');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 const MODEL_ID       = 'gpt-4o-mini';
 const PROMPT_VERSION = '1.0.0';
@@ -238,7 +237,7 @@ async function deriveCampaignBrief(campaignId, { force = false, derivedFrom = 'm
   const user   = buildUserPrompt({ campaign, productTitles, brand });
 
   const t0 = Date.now();
-  const completion = await trackLlmCall(
+  const completion = await chatCompletion(
     {
       stage:      'campaign_brief',
       provider:   'openai',
@@ -248,7 +247,7 @@ async function deriveCampaignBrief(campaignId, { force = false, derivedFrom = 'm
       visionImages: 0,
       cacheKey:   null
     },
-    () => openai.chat.completions.create({
+    {
       model:           MODEL_ID,
       response_format: { type: 'json_schema', json_schema: RESPONSE_SCHEMA },
       messages: [
@@ -257,7 +256,7 @@ async function deriveCampaignBrief(campaignId, { force = false, derivedFrom = 'm
       ],
       temperature: TEMPERATURE,
       max_tokens:  MAX_TOKENS
-    })
+    }
   );
 
   const raw = completion.choices?.[0]?.message?.content;

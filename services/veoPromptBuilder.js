@@ -1,17 +1,28 @@
-// Builds the motion-only video prompt for the AI video model (Grok via
-// Atlas, or Veo via Vertex). The prompt directs MOTION, CAMERA, AUDIO,
-// and PRODUCT/PHYSICAL fidelity. It contains NO text choreography —
-// every on-screen overlay (headline, CTA, quote, brand mark) is
-// composited downstream by the canonical brand-script overlay
-// (brandScriptExecutor + brandScripts/*.script.js), which reads its
-// text from ad.copy + LayoutInputArtifact + Brand.styleTheme.
+// Builds the camera-only video prompt for the AI video model (Gemini
+// Omni via Atlas by default; Grok/Veo via per-brand/per-product/
+// per-canvas overrides — see atlasVideoService.resolveVideoModel).
+// The prompt is a fixed "Ken Burns" luxury product-commercial spec:
+// the model animates a virtual camera over the supplied photographs
+// and must NOT generate, recreate, or alter the imagery. It contains
+// NO text choreography — every on-screen overlay (headline, CTA,
+// quote, brand mark) is composited downstream by the canonical
+// brand-script overlay (brandScriptExecutor + brandScripts/*.script.js),
+// which reads its text from ad.copy + LayoutInputArtifact +
+// Brand.styleTheme.
 //
-// Beat structure is FIXED — a canonical 3-part lifestyle arc (0-3s
-// lifestyle motion, 3-6s continued motion, 6-8s stills into a hold
-// for the endcard overlay). veoStoryboardService still directs
-// camera / audio / vibe per-ad for variance; storyboard.beats is
-// no longer consumed. When the storyboard is null, safe defaults
-// cover camera / audio / vibe.
+// Timeline is FIXED — a canonical 3-scene 8.0s arc (pan → logo zoom →
+// zoom-out reveal). The GPT storyboard (veoStoryboardService) is
+// retired on the Atlas path: camera is fully specified below and audio
+// uses a fixed default.
+// Two labeled default-prompt profiles (PROMPT_PROFILES) keep each
+// model family's static directives independently tunable:
+//   • gemini-omni — verbose; optimized for google/gemini-omni-flash/*
+//     (20,000-byte cap)
+//   • grok — compact re-authoring of the same rules; optimized for
+//     xai/grok-imagine-video* (4,096-byte cap); also serves veo/generic
+// promptProfileFor(caps) selects the profile from caps.paramShape.
+// The prompt-size cap is per-model (caps.promptByteCap).
+
 
 // Aspect-ratio resolution lives in services/platformFormats.js — the
 // canonical capability table for every platformFormat. Re-exported here
@@ -23,6 +34,40 @@ const {
 const PLATFORM_FORMAT_ASPECT = Object.fromEntries(
   Object.entries(PLATFORM_FORMATS).map(([k, v]) => [k, v.aspectRatio])
 );
+
+// Per-model-family default-prompt profiles. Static Ken Burns directives
+// are authored once per profile so Omni (20k headroom) and Grok (4,096)
+// can be tuned independently; shared dynamic lines (operator lead,
+// duration-scaled Timeline/Output, PRODUCT FIDELITY, compositing,
+// seedHasText) stay in buildVeoPrompt.
+const PROMPT_PROFILES = {
+  'gemini-omni': {
+    label: 'Gemini Omni default prompt',
+    optimizedFor: [
+      'google/gemini-omni-flash/image-to-video-developer',
+      'google/gemini-omni-flash/reference-to-video-developer'
+    ],
+    promptByteBudget: 20000
+  },
+  'grok': {
+    label: 'Grok default prompt',
+    optimizedFor: [
+      'xai/grok-imagine-video-v1.5/image-to-video',
+      'xai/grok-imagine-video/reference-to-video'
+    ],
+    promptByteBudget: 4096
+  }
+};
+
+// paramShape starting with 'gemini-omni' → gemini-omni; 'grok' → grok;
+// anything else (veo/generic) → grok (compact variant; shared 4,096 cap).
+function promptProfileFor(caps) {
+  const shape = String(caps?.paramShape || '');
+  if (shape.startsWith('gemini-omni')) return 'gemini-omni';
+  if (shape.startsWith('grok')) return 'grok';
+  return 'grok';
+}
+
 
 function archetypeDescription(arch) {
   const map = {
@@ -50,32 +95,6 @@ function archetypeNegativeSpaceGuidance(arch) {
     product_card_grid:            'Keep the frame edges and corners clean — animated copy and CTA overlays occupy the border zones.'
   };
   return map[arch] || 'Keep a clear uncluttered section of the frame free of visual complexity — animated text overlays will composite there.';
-}
-
-// Prefers the rich background_description from LayoutInputArtifact.input.media;
-// falls back to detect-pipeline sourceMedia structured fields.
-function buildSceneDescription({ layoutInput, sourceMedia }) {
-  const richDesc = layoutInput?.media?.background_description;
-  if (richDesc) return richDesc;
-
-  const bg = sourceMedia?.background || {};
-  const parts = [bg.setting, bg.scene_type !== bg.setting ? bg.scene_type : null, bg.style]
-    .filter(Boolean);
-  return parts.length ? parts.join(', ') : null;
-}
-
-function buildLightingDescription({ layoutInput, sourceMedia }) {
-  return layoutInput?.media?.background_lighting
-    || sourceMedia?.background?.lighting
-    || null;
-}
-
-function buildMoodDescription({ layoutInput, sourceMedia }) {
-  const moods = Array.isArray(sourceMedia?.background?.mood)
-    ? sourceMedia.background.mood.filter(Boolean)
-    : [];
-  if (moods.length) return moods.slice(0, 3).join(', ');
-  return layoutInput?.media?.background_style || null;
 }
 
 // Converts "Person (Florist)" → "florist", "Person (Model)" → "model", etc.
@@ -129,6 +148,14 @@ function resolveSubject({ layoutInput, sourceMedia, media }) {
   } else if (subjects[0] && Number.isFinite(subjects[0].x1) && Number.isFinite(subjects[0].x2)) {
     const cx = (subjects[0].x1 + subjects[0].x2) / 2;
     hPos = cx < 0.35 ? 'left' : cx > 0.65 ? 'right' : 'center';
+  } else {
+    // Mirror vSpan fallback: when sourceMedia is absent, derive hPos
+    // from the primary entry in media.subjects (x1/x2 shape).
+    const m = (media?.subjects || []).find(s => s?.role === 'primary' || !s?.role);
+    if (m && Number.isFinite(m.x1) && Number.isFinite(m.x2)) {
+      const cx = (m.x1 + m.x2) / 2;
+      hPos = cx < 0.35 ? 'left' : cx > 0.65 ? 'right' : 'center';
+    }
   }
 
   const vSpan = (yTop != null && yBottom != null)
@@ -138,149 +165,200 @@ function resolveSubject({ layoutInput, sourceMedia, media }) {
   return { label: naturalizeLabel(label), richDesc, hPos, vSpan };
 }
 
-function buildSubjectFramingInstruction(subject) {
-  if (!subject) return null;
-  const { label, hPos } = subject;
-  const posText = hPos ? ` on the ${hPos} side of the frame` : '';
-  return `Keep the ${label}${posText} clearly visible and well-lit for the full 8 seconds.`;
-}
-
 function buildOverlayIntent({ concept }) {
   // The canonical brand-script overlay composites deterministic text
-  // downstream. Grok only needs to know: (a) text will land, (b) where
-  // to keep negative space open for it.
+  // downstream. The video model only needs to know: (a) text will land,
+  // (b) where to keep negative space open for it.
   return `COMPOSITING CONTEXT: Text overlays composited downstream. ${archetypeNegativeSpaceGuidance(concept?.archetype)}`;
 }
 
-// Main export. Builds the motion-only video prompt for the AI model.
-// All text choreography is handled by the chrome compositor downstream
-// — the prompt MUST NOT contain any "render this text" directives.
+// ── GEMINI OMNI default prompt — optimized for google/gemini-omni-flash/* (20,000-byte cap) ──
+// CURRENT verbose phrasing verbatim — authored against the Omni default's 20k headroom.
+const OMNI_DIRECTIVES = {
+  role:
+    `Role: Professional product commercial editor. Animate the supplied product photos with virtual camera movement only — ` +
+    `do NOT generate, recreate, or alter imagery. The supplied images are the source of truth.`,
+  objective:
+    // Duration-agnostic (the Timeline/Output lines carry the requested
+    // length) — the original "8-second" phrasing predates variable
+    // durations and would contradict a 4s/15s render.
+    `Objective: Create a premium product commercial using subtle Ken Burns camera moves. ` +
+    `Must feel luxury while keeping 100% fidelity to the original product.`,
+  sourceImages: `Source images: Use only the supplied images as provided.`,
+  productPreservation:
+    `Product preservation (highest priority): Treat each image as a locked photograph. The product must stay identical. ` +
+    `Do NOT recreate, redraw, regenerate, enhance, sharpen with generative fill, or use AI on any part. ` +
+    `Do NOT change colors, stitching, textures, materials, logos, shape, or proportions, or alter lighting, shadows, or reflections. ` +
+    `Do NOT add or remove any part or detail. The only motion is the virtual camera.`,
+  transitions: `Transitions: Smooth crossfades only, ~0.25s. No wipes, flashes, or animated transitions.`,
+  cameraStyle:
+    `Camera style: Luxury, slow, elegant, stable. Ease in/out. ` +
+    `No shake, handheld, parallax, simulated 3D, orbit, or object movement. The product stays completely static.`,
+  background: `Background: Preserve exactly. Do NOT replace, extend, blur, or hallucinate missing areas.`,
+  visualStyle:
+    `Visual style: Minimal, clean, photorealistic, high-end ecommerce. ` +
+    `Crisp focus, natural lighting only. No color grading, bloom, or lens flares.`,
+  audio: `AUDIO: natural ambience matching the scene; no music, no dialogue, no voiceover.`,
+  noText:
+    `CRITICAL: Do NOT render any text, typography, logos, badges, watermarks, or captions that are not already part of the supplied photographs. ` +
+    `Text and logos physically present on the product in the source images are fine to show — do not generate any new text or graphics. ` +
+    `All ad copy is composited downstream. Any generated text in the video causes rejection.`,
+  physicalAccuracy:
+    `PHYSICAL ACCURACY: Any person visible must remain anatomically correct — 5-fingered hands, symmetric matching eyes, ` +
+    `natural skin texture, real body proportions. No extra digits, warped features, or impossible angles. ` +
+    `If the photographs show a person, preserve their face, hair, skin tone, and identity throughout — no morphing mid-shot.`,
+  doNot:
+    `Do NOT: regenerate/morph/warp/bend the product, hallucinate geometry, invent textures, change branding/logos/stitching/colors, ` +
+    `create fake shadows/reflections/depth, animate the product or any of its parts, use generative fill, or create new backgrounds. ` +
+    `No fantasy motion — no sparkles, particles, lens flares, floating props, morphing, or dissolves.`
+};
+
+// ── GROK default prompt — optimized for xai/grok-imagine-video-v1.5/image-to-video (4,096-byte cap) ──
+// Compact re-authoring of the SAME directives (same rules, tighter sentences —
+// no meaning changes, no new creative direction). Sized so a typical full
+// prompt lands well under 4,096 bytes without relying on DROP_PRIORITY.
+const GROK_DIRECTIVES = {
+  role:
+    `Role: Product commercial editor. Animate supplied photos with virtual camera only — ` +
+    `do NOT generate, recreate, or alter imagery. Supplied images are source of truth.`,
+  objective:
+    `Objective: Premium Ken Burns product commercial. Luxury feel, 100% fidelity to the original product.`,
+  sourceImages: `Source images: Use only the supplied images as provided.`,
+  productPreservation:
+    `Product preservation (highest priority): Each image is a locked photograph; product stays identical. ` +
+    `Do NOT recreate, redraw, regenerate, enhance, generative-fill, or AI-alter any part. ` +
+    `Do NOT change colors, stitching, textures, materials, logos, shape, proportions, lighting, shadows, or reflections. ` +
+    `Do NOT add or remove detail. Only motion is the virtual camera.`,
+  transitions: `Transitions: Smooth crossfades ~0.25s only. No wipes, flashes, or animated transitions.`,
+  cameraStyle:
+    `Camera style: Luxury, slow, elegant, stable. Ease in/out. ` +
+    `No shake, handheld, parallax, 3D, orbit, or object movement. Product stays static.`,
+  background: `Background: Preserve exactly. Do NOT replace, extend, blur, or hallucinate areas.`,
+  visualStyle:
+    `Visual style: Minimal, clean, photorealistic, high-end ecommerce. ` +
+    `Crisp focus, natural light only. No grading, bloom, or flares.`,
+  audio: `AUDIO: natural ambience matching the scene; no music, no dialogue, no voiceover.`,
+  noText:
+    `CRITICAL: Do NOT render text, typography, logos, badges, watermarks, or captions not already in the supplied photographs. ` +
+    `On-product text/logos in source images may show — generate no new text or graphics. ` +
+    `Ad copy is composited downstream. Generated text causes rejection.`,
+  physicalAccuracy:
+    `PHYSICAL ACCURACY: Persons must stay anatomically correct — 5-fingered hands, symmetric eyes, ` +
+    `natural skin, real proportions. No extra digits, warped features, or impossible angles. ` +
+    `Preserve face, hair, skin tone, identity — no mid-shot morphing.`,
+  doNot:
+    `Do NOT: regenerate/morph/warp/bend the product, hallucinate geometry, invent textures, change branding/logos/stitching/colors, ` +
+    `fake shadows/reflections/depth, animate the product or parts, use generative fill, or create new backgrounds. ` +
+    `No fantasy motion — no sparkles, particles, flares, floating props, morphing, or dissolves.`
+};
+
+// Main export. Builds the camera-only "Ken Burns" video prompt for the
+// AI model. All text choreography is handled by the chrome compositor
+// downstream — the prompt MUST NOT contain any "render this text"
+// directives.
 //
-// layoutInput is LayoutInputArtifact.input (preferred source for scene
-// data). sourceMedia is layoutInput.input.source_media from the detect
-// pipeline (richer bbox data when available). Both are optional.
+// layoutInput is LayoutInputArtifact.input. sourceMedia is
+// layoutInput.input.source_media from the detect pipeline. Both are
+// optional and currently unused by the fixed prompt core, but stay in
+// the signature for call-site stability (resolveSubject still consumes
+// them for other callers).
 //
-// storyboard (optional) — structured { camera, audio, vibe } from
-// veoStoryboardService. Only these three fields flow into the prompt
-// (per-ad camera / audio / vibe variance). The beat structure itself
-// is fixed. When storyboard is null, safe defaults cover all three.
+// storyboard — accepted for signature compatibility but NOT consumed:
+// the Ken Burns spec fully defines camera + timeline, and audio uses a
+// fixed default. caps is the resolved model's MODEL_CAPS entry;
+// caps.promptByteCap drives the size cap (4096 when absent).
+// Static directive phrasing comes from OMNI_DIRECTIVES or GROK_DIRECTIVES
+// via promptProfileFor(caps); shared dynamic lines stay below.
 function buildVeoPrompt({
   concept,
-  brand,
+  brand,          // eslint-disable-line no-unused-vars — kept for call-site stability
   product,
   media,
-  layoutInput = null,
-  sourceMedia = null,
-  aspectRatio = '1:1',
+  layoutInput = null,     // eslint-disable-line no-unused-vars
+  sourceMedia = null,     // eslint-disable-line no-unused-vars
+  aspectRatio = '1:1',    // eslint-disable-line no-unused-vars
   seedHasText = false,
   hasProductReference = false,
   operatorPrompt = null,
-  storyboard = null
+  storyboard = null,      // eslint-disable-line no-unused-vars
+  caps = null,
+  durationSec = 8         // per-ad render length (wizard format-selection stage)
 }) {
-  const lines   = [];
-  const subject = resolveSubject({ layoutInput, sourceMedia, media });
+  const lines = [];
+  const d = promptProfileFor(caps) === 'gemini-omni' ? OMNI_DIRECTIVES : GROK_DIRECTIVES;
 
   // Operator refinement (regeneration only). Leads the prompt so the
-  // video model sees the requested change before the rest of the storyboard.
+  // video model sees the requested change before the fixed spec below.
   if (operatorPrompt && String(operatorPrompt).trim()) {
     lines.push(
       `OPERATOR REFINEMENT (HIGHEST PRIORITY — overrides conflicting guidance below): ` +
       `${String(operatorPrompt).trim()}. ` +
-      `Apply this refinement to the generated video. The scene, brand voice, and product fidelity guidance still apply, but where the operator's instruction conflicts with stylistic defaults the operator wins.`
+      `Apply this refinement to the generated video. The product fidelity and no-text guidance still apply, but where the operator's instruction conflicts with stylistic defaults the operator wins.`
     );
   }
 
-  lines.push(
-    `8-second editorial lifestyle short — documentary observation of the scene in the reference image, ` +
-    `as if shot on a mirrorless camera in the real environment. Animate what is already present; do not restage.`
-  );
-
-  const sceneDesc = buildSceneDescription({ layoutInput, sourceMedia });
-  const lighting  = buildLightingDescription({ layoutInput, sourceMedia });
-  if (sceneDesc || lighting) {
-    const lightingFrag = lighting ? `${lighting} lighting` : null;
-    lines.push(`Scene: ${[sceneDesc, lightingFrag].filter(Boolean).join('; ')}.`);
-  }
-
-  if (concept?.emotional_hook) {
-    lines.push(`Energy and feel: ${concept.emotional_hook}.`);
-  }
-
-  const mood = buildMoodDescription({ layoutInput, sourceMedia });
-  if (mood) lines.push(`Mood: ${mood}.`);
-
-  if (concept?.archetype) {
-    lines.push(`Visual treatment: ${archetypeDescription(concept.archetype)}.`);
-  }
-
-  if (Array.isArray(brand?.tone) && brand.tone.length) {
-    lines.push(`Brand voice: ${brand.tone.slice(0, 4).join(', ')}.`);
-  }
-  if (brand?.tagline) {
-    lines.push(`Brand essence: "${brand.tagline}".`);
-  }
+  // ── Fixed Ken Burns product-commercial spec (per-profile directives) ─
+  lines.push(d.role);
+  lines.push(d.objective);
+  lines.push(d.sourceImages);
+  lines.push(d.productPreservation);
 
   if (product?.title) {
     lines.push(`Product: ${product.title}.`);
   }
 
-  const subjectLine = buildSubjectFramingInstruction(subject);
-  if (subjectLine) lines.push(subjectLine);
-
-  // Fixed 3-part lifestyle arc — the canonical DR video template.
-  // Lifestyle motion for the first 6 seconds; the frame stills into a
-  // hold at 0:06 so the brand-script endcard overlay can dominate. GPT
-  // storyboard still directs camera / audio / vibe per-ad (variety
-  // knob); the beat structure is fixed.
+  // Fixed 3-scene timeline. Scene 2's "or most distinctive product
+  // detail" fallback covers logo-less products. Scene 3's zoom-out
+  // reveal is the closing beat — there is no endcard overlay
+  // downstream (removed deliberately; endcards, when desired, are
+  // prompted in a custom titling script instead).
+  // Scene marks scale proportionally with the requested duration so a
+  // 4s or 15s render keeps the same pan → logo zoom → reveal arc
+  // (canonical 8.0s beats were 2.66 / 5.12 — ratios 1/3 and 0.64).
+  const dur = Number(durationSec || 8);
+  const t1  = (dur / 3).toFixed(2);
+  const t2  = (dur * 0.64).toFixed(2);
   lines.push(
-    `8-second storyboard: ` +
-    `0:00–0:03: Lifestyle motion of the scene in the reference image — subtle organic movement, natural light play, subject anchored. ` +
-    `0:03–0:06: The lifestyle continues; light and subject settle slightly, the camera holds steady. ` +
-    `0:06–0:08: The scene decays into a calm still frame — motion fades to a hold, ready for a downstream endcard overlay.`
+    `Timeline (${dur.toFixed(1)}s): ` +
+    `Scene 1 (0.0–${t1}s): slow horizontal pan left→right, ~10–15% movement. No zoom, rotation, or perspective shift. ` +
+    `Scene 2 (${t1}–${t2}s): slow zoom toward the logo or most distinctive product detail (~8–10%), centered. No rotation or distortion. ` +
+    `Scene 3 (${t2}–${dur.toFixed(1)}s): begin slightly cropped, slow zoom out ~10–12% to reveal the full product. Maintain center framing.`
   );
+  lines.push(d.transitions);
+  lines.push(d.cameraStyle);
+  lines.push(d.background);
+  lines.push(d.visualStyle);
 
-  const camera = storyboard?.camera || 'slow dolly-in with subtle organic handheld micro-movements';
-  const audio  = storyboard?.audio  || 'natural ambience matching the scene; no music, no dialogue';
-  const vibe   = storyboard?.vibe   || null;
-  lines.push(
-    `Camera: ${camera}. ` +
-    `Natural editorial color, true-to-scene white balance, sensor-level photoreal detail. ` +
-    `No commercial LUT, no upscaled hyperrealism, no cinematic gloss that departs from the reference.`
-  );
-  if (vibe) lines.push(`Vibe: ${vibe}.`);
-  lines.push(`AUDIO: ${audio}.`);
+  // Fixed audio default — some models (Gemini Omni) generate native
+  // audio, so the directive is load-bearing even for a camera-only clip.
+  lines.push(d.audio);
 
-  // NO TEXT — the brand-script overlay composites downstream.
+  // NO TEXT — the brand-script overlay composites downstream. Text and
+  // logos physically present in the photographs are fine to show (Scene
+  // 2 zooms toward the logo); GENERATING text/graphics is what's banned.
   lines.push(buildOverlayIntent({ concept }));
-
-  lines.push(
-    `CRITICAL: Do NOT render any text, typography, logos, badges, watermarks, or captions. ` +
-    `Product and scene only — all text is composited downstream. Any text in the video causes rejection.`
-  );
+  lines.push(d.noText);
 
   if (seedHasText) {
     lines.push(
       `The reference image contains text overlays / captions / stickers / watermarks burned into the source frame. ` +
-      `IGNORE all visible text on the reference. Recompose the scene as if those overlays weren't there — the chrome layer will composite all text downstream.`
+      `Treat that burned-in text as part of the locked photograph — do not read, reproduce, extend, or generate more of it. ` +
+      `The chrome layer will composite all ad copy downstream.`
     );
   }
 
-  lines.push(
-    `PHYSICAL ACCURACY: Any person rendered must be anatomically correct — 5-fingered hands, symmetric matching eyes, ` +
-    `natural skin texture, real body proportions. No extra digits, warped features, or impossible angles. ` +
-    `If the reference shows a person, preserve their face, hair, skin tone, and identity throughout — no morphing mid-shot.`
-  );
-  // Reference position 1 is a product-only shot of the exact catalog SKU,
-  // guaranteed by buildReferenceImages (falls back to CatalogProduct.imageUrl
-  // when catalog Media lacks a product_only classification). hasProductReference
-  // reflects whether that guarantee held — false only when both sources are
-  // missing (rare data hole; logged as a warning upstream).
+  lines.push(d.physicalAccuracy);
+
+  // Reference stack: position 0 is the seed (main image); subsequent
+  // positions are the product hero + alternate views in stored order
+  // (buildReferenceImages). hasProductReference is false only when the
+  // stack is seed-only (no product imagery available, or a 1-ref model).
   if (hasProductReference) {
     lines.push(
-      `PRODUCT FIDELITY: Reference image #2 (position 1) is a product-only shot of the exact catalog SKU. ` +
-      `It is the ABSOLUTE source of truth for shape, color, label text, packaging, and proportions. ` +
-      `If the scene image (position 0) and this product reference disagree on any product detail, the PRODUCT reference wins. ` +
-      `Do NOT reinterpret, shift colors, or generate a similar-but-different variant — render exactly what the product reference shows.`
+      `PRODUCT FIDELITY: All supplied images show the exact catalog SKU — the first image is the primary scene, ` +
+      `the rest are additional views of the same product. Together they are the ABSOLUTE source of truth for shape, color, ` +
+      `label text, packaging, and proportions. If any images disagree on a detail, the dedicated product shots win over the scene image. ` +
+      `Do NOT blend the views into new angles, reinterpret the label, shift colors, or generate a similar-but-different variant.`
     );
   } else {
     lines.push(
@@ -290,49 +368,40 @@ function buildVeoPrompt({
     );
   }
 
-  lines.push(
-    `PRODUCT VIEWS: Show only product angles, orientations, and faces visible in the references. ` +
-    `Do NOT rotate, tilt, unwrap, or reveal unseen sides. The product is observed as a static object, not showcased.`
-  );
+  lines.push(d.doNot);
 
   lines.push(
-    `MOTION LIMITS: No product rotation or orbit. No dolly moves exposing new product faces. ` +
-    `No zoom past the reference composition. No fantasy motion — no sparkles, particles, lens flares, floating props, morphing, or dissolves.`
+    `Output: ${Number(durationSec || 8).toFixed(1)}s duration. Camera movement only. Product unchanged. Luxury ecommerce aesthetic. ` +
+    `Final result should look like a professional camera moving over the original photographs, with no sign that AI touched the product.`
   );
 
-  lines.push(
-    `NO STYLIZATION: Documentary capture, not a stylized ad. Prohibited: CGI-glossy surfaces, volumetric fog beams, ` +
-    `unrealistic bokeh, animated logos, magical highlights not in the seed, product colors differing from the reference.`
-  );
-
-  // Atlas rejects prompts > 4096 bytes with a hard 400. Real prod
-  // traffic (long product descriptions, verbose storyboards, subject
-  // framing lines) can exceed even after the tightened blocks. When
-  // over budget, drop optional context lines in defined priority order.
-  // Directive blocks (fidelity / no-text / motion-limits / etc.) are
-  // never dropped — they're the load-bearing part of the prompt.
-  return enforceByteCap(lines);
+  // Per-model size cap (caps.promptByteCap; Gemini Omni 20,000, Grok
+  // 4,096). When over budget, drop optional context lines in defined
+  // priority order. Directive blocks (preservation / fidelity / no-text
+  // / timeline) are never dropped — they're the load-bearing part.
+  return enforceByteCap(lines, caps);
 }
 
-const GROK_BYTE_CAP     = 4096;
-const GROK_BYTE_TARGET  = 4000;   // 96-byte safety margin
+
+const DEFAULT_BYTE_CAP = 4096;   // legacy Grok/Veo cap — used when caps is absent
+const BYTE_CAP_MARGIN  = 96;     // safety margin under the hard cap
 const DROP_PRIORITY = [
-  /^Mood: /,
-  /^Vibe: /,
-  /^Brand essence: /,
-  /^Energy and feel: /,
-  /^Visual treatment: /,
-  /^Brand voice: /
+  /^Product: /,
+  /^PHYSICAL ACCURACY: /,
+  /^Transitions: /,
+  /^Visual style: /
 ];
 
-function enforceByteCap(lines) {
+function enforceByteCap(lines, caps = null) {
+  const cap    = caps?.promptByteCap || DEFAULT_BYTE_CAP;
+  const target = cap - BYTE_CAP_MARGIN;
   let prompt = lines.join(' ');
   let bytes  = Buffer.byteLength(prompt, 'utf8');
-  if (bytes <= GROK_BYTE_TARGET) return prompt;
+  if (bytes <= target) return prompt;
 
   const dropped = [];
   for (const pattern of DROP_PRIORITY) {
-    if (bytes <= GROK_BYTE_TARGET) break;
+    if (bytes <= target) break;
     const idx = lines.findIndex(l => pattern.test(l));
     if (idx < 0) continue;
     dropped.push(lines[idx].split(':')[0]);
@@ -341,10 +410,10 @@ function enforceByteCap(lines) {
     bytes  = Buffer.byteLength(prompt, 'utf8');
   }
 
-  if (bytes > GROK_BYTE_CAP) {
-    console.warn(`⚠️  veoPrompt: ${bytes} bytes still exceeds Grok cap (4096) after dropping [${dropped.join(', ')}] — Atlas will reject`);
+  if (bytes > cap) {
+    console.warn(`⚠️  veoPrompt: ${bytes} bytes still exceeds the model's prompt cap (${cap}) after dropping [${dropped.join(', ')}] — Atlas will reject`);
   } else if (dropped.length) {
-    console.log(`ℹ️  veoPrompt: dropped [${dropped.join(', ')}] to fit under ${GROK_BYTE_TARGET} bytes (final=${bytes})`);
+    console.log(`ℹ️  veoPrompt: dropped [${dropped.join(', ')}] to fit under ${target} bytes (final=${bytes}, cap=${cap})`);
   }
   return prompt;
 }
@@ -355,5 +424,8 @@ module.exports = {
   archetypeDescription,
   archetypeNegativeSpaceGuidance,
   aspectRatioForPlatformFormat,
-  PLATFORM_FORMAT_ASPECT
+  PLATFORM_FORMAT_ASPECT,
+  promptProfileFor,
+  PROMPT_PROFILES
 };
+

@@ -14,13 +14,12 @@
 //     3.1 ships true multi-Ad batching when the orchestration is in
 //     place; the artifact already supports judgments[N].
 
-const OpenAI = require('openai');
 const crypto = require('crypto');
 
 const AiJudgeResultArtifact = require('../models/AiJudgeResultArtifact');
 const { trackLlmCall } = require('./costTracker');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 const DEFAULT_JUDGE_MODEL = process.env.JUDGE_MODEL || 'gpt-4.1-mini';
 const TEMPERATURE         = 0.0;  // judgement should be deterministic-ish
@@ -64,7 +63,7 @@ async function judgeCandidates({
   const responseSchema = buildResponseSchema(candidates.length);
 
   const t0 = Date.now();
-  const completion = await trackLlmCall(
+  const completion = await chatCompletion(
     {
       stage:      'judge',
       provider:   'openai',
@@ -74,7 +73,7 @@ async function judgeCandidates({
       visionImages: 0,
       cacheKey: `judge:${aiCanvasArtifactId || '-'}`
     },
-    () => openai.chat.completions.create({
+    {
       model:           DEFAULT_JUDGE_MODEL,
       response_format: { type: 'json_schema', json_schema: responseSchema },
       messages: [
@@ -83,7 +82,7 @@ async function judgeCandidates({
       ],
       temperature: TEMPERATURE,
       max_tokens:  MAX_TOKENS
-    })
+    }
   );
   const durationMs = Date.now() - t0;
 
@@ -408,7 +407,7 @@ async function judgeConceptsRound({
   const responseSchema = buildConceptRoundResponseSchema(concepts.length);
 
   const t0 = Date.now();
-  const completion = await trackLlmCall(
+  const completion = await chatCompletion(
     {
       stage:      'judge_concept_round',
       provider:   'openai',
@@ -418,7 +417,7 @@ async function judgeConceptsRound({
       visionImages: 0,
       cacheKey:   `judgeConcepts:${conceptArtifactId || '-'}`
     },
-    () => openai.chat.completions.create({
+    {
       model:           DEFAULT_JUDGE_MODEL,
       response_format: { type: 'json_schema', json_schema: responseSchema },
       messages: [
@@ -427,7 +426,7 @@ async function judgeConceptsRound({
       ],
       temperature: TEMPERATURE,
       max_tokens:  MAX_TOKENS
-    })
+    }
   );
   const durationMs = Date.now() - t0;
 

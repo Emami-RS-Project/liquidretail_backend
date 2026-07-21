@@ -15,14 +15,12 @@
 //     (Lever 1 — caching at the right axis.)
 
 const crypto = require('crypto');
-const OpenAI = require('openai');
 
 const Brand                   = require('../models/Brand');
 const CatalogProduct          = require('../models/CatalogProduct');
 const CopyCandidatesArtifact  = require('../models/CopyCandidatesArtifact');
-const { trackLlmCall, recordCacheHit } = require('./costTracker');
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { recordCacheHit } = require('./costTracker');
+const { chatCompletion } = require('./atlasLlmService');
 
 const DEFAULT_MODEL = process.env.COPY_DERIVATION_MODEL || 'gpt-4.1-mini';
 const TEMPERATURE   = 0.85;     // need real per-slot variety
@@ -117,17 +115,18 @@ async function deriveCopy({
   const responseSchema = buildResponseSchema();
 
   const t0 = Date.now();
-  const completion = await trackLlmCall(
+  // Atlas gateway (direct-OpenAI fallback inside) — chatCompletion owns
+  // the trackLlmCall wrap; ledger fields pass through in meta.
+  const completion = await chatCompletion(
     {
       stage:      'copy_derivation',
-      provider:   'openai',
-      model:      DEFAULT_MODEL,
+      service:    'copyDerivationService',
       purposeTag: creativeStyle,
       brandId, productId,
       visionImages: 0,
       cacheKey
     },
-    () => openai.chat.completions.create({
+    {
       model:           DEFAULT_MODEL,
       response_format: { type: 'json_schema', json_schema: responseSchema },
       messages: [
@@ -136,7 +135,7 @@ async function deriveCopy({
       ],
       temperature: TEMPERATURE,
       max_tokens:  MAX_TOKENS
-    })
+    }
   );
   const durationMs = Date.now() - t0;
 

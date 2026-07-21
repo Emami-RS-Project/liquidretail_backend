@@ -10,12 +10,11 @@
 // Triggered manually via POST /api/brands/:id/derive-voice (validation
 // runs) and on a nightly cron once the profile is older than the TTL.
 
-const OpenAI = require('openai');
 const Brand = require('../models/Brand');
 const Campaign = require('../models/Campaign');
 const { trackLlmCall } = require('./costTracker');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 const MODEL_ID       = 'gpt-4o-mini';
 const PROMPT_VERSION = '1.0.0';
@@ -206,7 +205,7 @@ async function deriveBrandVoice(brandId, { force = false } = {}) {
   const user   = buildUserPrompt({ brand, corpus });
 
   const t0 = Date.now();
-  const completion = await trackLlmCall(
+  const completion = await chatCompletion(
     {
       stage:      'brand_voice',
       provider:   'openai',
@@ -216,7 +215,7 @@ async function deriveBrandVoice(brandId, { force = false } = {}) {
       visionImages: 0,
       cacheKey:   null
     },
-    () => openai.chat.completions.create({
+    {
       model:           MODEL_ID,
       response_format: { type: 'json_schema', json_schema: RESPONSE_SCHEMA },
       messages: [
@@ -225,7 +224,7 @@ async function deriveBrandVoice(brandId, { force = false } = {}) {
       ],
       temperature: TEMPERATURE,
       max_tokens:  MAX_TOKENS
-    })
+    }
   );
 
   const raw = completion.choices?.[0]?.message?.content;

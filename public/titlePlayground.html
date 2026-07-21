@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Title Playground</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: #0e1117; color: #e6e8ee; }
+  header { padding: 10px 16px; background: #161b26; border-bottom: 1px solid #232a3a; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  header b { margin-right: 8px; }
+  input, select, button, textarea { font: inherit; background: #0e1117; color: #e6e8ee; border: 1px solid #2b3347; border-radius: 6px; padding: 6px 8px; }
+  input:focus, textarea:focus { outline: 1px solid #4a90d9; }
+  button { background: #1e2836; cursor: pointer; }
+  button:hover { background: #263349; }
+  button.primary { background: #2563eb; border-color: #2563eb; }
+  main { display: grid; grid-template-columns: 380px 1fr; gap: 0; height: calc(100vh - 58px); }
+  #left { border-right: 1px solid #232a3a; overflow-y: auto; padding: 14px; }
+  #right { overflow-y: auto; padding: 14px; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  .row label { min-width: 92px; color: #9aa4b8; font-size: 12px; }
+  .row input[type=range] { flex: 1; }
+  .row .val { min-width: 46px; text-align: right; font-variant-numeric: tabular-nums; color: #cfd6e4; }
+  fieldset { border: 1px solid #232a3a; border-radius: 8px; margin: 0 0 14px; padding: 10px 12px; }
+  legend { color: #9aa4b8; font-size: 12px; padding: 0 6px; }
+  #frames { display: flex; gap: 12px; flex-wrap: wrap; }
+  #frames figure { margin: 0; }
+  #frames .shot { position: relative; display: inline-block; }
+  #frames img { max-height: 62vh; border-radius: 8px; border: 1px solid #232a3a; display: block; }
+  #frames figcaption { text-align: center; color: #9aa4b8; font-size: 12px; margin-top: 4px; }
+  /* Visibility-scan band overlays — extents mirror plateIntelService BANDS */
+  .band { position: absolute; left: 0; right: 0; border: 1px dashed rgba(148,163,184,0.55); pointer-events: none; }
+  .band.avoid { background: rgba(248,113,113,0.16); border-color: rgba(248,113,113,0.8); }
+  .band span { position: absolute; top: 1px; left: 4px; font-size: 10px; color: rgba(203,213,225,0.85); text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
+  .chips { display: flex; gap: 6px; justify-content: center; margin-top: 3px; }
+  .chips i { font: 10px/1.6 ui-monospace, monospace; font-style: normal; color: #9aa4b8; background: #161b26; border: 1px solid #232a3a; border-radius: 4px; padding: 0 5px; }
+  .chips i.avoid { color: #f87171; border-color: #7f1d1d; }
+
+  /* ── Meta placement chrome (preview-only overlays; --u = 1% of still width) ── */
+  .shot { --u: 4px; }
+  .mo { position: absolute; inset: 0; pointer-events: none; color: #fff; font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; overflow: hidden; border-radius: 8px; }
+  .mo svg { display: block; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .mo .grad-b { position: absolute; left: 0; right: 0; bottom: 0; height: 42%; background: linear-gradient(transparent, rgba(0,0,0,.62)); }
+  .mo .grad-t { position: absolute; left: 0; right: 0; top: 0; height: 18%; background: linear-gradient(rgba(0,0,0,.5), transparent); }
+  .mo .av { border-radius: 50%; background: #cdd3dd; color: #333; display: flex; align-items: center; justify-content: center; font-weight: 700; overflow: hidden; flex: none; }
+  .mo .av img { width: 100%; height: 100%; object-fit: cover; }
+  /* Reels */
+  .mo-rail { position: absolute; right: calc(var(--u)*4); bottom: calc(var(--u)*16); display: flex; flex-direction: column; align-items: center; gap: calc(var(--u)*5.2); }
+  .mo-rail .ic { width: calc(var(--u)*6.6); height: calc(var(--u)*6.6); }
+  .mo-rail b { display: block; font-size: calc(var(--u)*2.9); font-weight: 600; text-align: center; margin-top: calc(var(--u)*0.8); text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+  .mo-bl { position: absolute; left: calc(var(--u)*4); right: calc(var(--u)*16); bottom: calc(var(--u)*4); display: flex; flex-direction: column; gap: calc(var(--u)*2.6); }
+  .mo-user { display: flex; align-items: center; gap: calc(var(--u)*2.2); font-size: calc(var(--u)*3.6); font-weight: 700; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+  .mo-user .av { width: calc(var(--u)*8); height: calc(var(--u)*8); font-size: calc(var(--u)*4); }
+  .mo-user span { font-weight: 400; font-size: calc(var(--u)*3.1); opacity: .9; }
+  .mo-cap { font-size: calc(var(--u)*3.3); line-height: 1.35; text-shadow: 0 1px 2px rgba(0,0,0,.6); opacity: .96; }
+  .mo-cap b { font-weight: 600; opacity: .8; }
+  .mo-ctabar { display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,.94); color: #111; border-radius: calc(var(--u)*1.8); padding: calc(var(--u)*2.4) calc(var(--u)*3.2); font-size: calc(var(--u)*3.6); font-weight: 700; }
+  .mo-ctabar svg { stroke: #111; filter: none; width: calc(var(--u)*4); height: calc(var(--u)*4); }
+  .mo-music { display: flex; align-items: center; gap: calc(var(--u)*1.8); font-size: calc(var(--u)*3.1); text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+  .mo-music svg { width: calc(var(--u)*3.4); height: calc(var(--u)*3.4); }
+  /* Stories */
+  .mo-progress { position: absolute; top: calc(var(--u)*2); left: calc(var(--u)*2); right: calc(var(--u)*2); display: flex; gap: calc(var(--u)*1); }
+  .mo-progress i { flex: 1; height: calc(var(--u)*0.9); border-radius: calc(var(--u)*0.45); background: rgba(255,255,255,.35); }
+  .mo-progress i.on { background: #fff; }
+  .mo-sttop { position: absolute; top: calc(var(--u)*4.6); left: calc(var(--u)*3); right: calc(var(--u)*3); display: flex; align-items: center; gap: calc(var(--u)*2.2); font-size: calc(var(--u)*3.4); font-weight: 700; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+  .mo-sttop .av { width: calc(var(--u)*7); height: calc(var(--u)*7); font-size: calc(var(--u)*3.5); }
+  .mo-sttop span { font-weight: 400; font-size: calc(var(--u)*3); opacity: .9; }
+  .mo-sttop .x { margin-left: auto; width: calc(var(--u)*5.5); height: calc(var(--u)*5.5); }
+  .mo-stcta { position: absolute; bottom: calc(var(--u)*4); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: calc(var(--u)*1.6); }
+  .mo-stcta svg { width: calc(var(--u)*5); height: calc(var(--u)*5); }
+  .mo-stcta b { background: #fff; color: #111; border-radius: calc(var(--u)*5); padding: calc(var(--u)*2) calc(var(--u)*5); font-size: calc(var(--u)*3.5); font-weight: 700; }
+  /* Feed cards (chrome outside the media) */
+  .metacard { --u: 4px; display: inline-block; background: #fff; color: #111; border-radius: 10px; overflow: hidden; font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; text-align: left; }
+  .metacard .shot { display: block; }
+  .metacard .shot img { border: none; border-radius: 0; }
+  .metacard svg { display: inline-block; vertical-align: middle; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .metacard .av { border-radius: 50%; background: #dfe3ea; color: #333; display: flex; align-items: center; justify-content: center; font-weight: 700; overflow: hidden; flex: none; }
+  .metacard .av img { width: 100%; height: 100%; object-fit: cover; }
+  .mc-head { display: flex; align-items: center; gap: calc(var(--u)*2.4); padding: calc(var(--u)*2.6) calc(var(--u)*3.2); }
+  .mc-head .av { width: calc(var(--u)*8); height: calc(var(--u)*8); font-size: calc(var(--u)*4); }
+  .mc-head .who { line-height: 1.25; }
+  .mc-head .who b { display: block; font-size: calc(var(--u)*3.5); }
+  .mc-head .who span { font-size: calc(var(--u)*3); color: #737373; display: flex; align-items: center; gap: calc(var(--u)*1); }
+  .mc-head .dots { margin-left: auto; width: calc(var(--u)*5); height: calc(var(--u)*5); color: #262626; }
+  .mc-cta { display: flex; align-items: center; justify-content: space-between; padding: calc(var(--u)*2.8) calc(var(--u)*3.2); color: #0095f6; font-weight: 700; font-size: calc(var(--u)*3.5); border-bottom: 1px solid #efefef; }
+  .mc-cta svg { width: calc(var(--u)*4); height: calc(var(--u)*4); }
+  .mc-actions { display: flex; align-items: center; gap: calc(var(--u)*4); padding: calc(var(--u)*2.8) calc(var(--u)*3.2) calc(var(--u)*1.6); color: #262626; }
+  .mc-actions svg { width: calc(var(--u)*6); height: calc(var(--u)*6); }
+  .mc-actions .save { margin-left: auto; }
+  .mc-likes { padding: 0 calc(var(--u)*3.2); font-weight: 700; font-size: calc(var(--u)*3.4); }
+  .mc-cap { padding: calc(var(--u)*1.2) calc(var(--u)*3.2) calc(var(--u)*3); font-size: calc(var(--u)*3.3); line-height: 1.4; color: #262626; }
+  .mc-cap b { font-weight: 700; }
+  .mc-cap .more { color: #737373; }
+  .mc-text { padding: 0 calc(var(--u)*3.2) calc(var(--u)*2.6); font-size: calc(var(--u)*3.5); line-height: 1.4; color: #050505; }
+  .mc-link { display: flex; align-items: center; justify-content: space-between; gap: calc(var(--u)*3); background: #f0f2f5; padding: calc(var(--u)*2.6) calc(var(--u)*3.2); }
+  .mc-link .meta { min-width: 0; }
+  .mc-link .meta i { display: block; font-style: normal; font-size: calc(var(--u)*2.9); color: #65676b; text-transform: uppercase; }
+  .mc-link .meta b { display: block; font-size: calc(var(--u)*3.6); color: #050505; }
+  .mc-link .meta span { display: block; font-size: calc(var(--u)*3.1); color: #65676b; }
+  .mc-link button { flex: none; background: #e4e6eb; color: #050505; border: none; border-radius: calc(var(--u)*1.5); font-weight: 700; font-size: calc(var(--u)*3.3); padding: calc(var(--u)*2.2) calc(var(--u)*3.6); }
+  .mc-fbactions { display: flex; border-top: 1px solid #e4e6eb; margin-top: calc(var(--u)*0.5); }
+  .mc-fbactions div { flex: 1; display: flex; align-items: center; justify-content: center; gap: calc(var(--u)*1.6); color: #65676b; font-weight: 700; font-size: calc(var(--u)*3.3); padding: calc(var(--u)*2.6) 0; }
+  .mc-fbactions svg { width: calc(var(--u)*4.4); height: calc(var(--u)*4.4); }
+  #status { color: #9aa4b8; font-size: 12px; min-height: 18px; margin: 6px 0; }
+  #specText { width: 100%; height: 260px; font: 12px/1.4 ui-monospace, monospace; white-space: pre; }
+  .err { color: #f87171; }
+  .ok { color: #4ade80; }
+  small.hint { color: #6b7488; display: block; margin-top: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <b>🎬 Title Playground</b>
+  <input id="token" placeholder="Bearer token" size="24" type="password">
+  <input id="advertiser" placeholder="X-Advertiser-Id (optional)" size="20">
+  <input id="brandId" placeholder="Brand ID" size="22">
+  <input id="adId" placeholder="Ad ID (optional — real footage)" size="24" title="render stills over this ad's actual base video, the same footage the visibility scan analyzes">
+  <select id="format"><option>vertical</option><option>feed</option><option>landscape</option></select>
+  <select id="scale"><option value="0.35">fast (0.35×)</option><option value="0.5" selected>medium (0.5×)</option><option value="0.75">sharp (0.75×)</option></select>
+  <input id="frameTimes" value="1.5, 4.5" size="10" title="frame times in seconds (max 4) — with an Ad ID this auto-fills to the visibility scan's sample times until you edit it">
+  <label style="font-size:12px;color:#9aa4b8"><input type="checkbox" id="showBands"> scan bands</label>
+  <select id="metaOverlay" title="Meta placement chrome — see exactly what the platform draws over/around the creative"></select>
+  <button id="loadBtn" class="primary">Load brand</button>
+  <button id="renderBtn">Render</button>
+  <button id="saveBtn">Save spec</button>
+</header>
+<main>
+  <div id="left">
+    <div id="status"></div>
+    <fieldset>
+      <legend>Quick controls</legend>
+      <div class="row"><label>Slot</label><select id="slotSel" style="flex:1"></select>
+        <label style="min-width:auto"><input type="checkbox" id="slotVisible"> visible</label></div>
+      <div class="row"><label>Anchor</label><select id="anchor"><option>top</option><option>upperThird</option><option>center</option><option>lowerThird</option><option>bottom</option></select>
+        <label style="min-width:auto">Align</label><select id="align"><option>left</option><option>center</option><option>right</option></select></div>
+      <div class="row"><label>Size ×</label><input type="range" id="sizeScale" min="0.5" max="2" step="0.05"><span class="val" id="sizeScaleV"></span></div>
+      <div class="row"><label>Offset X</label><input type="range" id="offsetX" min="-0.25" max="0.25" step="0.005"><span class="val" id="offsetXV"></span></div>
+      <div class="row"><label>Offset Y</label><input type="range" id="offsetY" min="-0.25" max="0.25" step="0.005"><span class="val" id="offsetYV"></span></div>
+      <div class="row"><label>Max width</label><input type="range" id="maxWidthPct" min="0.2" max="1" step="0.01"><span class="val" id="maxWidthPctV"></span></div>
+      <div class="row"><label>Tracking</label><input type="range" id="trackingPx" min="0" max="8" step="0.5"><span class="val" id="trackingPxV"></span></div>
+      <div class="row"><label>Weight</label><input type="range" id="weight" min="100" max="900" step="100"><span class="val" id="weightV"></span></div>
+      <div class="row"><label>Shadow</label><select id="shadow"><option>layered</option><option>soft</option><option>none</option></select>
+        <label style="min-width:auto">Casing</label><select id="casing"><option>none</option><option>upper</option><option>title</option></select></div>
+      <div class="row"><label>Transition</label><select id="trType"><option>fade</option><option>slide</option><option>pop</option><option>wipe</option><option>none</option></select>
+        <select id="trDir"><option>up</option><option>down</option><option>left</option><option>right</option></select></div>
+      <div class="row"><label>Enter at (s)</label><input type="number" id="enterAtSec" min="0" max="14" step="0.1" style="width:80px">
+        <label style="min-width:auto">for (s)</label><input type="number" id="enterDurationSec" min="0" max="2" step="0.05" style="width:80px"></div>
+      <small class="hint">Changes re-render automatically (debounced).</small>
+    </fieldset>
+    <fieldset>
+      <legend>AI modify (whole spec)</legend>
+      <div class="row"><input id="aiRequest" placeholder='e.g. "move the quote to the bottom and make the CTA slide in at 5s" — Enter applies' style="flex:1"></div>
+      <div class="row"><button id="aiBtn">Modify with AI</button><span id="aiStatus"></span></div>
+    </fieldset>
+    <fieldset>
+      <legend>Spec JSON (editable)</legend>
+      <textarea id="specText" spellcheck="false"></textarea>
+    </fieldset>
+  </div>
+  <div id="right">
+    <div id="frames"></div>
+  </div>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const state = { spec: null, specDoc: null, rendering: false, pendingRender: false, lastData: null, frameTimesTouched: false, brand: null };
+  const SLIDERS = ['sizeScale', 'offsetX', 'offsetY', 'maxWidthPct', 'trackingPx', 'weight'];
+  // Band extents mirror plateIntelService BANDS (fractions of plate height).
+  const SCAN_BANDS = { top: [0.06, 0.38], middle: [0.38, 0.6], bottom: [0.54, 0.92] };
+
+  // ── Meta placement chrome (preview-only; never rendered into video) ──
+  const LOREM = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore';
+  const LOREM_SHORT = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit.';
+  const OVERLAYS_BY_FORMAT = {
+    vertical:  [['none', 'no overlay'], ['reels', 'Instagram Reels'], ['stories', 'Instagram Stories']],
+    feed:      [['none', 'no overlay'], ['ig-feed', 'Instagram Feed'], ['fb-feed', 'Facebook Feed']],
+    landscape: [['none', 'no overlay'], ['fb-feed', 'Facebook Feed (16:9)']],
+  };
+  const ICON = {
+    heart: '<path d="M12 21C10 19.5 3 14.6 3 9.3 3 6.4 5.3 4 8.1 4c1.6 0 3 .8 3.9 2 .9-1.2 2.3-2 3.9-2C18.7 4 21 6.4 21 9.3c0 5.3-7 10.2-9 11.7z"/>',
+    comment: '<path d="M12 20.5c4.7 0 8.5-3.4 8.5-8S16.7 4.5 12 4.5 3.5 7.9 3.5 12.5c0 1.7.5 3.2 1.4 4.5L4 21l4.1-1.1c1.2.4 2.5.6 3.9.6z"/>',
+    send: '<path d="M21 3L10.5 13.5M21 3l-6.5 18-4-7.5L3 9.5 21 3z"/>',
+    bookmark: '<path d="M6 3.5h12V21l-6-4.3L6 21V3.5z"/>',
+    dots: '<g fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></g>',
+    music: '<path d="M9 17.5V6l11-2v11.5"/><g fill="currentColor" stroke="none"><circle cx="7" cy="17.5" r="2.2"/><circle cx="18" cy="15.5" r="2.2"/></g>',
+    x: '<path d="M5 5l14 14M19 5L5 19"/>',
+    chevR: '<path d="M9 5l7 7-7 7"/>',
+    chevU: '<path d="M5 15l7-7 7 7"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.5 3.8 5.6 3.8 9s-1.3 6.5-3.8 9m0-18C9.5 5.5 8.2 8.6 8.2 12s1.3 6.5 3.8 9"/>',
+    thumb: '<path d="M7 10.5V21H4.5A1.5 1.5 0 0 1 3 19.5v-7.5a1.5 1.5 0 0 1 1.5-1.5H7zm0 0l4-8a2.5 2.5 0 0 1 2.5 2.5V9H19a2 2 0 0 1 2 2.3l-1.2 7A2 2 0 0 1 17.8 20H7"/>',
+    shareFb: '<path d="M14 9.5l6.5-5.5v15L14 13.5v3C7.5 16.5 4.5 19 3.5 21.5c0-7 3.5-11.5 10.5-12v-4z"/>',
+  };
+  const svgIcon = (name, cls) => '<svg class="' + (cls || 'ic') + '" viewBox="0 0 24 24">' + ICON[name] + '</svg>';
+  const brandHandle = () => (state.brand?.handle ? '@' + state.brand.handle : '@brand');
+  const avatarHtml = () => state.brand?.logoUrl
+    ? '<i class="av"><img src="' + state.brand.logoUrl + '" alt=""></i>'
+    : '<i class="av">' + (state.brand?.name || 'B').slice(0, 1).toUpperCase() + '</i>';
+
+  function buildReelsOverlay() {
+    const el = document.createElement('div');
+    el.className = 'mo mo-reels';
+    el.innerHTML =
+      '<div class="grad-b"></div>' +
+      '<div class="mo-rail">' +
+        '<div>' + svgIcon('heart') + '<b>12.4K</b></div>' +
+        '<div>' + svgIcon('comment') + '<b>342</b></div>' +
+        '<div>' + svgIcon('send') + '</div>' +
+        '<div>' + svgIcon('bookmark') + '</div>' +
+        '<div>' + svgIcon('dots') + '</div>' +
+      '</div>' +
+      '<div class="mo-bl">' +
+        '<div class="mo-user">' + avatarHtml() + ' ' + brandHandle() + ' <span>Sponsored</span></div>' +
+        '<div class="mo-cap">' + LOREM.slice(0, 92) + '&hellip; <b>more</b></div>' +
+        '<div class="mo-ctabar">Shop now ' + svgIcon('chevR', '') + '</div>' +
+        '<div class="mo-music">' + svgIcon('music', '') + ' Lorem Ipsum &middot; Original audio</div>' +
+      '</div>';
+    return el;
+  }
+
+  function buildStoriesOverlay() {
+    const el = document.createElement('div');
+    el.className = 'mo mo-stories';
+    el.innerHTML =
+      '<div class="grad-t"></div><div class="grad-b" style="height:24%"></div>' +
+      '<div class="mo-progress"><i class="on"></i><i></i></div>' +
+      '<div class="mo-sttop">' + avatarHtml() + ' ' + brandHandle() + ' <span>Sponsored</span>' + svgIcon('x', 'x') + '</div>' +
+      '<div class="mo-stcta">' + svgIcon('chevU', '') + '<b>Shop now</b></div>';
+    return el;
+  }
+
+  function wrapIgCard(shot) {
+    const card = document.createElement('div');
+    card.className = 'metacard mc-ig';
+    const head = document.createElement('div');
+    head.className = 'mc-head';
+    head.innerHTML = avatarHtml() + '<div class="who"><b>' + brandHandle().slice(1) + '</b><span>Sponsored</span></div>' + svgIcon('dots', 'dots');
+    const cta = document.createElement('div');
+    cta.className = 'mc-cta';
+    cta.innerHTML = 'Shop now ' + svgIcon('chevR', '');
+    const actions = document.createElement('div');
+    actions.className = 'mc-actions';
+    actions.innerHTML = svgIcon('heart', '') + svgIcon('comment', '') + svgIcon('send', '') + svgIcon('bookmark', 'save');
+    const likes = document.createElement('div');
+    likes.className = 'mc-likes';
+    likes.textContent = '1,248 likes';
+    const cap = document.createElement('div');
+    cap.className = 'mc-cap';
+    cap.innerHTML = '<b>' + brandHandle().slice(1) + '</b> ' + LOREM.slice(0, 64) + '&hellip; <span class="more">more</span>';
+    card.append(head, shot, cta, actions, likes, cap);
+    return card;
+  }
+
+  function wrapFbCard(shot) {
+    const card = document.createElement('div');
+    card.className = 'metacard mc-fb';
+    const head = document.createElement('div');
+    head.className = 'mc-head';
+    head.innerHTML = avatarHtml() + '<div class="who"><b>' + (state.brand?.name || 'Brand') + '</b><span>Sponsored &middot; ' + svgIcon('globe', '') + '</span></div>' + svgIcon('dots', 'dots');
+    head.querySelector('.who span svg').style.cssText = 'width:calc(var(--u)*3);height:calc(var(--u)*3)';
+    const text = document.createElement('div');
+    text.className = 'mc-text';
+    text.textContent = LOREM_SHORT + ' ✨';
+    const link = document.createElement('div');
+    link.className = 'mc-link';
+    link.innerHTML = '<div class="meta"><i>loremipsum.com</i><b>Lorem ipsum dolor sit amet</b><span>Consectetur adipiscing elit</span></div><button>Shop Now</button>';
+    const actions = document.createElement('div');
+    actions.className = 'mc-fbactions';
+    actions.innerHTML = '<div>' + svgIcon('thumb', '') + ' Like</div><div>' + svgIcon('comment', '') + ' Comment</div><div>' + svgIcon('shareFb', '') + ' Share</div>';
+    card.append(head, text, shot, link, actions);
+    return card;
+  }
+
+  function populateOverlayOptions() {
+    const sel = $('metaOverlay');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (const [val, label] of OVERLAYS_BY_FORMAT[$('format').value] || [['none', 'no overlay']]) {
+      const o = document.createElement('option');
+      o.value = val;
+      o.textContent = label;
+      sel.appendChild(o);
+    }
+    if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+  }
+
+  const api = async (method, path, body) => {
+    const headers = { 'Authorization': 'Bearer ' + $('token').value.trim() };
+    if ($('advertiser').value.trim()) headers['X-Advertiser-Id'] = $('advertiser').value.trim();
+    if (body) headers['Content-Type'] = 'application/json';
+    const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.status);
+    return data;
+  };
+  const status = (msg, cls) => { $('status').innerHTML = '<span class="' + (cls || '') + '">' + msg + '</span>'; };
+
+  const currentSlot = () => state.spec?.slots?.find((s) => s.key === $('slotSel').value);
+
+  function syncControlsFromSlot() {
+    const s = currentSlot();
+    if (!s) return;
+    $('slotVisible').checked = s.visible !== false;
+    $('anchor').value = s.position.anchor; $('align').value = s.position.align;
+    $('sizeScale').value = s.treatment.sizeScale; $('offsetX').value = s.position.offsetX;
+    $('offsetY').value = s.position.offsetY; $('maxWidthPct').value = s.position.maxWidthPct;
+    $('trackingPx').value = s.treatment.trackingPx; $('weight').value = s.treatment.weight;
+    $('shadow').value = s.treatment.shadow; $('casing').value = s.treatment.casing;
+    $('trType').value = s.transition.type; $('trDir').value = s.transition.direction;
+    $('enterAtSec').value = s.timing.enterAtSec; $('enterDurationSec').value = s.timing.enterDurationSec;
+    SLIDERS.forEach((k) => { $(k + 'V').textContent = $(k).value; });
+  }
+
+  function writeControlsToSlot() {
+    const s = currentSlot();
+    if (!s) return;
+    s.visible = $('slotVisible').checked;
+    s.position.anchor = $('anchor').value; s.position.align = $('align').value;
+    s.position.offsetX = +$('offsetX').value; s.position.offsetY = +$('offsetY').value;
+    s.position.maxWidthPct = +$('maxWidthPct').value;
+    s.treatment.sizeScale = +$('sizeScale').value; s.treatment.trackingPx = +$('trackingPx').value;
+    s.treatment.weight = +$('weight').value; s.treatment.shadow = $('shadow').value;
+    s.treatment.casing = $('casing').value;
+    s.transition.type = $('trType').value; s.transition.direction = $('trDir').value;
+    s.timing.enterAtSec = +$('enterAtSec').value; s.timing.enterDurationSec = +$('enterDurationSec').value;
+    SLIDERS.forEach((k) => { $(k + 'V').textContent = $(k).value; });
+    $('specText').value = JSON.stringify(state.spec, null, 2);
+  }
+
+  function setSpec(spec) {
+    state.spec = spec;
+    $('specText').value = JSON.stringify(spec, null, 2);
+    const sel = $('slotSel');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (const s of spec.slots) { const o = document.createElement('option'); o.textContent = s.key; sel.appendChild(o); }
+    if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    syncControlsFromSlot();
+  }
+
+  async function render() {
+    if (!state.spec) return;
+    if (state.rendering) { state.pendingRender = true; return; }
+    state.rendering = true;
+    const t0 = Date.now();
+    status('rendering…');
+    try {
+      const frames = $('frameTimes').value.split(',').map(Number).filter((n) => !isNaN(n)).slice(0, 4);
+      const body = { format: $('format').value, spec: state.spec, frames, scale: +$('scale').value };
+      const adId = $('adId').value.trim();
+      if (adId) body.adId = adId;
+      const data = await api('POST', '/api/brand/' + $('brandId').value.trim() + '/title-still', body);
+      state.lastData = data;
+      drawFrames();
+      // First render against an ad: default the frame times to the scan's
+      // own sample times (until the operator edits the field) and re-render
+      // once — you're then literally previewing on the scanned frames.
+      if (adId && !state.frameTimesTouched && Array.isArray(data.scanSampleTimes) && data.scanSampleTimes.length) {
+        // Render path caps at 4 frames — never imply a 5th that won't exist.
+        const scanVal = data.scanSampleTimes.slice(0, 4).join(', ');
+        if ($('frameTimes').value.replace(/\s/g, '') !== scanVal.replace(/\s/g, '')) {
+          $('frameTimes').value = scanVal;
+          state.pendingRender = true;
+        }
+      }
+      status('rendered in ' + (Date.now() - t0) + 'ms · plate: ' + data.plateSource +
+        (data.plateDurationSec ? ' · ' + Number(data.plateDurationSec).toFixed(1) + 's plate' : ''), 'ok');
+    } catch (e) {
+      status('render failed: ' + e.message, 'err');
+    } finally {
+      state.rendering = false;
+      if (state.pendingRender) { state.pendingRender = false; render(); }
+    }
+  }
+
+  // Redraws stills from the last response only — the scan-band toggle and
+  // chips never trigger a re-render.
+  function drawFrames() {
+    const data = state.lastData;
+    $('frames').innerHTML = '';
+    if (!data) return;
+    const fps = data.fps || 24;
+    const nearestSample = (t) => (data.plateHints?.samples || []).reduce(
+      (best, s) => (!best || Math.abs(s.atSec - t) < Math.abs(best.atSec - t)) ? s : best, null);
+    for (const f of data.frames) {
+      const t = f.index / fps;
+      const fig = document.createElement('figure');
+      const shot = document.createElement('div'); shot.className = 'shot';
+      const img = document.createElement('img'); img.src = f.dataUrl;
+      shot.appendChild(img);
+      const samp = nearestSample(t);
+      if ($('showBands').checked && samp) {
+        for (const [band, [y0, y1]] of Object.entries(SCAN_BANDS)) {
+          const div = document.createElement('div');
+          div.className = 'band' + (samp.bands[band]?.avoid ? ' avoid' : '');
+          div.style.top = (y0 * 100) + '%'; div.style.height = ((y1 - y0) * 100) + '%';
+          const tag = document.createElement('span'); tag.textContent = band; div.appendChild(tag);
+          shot.appendChild(div);
+        }
+      }
+      const cap = document.createElement('figcaption');
+      cap.textContent = 't=' + t.toFixed(1) + 's' + (samp && Math.abs(samp.atSec - t) < 0.35 ? ' · scanned' : '');
+      // Meta placement chrome: Reels/Stories draw INSIDE the creative
+      // (that's the collision the operator needs to see); feed placements
+      // wrap it in the surrounding card.
+      const kind = $('metaOverlay').value;
+      let visual = shot;
+      if (kind === 'reels') shot.appendChild(buildReelsOverlay());
+      else if (kind === 'stories') shot.appendChild(buildStoriesOverlay());
+      else if (kind === 'ig-feed') visual = wrapIgCard(shot);
+      else if (kind === 'fb-feed') visual = wrapFbCard(shot);
+      const sizeU = () => {
+        const w = img.clientWidth || 0;
+        if (!w) return;
+        shot.style.setProperty('--u', (w / 100) + 'px');
+        if (visual !== shot) {
+          visual.style.setProperty('--u', (w / 100) + 'px');
+          // Pin the card to the media width — long lorem lines must wrap,
+          // not widen the card past the still (clips flush-right chrome).
+          visual.style.width = w + 'px';
+        }
+      };
+      img.addEventListener('load', sizeU);
+      requestAnimationFrame(sizeU);
+      fig.append(visual, cap);
+      if (samp) {
+        const chips = document.createElement('div'); chips.className = 'chips';
+        // Honesty gate: the engine really does use the NEAREST sample, but
+        // when it's far from this frame, say which moment the intel is from.
+        if (Math.abs(samp.atSec - t) >= 0.35) {
+          const src = document.createElement('i');
+          src.textContent = 'scan @' + samp.atSec + 's';
+          chips.appendChild(src);
+        }
+        for (const band of ['top', 'middle', 'bottom']) {
+          const b = samp.bands[band]; if (!b) continue;
+          const i = document.createElement('i');
+          if (b.avoid) i.className = 'avoid';
+          i.textContent = band + ' lum ' + Number(b.lum).toFixed(2) + ' busy ' + Number(b.busy).toFixed(2) + (b.avoid ? ' ⛔' : '');
+          chips.appendChild(i);
+        }
+        fig.appendChild(chips);
+      }
+      $('frames').appendChild(fig);
+    }
+  }
+
+  let debounceTimer = null;
+  const debouncedRender = () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(render, 500); };
+
+  $('loadBtn').onclick = async () => {
+    try {
+      status('loading…');
+      const data = await api('GET', '/api/brand/' + $('brandId').value.trim() + '/title-spec');
+      state.specDoc = data.titleStyleSpec || {};
+      state.brand = data.brand || null;
+      const fmt = $('format').value;
+      setSpec(data.resolved[fmt].spec);
+      status('loaded (' + data.resolved[fmt].source + ') · fonts: ' +
+        Object.values(data.tokens.fonts).map((f) => f.family).join(', '), 'ok');
+      render();
+    } catch (e) { status('load failed: ' + e.message, 'err'); }
+  };
+  $('format').onchange = () => { populateOverlayOptions(); if (state.spec) $('loadBtn').click(); };
+  $('renderBtn').onclick = render;
+  $('saveBtn').onclick = async () => {
+    try {
+      writeControlsToSlot();
+      const doc = { ...(state.specDoc || {}), [$('format').value]: state.spec };
+      await api('PATCH', '/api/brand/' + $('brandId').value.trim(), { titleStyleSpec: doc });
+      state.specDoc = doc;
+      status('saved ✔ — this format now renders with your spec', 'ok');
+    } catch (e) { status('save failed: ' + e.message, 'err'); }
+  };
+  $('aiBtn').onclick = async () => {
+    const reqText = $('aiRequest').value.trim();
+    if (!reqText) return;
+    try {
+      $('aiStatus').textContent = 'thinking…';
+      const kick = await api('POST', '/api/brand/' + $('brandId').value.trim() + '/title-spec/modify',
+        { request: reqText, format: $('format').value });
+      const poll = async () => {
+        const job = await api('GET', '/api/brand/' + $('brandId').value.trim() + '/title-spec/modify/' + kick.jobId);
+        if (job.status === 'pending') return setTimeout(poll, 1500);
+        if (job.status === 'failed') { $('aiStatus').textContent = '✗ ' + job.error; return; }
+        $('aiStatus').textContent = '✔ applied (attempt ' + job.attempts + ') — not saved yet';
+        setSpec(job.spec);
+        render();
+      };
+      poll();
+    } catch (e) { $('aiStatus').textContent = '✗ ' + e.message; }
+  };
+
+  // Control wiring: sliders/selects → slot → debounced re-render
+  for (const id of [...SLIDERS, 'anchor', 'align', 'shadow', 'casing', 'trType', 'trDir', 'enterAtSec', 'enterDurationSec', 'slotVisible']) {
+    $(id).addEventListener('input', () => { writeControlsToSlot(); debouncedRender(); });
+  }
+  $('slotSel').addEventListener('change', syncControlsFromSlot);
+  $('aiRequest').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('aiBtn').click(); });
+  $('showBands').addEventListener('change', drawFrames);
+  $('metaOverlay').addEventListener('change', drawFrames);
+  $('adId').addEventListener('change', debouncedRender);
+  $('frameTimes').addEventListener('input', () => { state.frameTimesTouched = true; });
+  $('frameTimes').addEventListener('change', debouncedRender);
+  populateOverlayOptions();
+  $('specText').addEventListener('change', () => {
+    try { setSpec(JSON.parse($('specText').value)); debouncedRender(); }
+    catch { status('spec JSON parse error (fix and blur again)', 'err'); }
+  });
+})();
+</script>
+</body>
+</html>

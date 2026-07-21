@@ -41,41 +41,83 @@ async function syncBrandApify(brandId) {
   brand.apifyDemo.aborted = false;
   await brand.save();
 
+  // Unified progress row — the generic /api/progress cancel and the
+  // legacy /abort flag both stop the loops between records.
+  const { startRun } = require('./progressService');
+  const run = await startRun({ kind: 'demo-sync', advertiserId: brand.advertiserId, brandId: brand._id, label: 'Demo data sync' });
+
   const cfg = brand.apifyDemo || {};
-  const out = { ok: true, brandId: String(brand._id), ig: null, shopify: null };
+  // Catalog source method: 'shopify-direct' (default) hits the public
+  // products.json path; 'apify' keeps the legacy Apify shopify-scraper.
+  // IG stays on Apify regardless (hybrid).
+  const method = cfg.method === 'apify' ? 'apify' : 'shopify-direct';
+  const out = { ok: true, brandId: String(brand._id), ig: null, shopify: null, method, _run: run };
   const t0 = Date.now();
 
   if (cfg.igHandle) {
-    try       { out.ig = await syncBrandInstagram(brand); }
+    run.stage('instagram posts');
+    try       { out.ig = await syncBrandInstagram(brand, run); }
     catch (err) { out.ig = { ok: false, reason: err.message }; }
   }
   // Check between the two sources too — an abort during IG shouldn't
   // fall through into Shopify.
-  const stillAborted = await isBrandAborted(brand._id);
+  let stillAborted = await isBrandAborted(brand._id, run);
   if (cfg.shopifyUrl && !stillAborted) {
-    try       { out.shopify = await syncBrandShopify(brand); }
-    catch (err) { out.shopify = { ok: false, reason: err.message }; }
+    run.stage('shopify catalog');
+    try {
+      if (method === 'shopify-direct') {
+        const r = await require('./shopifyPublicIngestService')
+          .syncBrandShopifyDirect(brand, run, { isBrandAborted });
+        out.shopify = {
+          added:   r.productsUpserted,
+          videos:  r.videosIngested,
+          reviews: r.reviewsCaptured,
+          errors:  r.errors.length
+        };
+        // Direct path signals cooperative cancel via r.cancelled —
+        // mirror the isBrandAborted=true exit so lastSyncedAt +
+        // markCancelled still stamp exactly as today.
+        if (r.cancelled) stillAborted = true;
+      } else {
+        out.shopify = await syncBrandShopify(brand, run);
+      }
+    } catch (err) { out.shopify = { ok: false, reason: err.message }; }
   } else if (cfg.shopifyUrl && stillAborted) {
     out.shopify = { ok: false, reason: 'aborted before Shopify sync started' };
   }
 
-  brand.apifyDemo.lastSyncedAt = new Date();
-  await brand.save();
+  // lastSyncedAt stamp must not be able to strand the progress row —
+  // a transient save failure would otherwise skip markCancelled/succeed
+  // below and leave the run "in progress" forever in the dock.
+  try {
+    brand.apifyDemo.lastSyncedAt = new Date();
+    await brand.save();
+  } catch (err) {
+    console.warn(`   ⚠️  lastSyncedAt stamp failed for brand=${brand._id} (non-fatal): ${err.message}`);
+  }
 
   out.durationMs = Date.now() - t0;
-  out.aborted    = stillAborted || (await isBrandAborted(brand._id));
+  out.aborted    = stillAborted || (await isBrandAborted(brand._id, run));
+  delete out._run;
+  if (out.aborted) await run.markCancelled('Aborted — partial ingest kept');
+  else await run.succeed({ ig: out.ig?.ingested ?? null, shopify: out.shopify?.added ?? null });
   return out;
 }
 
 // Lean read of the abort flag. Called between records so /abort can
-// take effect mid-loop without a full brand fetch.
-async function isBrandAborted(brandId) {
+// take effect mid-loop without a full brand fetch. Also honors the
+// generic OperationRun cancel when a run handle is provided.
+async function isBrandAborted(brandId, run = null) {
+  if (run) {
+    const cancelled = await run.checkpoint().then(() => false).catch(() => true);
+    if (cancelled) return true;
+  }
   const b = await Brand.findById(brandId).select('apifyDemo.aborted').lean();
   return !!b?.apifyDemo?.aborted;
 }
 
 // ── IG side ────────────────────────────────────────────────────────
-async function syncBrandInstagram(brand) {
+async function syncBrandInstagram(brand, run = null) {
   const t0 = Date.now();
   const handle = brand.apifyDemo?.igHandle;
   if (!handle) return { ok: false, reason: 'no IG handle configured' };
@@ -86,18 +128,18 @@ async function syncBrandInstagram(brand) {
   const summary = { ok: true, fetched: posts.length, ingested: 0, skipped: 0, errors: 0, queuedRunIds: [], aborted: false };
 
   for (const post of posts) {
-    if (await isBrandAborted(brand._id)) {
+    if (await isBrandAborted(brand._id, run)) {
       summary.aborted = true;
       console.log(`   · Apify IG ingest aborted mid-loop for brand=${brand._id}`);
       break;
     }
     try {
       const r = await ingestIgPost(brand, post);
+      // runId can accompany a skipped result — resume-after-abort
+      // re-enqueues detect for already-ingested media.
+      if (r?.runId) summary.queuedRunIds.push(String(r.runId));
       if (r?.skipped) summary.skipped++;
-      else if (r?.mediaId) {
-        summary.ingested++;
-        if (r.runId) summary.queuedRunIds.push(String(r.runId));
-      }
+      else if (r?.mediaId) summary.ingested++;
     } catch (err) {
       console.warn(`   ⚠️  Apify IG ingest failed for ${post.externalId}: ${err.message}`);
       summary.errors++;
@@ -127,19 +169,25 @@ async function ingestIgPost(brand, post) {
   if (!externalId || !mediaUrl) return { skipped: true };
 
   // Idempotent: dedup on (brandId, source, externalId). Apify pulls of
-  // the same handle are the natural re-sync case.
+  // the same handle are the natural re-sync case. Existing rows skip
+  // the download/upload but MUST still fall through to the DetectRun
+  // check below — an early return here made the documented
+  // resume-after-abort path unreachable (aborted runs are marked
+  // failed; re-sync is what re-queues detect for ingested media).
   const existing = await Media.findOne({ brandId: brand._id, source: 'apify-ig', externalId }).select('_id').lean();
-  if (existing) return { skipped: true };
 
   const isVideo = mediaType === 'VIDEO';
   const fileType = isVideo ? 'video' : 'image';
 
+  let media;
+  if (existing) {
+    media = existing;
+  } else {
   const upload = await uploadUrlToCloudinary(mediaUrl, {
     resourceType: isVideo ? 'video' : 'image',
     folder:       'apify-demo/ig'
   });
 
-  let media;
   try {
     media = await Media.findOneAndUpdate(
       { brandId: brand._id, source: 'apify-ig', externalId },
@@ -182,6 +230,7 @@ async function ingestIgPost(brand, post) {
     if (err.code === 11000) return { skipped: true };
     throw err;
   }
+  }
 
   // Skip enqueue only if there's an ACTIVE run (queued/processing/
   // completed). A run marked failed by /abort should NOT block a fresh
@@ -192,7 +241,9 @@ async function ingestIgPost(brand, post) {
     mediaId: media._id,
     status:  { $in: ['queued', 'processing', 'completed'] }
   }).select('_id').lean();
-  if (existingActive) return { mediaId: media._id, runId: null };
+  // skipped reflects INGESTION (media already existed) — a resumed post
+  // can be skipped for counting yet still re-enqueue detect below.
+  if (existingActive) return { mediaId: media._id, runId: null, skipped: !!existing };
 
   let run;
   try {
@@ -208,15 +259,15 @@ async function ingestIgPost(brand, post) {
   } catch (err) {
     if (err.code === 11000) {
       const inflight = await DetectRun.findOne({ mediaId: media._id, status: { $in: ['queued', 'processing'] } }).lean();
-      return { mediaId: media._id, runId: inflight?._id || null };
+      return { mediaId: media._id, runId: inflight?._id || null, skipped: !!existing };
     }
     throw err;
   }
-  return { mediaId: media._id, runId: run._id };
+  return { mediaId: media._id, runId: run._id, skipped: !!existing };
 }
 
 // ── Shopify side ───────────────────────────────────────────────────
-async function syncBrandShopify(brand) {
+async function syncBrandShopify(brand, run = null) {
   const t0 = Date.now();
   const shopifyUrl = brand.apifyDemo?.shopifyUrl;
   if (!shopifyUrl) return { ok: false, reason: 'no Shopify URL configured' };
@@ -227,7 +278,7 @@ async function syncBrandShopify(brand) {
   const summary = { ok: true, fetched: products.length, added: 0, updated: 0, errors: 0, aborted: false };
 
   for (const p of products) {
-    if (await isBrandAborted(brand._id)) {
+    if (await isBrandAborted(brand._id, run)) {
       summary.aborted = true;
       console.log(`   · Apify Shopify ingest aborted mid-loop for brand=${brand._id}`);
       break;
@@ -269,7 +320,7 @@ async function syncBrandShopify(brand) {
   // Same helper the Meta catalog sync uses at end of run. Skipped if
   // /abort fired — no point queueing detect for a run the operator
   // just killed.
-  if (!summary.aborted && !(await isBrandAborted(brand._id))) {
+  if (!summary.aborted && !(await isBrandAborted(brand._id, run))) {
     try {
       const { enqueueBrandProductDetects } = require('./catalogProductDetectService');
       await enqueueBrandProductDetects(brand._id);
@@ -297,6 +348,8 @@ async function syncBrandShopify(brand) {
 
 module.exports = {
   syncBrandApify,
+  syncDemoBrand: syncBrandApify, // alias — method-aware orchestrator
   syncBrandInstagram,
-  syncBrandShopify
+  syncBrandShopify,
+  isBrandAborted
 };

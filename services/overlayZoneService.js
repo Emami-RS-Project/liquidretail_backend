@@ -33,9 +33,12 @@
 
 const axios = require('axios');
 const sharp = require('sharp');
+// Atlas gateway (Gemini served OpenAI-compatible; Google's OpenAI-compat
+// endpoint as the direct fallback inside the transport). The transport
+// owns retries — the local postWithRetry helper is gone.
+const { chatCompletion, isConfigured } = require('./atlasLlmService');
 
 const MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-pro';
-const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
 // Artifact schema version. Consumers should read this and refuse (or warn)
 // on unknown majors. 3.0 added brightnessGrid and broke the top-level
@@ -47,7 +50,7 @@ const SCHEMA_VERSION = '3.0';
 // backward-compatible, renaming/removing them is not.
 const RESTRICTION_CLASSES = ['product', 'face', 'secondary_subject', 'text', 'object', 'other'];
 
-function isEnabled() { return !!process.env.GEMINI_API_KEY; }
+function isEnabled() { return isConfigured() || !!process.env.GEMINI_API_KEY; }
 
 // JSON schema enforced via Gemini's responseSchema feature so we get
 // deterministic parsing instead of hoping the model honors a textual contract.
@@ -61,7 +64,8 @@ const RESPONSE_SCHEMA = {
         rows:  { type: 'integer' },
         cells: { type: 'array', items: { type: 'array', items: { type: 'number' } } }
       },
-      required: ['cols', 'rows', 'cells']
+      required: ['cols', 'rows', 'cells'],
+      additionalProperties: false
     },
     restrictions: {
       type: 'array',
@@ -73,11 +77,13 @@ const RESPONSE_SCHEMA = {
           strictness:     { type: 'number' },
           reason:         { type: 'string' }
         },
-        required: ['rectPct', 'classification', 'strictness', 'reason']
+        required: ['rectPct', 'classification', 'strictness', 'reason'],
+        additionalProperties: false
       }
     }
   },
-  required: ['densityGrid', 'restrictions']
+  required: ['densityGrid', 'restrictions'],
+  additionalProperties: false
 };
 
 function rectPctSchema() {
@@ -87,7 +93,8 @@ function rectPctSchema() {
       x1: { type: 'number' }, y1: { type: 'number' },
       x2: { type: 'number' }, y2: { type: 'number' }
     },
-    required: ['x1', 'y1', 'x2', 'y2']
+    required: ['x1', 'y1', 'x2', 'y2'],
+    additionalProperties: false
   };
 }
 
@@ -130,39 +137,30 @@ async function analyzeOverlayZones({ imageUrl, label, ratio, forbiddenRectsPct }
   const prompt = buildPrompt(ratio, forbiddenRectsPct);
 
   try {
-    const res = await postWithRetry({
-      url: `${ENDPOINT}?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`,
-      body: {
-        contents: [{
-          role: 'user',
-          parts: [
-            { text: prompt },
-            { inlineData: { mimeType, data: imageBase64 } }
-          ]
-        }],
-        generationConfig: {
-          temperature: 0.2,
-          // 2.5 Pro's thinking tokens count against this same budget. 2500 was
-          // being consumed almost entirely by thinking, leaving the structured
-          // output truncated or empty.
-          maxOutputTokens: 8192,
-          // Cap thinking so we reliably have headroom for the JSON body.
-          thinkingConfig: { thinkingBudget: 2048 },
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA
-        }
-      },
-      timeout: 60000,
-      label
-    });
+    // 2.5 Pro's hidden reasoning spends from max_tokens (no thinkingBudget
+    // knob on the OpenAI-compat path) — 8192 plus the transport's reserve
+    // keeps headroom for the JSON body. responseSchema converts to strict
+    // json_schema (probed working on Atlas's gemini routes).
+    const res = await chatCompletion(
+      { stage: 'overlay_zones', service: 'overlayZoneService', visionImages: 1 },
+      {
+        model: MODEL,
+        messages: [{ role: 'user', content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } }
+        ] }],
+        temperature: 0.2,
+        max_tokens: 8192,
+        response_format: { type: 'json_schema', json_schema: { name: 'overlay_zones', strict: true, schema: RESPONSE_SCHEMA } }
+      }
+    );
 
-    const candidate = res.data?.candidates?.[0];
-    const text = candidate?.content?.parts?.[0]?.text;
+    const choice = res.choices?.[0];
+    const text = choice?.message?.content;
     if (!text) {
-      const finishReason = candidate?.finishReason || 'unknown';
-      const usage = res.data?.usageMetadata || {};
-      const blockReason = res.data?.promptFeedback?.blockReason;
-      console.warn(`   ⚠️  overlay-zones[${label}]: empty response (finishReason=${finishReason}${blockReason ? ` blockReason=${blockReason}` : ''}, tokens in=${usage.promptTokenCount || '?'} out=${usage.candidatesTokenCount || 0} thought=${usage.thoughtsTokenCount || 0} total=${usage.totalTokenCount || '?'})`);
+      const finishReason = choice?.finish_reason || 'unknown';
+      const usage = res.usage || {};
+      console.warn(`   ⚠️  overlay-zones[${label}]: empty response (finishReason=${finishReason}, tokens in=${usage.prompt_tokens || '?'} out=${usage.completion_tokens || 0} reasoning=${usage.completion_tokens_details?.reasoning_tokens || 0})`);
       return null;
     }
 

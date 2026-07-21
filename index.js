@@ -123,6 +123,9 @@ app.use('/api/layout-input', requireAuth, layoutRoutes);
 app.use('/api/media', requireAuth, mediaRoutes);
 app.use('/api/brand', requireAuth, brandRoutes);
 app.use('/api/me',    requireAuth, meRoutes);
+// Unified progress feed for every long-running process (OperationRun) —
+// the ActivityDock polls /active; cancel is cooperative via checkpoints.
+app.use('/api/progress', requireAuth, require('./routes/progress'));
 // Onboarding mounts WITHOUT requireAuth — its own middleware
 // (requireUserOnly) lets users without an Advertiser through so
 // they can create one. Mounting requireAuth here would 403 every
@@ -249,6 +252,13 @@ app.post('/api/products/:id/match-amazon', requireAuth, express.json(), async (r
 
 app.get('/api/health', (req, res) => res.status(200).send('API is running ✅'));
 
+// Title playground — operator refinement tool for the Remotion titling
+// engine (fast still-frame loop against POST /api/brand/:id/title-still).
+// The page itself is static and holds no data; it calls the API with the
+// operator's own Bearer token, so serving it unauthenticated is safe.
+app.get('/title-playground', (req, res) =>
+  res.sendFile(require('path').join(__dirname, 'public', 'titlePlayground.html')));
+
 // ── MongoDB ──────────────────────────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser:    true,
@@ -313,6 +323,21 @@ if (process.env.RUN_WORKER === 'true') {
 require('./services/fontLoader')
   .ensureFontsLoaded()
   .catch(err => console.warn(`🔤 fontLoader: unexpected failure (${err.message})`));
+
+// Remotion titling engine warmup — webpack-bundles the remotion/ island
+// and prepares the headless browser + loopback asset server so the first
+// render doesn't pay the ~30s cold start. Same non-blocking contract as
+// the font warmup: failure logs and the first render retries from cold.
+require('./services/remotionRenderService')
+  .warmup()
+  .catch(err => console.warn(`🎬 remotion: warmup failed (${err.message}) — first render will retry`));
+
+// Progress reaper — runs left behind by the previous process (in-process
+// setImmediate jobs die on restart) get marked failed instead of showing
+// "running" forever. The worker's periodic reaper covers ongoing sweeps.
+require('./services/progressService')
+  .sweepStaleRuns()
+  .catch(err => console.warn(`🧹 progress sweep failed at boot: ${err.message}`));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));

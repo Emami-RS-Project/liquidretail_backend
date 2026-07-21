@@ -69,8 +69,11 @@ const { computeSlotBudgets } = require('./slotBudget');
 const { displayNormalizeTitle } = require('../utils/titleNormalize');
 const { extractSnippet }        = require('./quoteSnippetService');
 
-const GEMINI_MODEL    = process.env.GEMINI_SEARCH_MODEL || 'gemini-2.5-pro';
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// Atlas gateway (Gemini served OpenAI-compatible; Google's OpenAI-compat
+// endpoint as the direct fallback inside the transport).
+const { chatCompletion, isConfigured: atlasConfigured } = require('./atlasLlmService');
+
+const GEMINI_MODEL = process.env.GEMINI_SEARCH_MODEL || 'gemini-2.5-pro';
 
 // Bump when the canonical input shape changes — cached LayoutInputArtifact
 // docs with a mismatching version are treated as cache misses and forced
@@ -763,28 +766,28 @@ function synthesizeMatchFromCatalogProduct(cp) {
 //  Derivation LLM
 // ──────────────────────────────────────────────────────────────
 async function runDerivation(ctx, template, aspectRatio, options) {
-  if (!process.env.GEMINI_API_KEY) return fallbackDerivation(ctx);
+  if (!atlasConfigured() && !process.env.GEMINI_API_KEY) return fallbackDerivation(ctx);
 
   const prompt = buildDerivationPrompt(ctx, template, aspectRatio, options);
 
   try {
-    const res = await axios.post(
-      `${GEMINI_ENDPOINT}?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`,
+    // DERIVATION_SCHEMA has genuinely optional fields, so it rides as
+    // non-strict json_schema guidance (strict mode requires all-required).
+    // Hidden reasoning spends from max_tokens on the OpenAI-compat path
+    // (no thinkingBudget knob) — the transport pads a reserve on top.
+    const res = await chatCompletion(
+      { stage: 'layout_derivation', service: 'layoutInputService' },
       {
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 3000,
-          thinkingConfig: { thinkingBudget: 1024 },
-          responseMimeType: 'application/json',
-          responseSchema: DERIVATION_SCHEMA
-        }
-      },
-      { timeout: 45000 }
+        model: GEMINI_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3,
+        max_tokens: 3000,
+        response_format: { type: 'json_schema', json_schema: { name: 'layout_derivation', strict: false, schema: DERIVATION_SCHEMA } }
+      }
     );
-    const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = res.choices?.[0]?.message?.content;
     if (!text) {
-      console.warn(`   ⚠️  layout-derivation: empty response (finishReason=${res.data?.candidates?.[0]?.finishReason})`);
+      console.warn(`   ⚠️  layout-derivation: empty response (finishReason=${res.choices?.[0]?.finish_reason})`);
       return fallbackDerivation(ctx);
     }
     return JSON.parse(text);

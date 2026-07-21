@@ -10,10 +10,9 @@
 // winner is picked, so the snippet is cached on the LayoutInputArtifact
 // alongside the full quote text.
 
-const OpenAI = require('openai');
 const { trackLlmCall } = require('./costTracker');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 const MODEL_ID  = process.env.QUOTE_SNIPPET_MODEL_ID || 'gpt-4o-mini';
 const MAX_CHARS = 50;
@@ -85,7 +84,7 @@ async function extractSnippet(text, { brandId = null, productId = null } = {}) {
 
   const t0 = Date.now();
   try {
-    const completion = await trackLlmCall(
+    const completion = await chatCompletion(
       {
         stage:      'quote_snippet',
         provider:   'openai',
@@ -95,7 +94,7 @@ async function extractSnippet(text, { brandId = null, productId = null } = {}) {
         visionImages: 0,
         cacheKey:   null
       },
-      () => openai.chat.completions.create({
+      {
         model:           MODEL_ID,
         response_format: { type: 'json_schema', json_schema: RESPONSE_SCHEMA },
         messages: [
@@ -104,7 +103,7 @@ async function extractSnippet(text, { brandId = null, productId = null } = {}) {
         ],
         temperature: 0.3,
         max_tokens:  60
-      })
+      }
     );
 
     const raw = completion.choices?.[0]?.message?.content;

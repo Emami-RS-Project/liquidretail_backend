@@ -1,7 +1,7 @@
-const OpenAI = require('openai');
 const JSON5 = require('json5');
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Atlas gateway transport (direct-OpenAI fallback inside) — request and
+// response shapes are unchanged OpenAI chat.completions.
+const { chatCompletion } = require('./atlasLlmService');
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Main judge — products, subjects, text treatment, and base-ratio crops
@@ -17,7 +17,7 @@ async function judgeDetections({ imageUrl, products, subjects, text, crops, safe
     ...(safeRect ? { safeRect } : {})
   };
 
-  const response = await openai.chat.completions.create({
+  const response = await chatCompletion({ stage: 'judge_detections', service: 'judgeService', visionImages: 1 }, {
     model: 'gpt-4.1',
     response_format: { type: 'json_object' },
     messages: [
@@ -319,7 +319,7 @@ async function callOpenAIWithCloudinaryRetry(payload) {
   let lastErr;
   for (let attempt = 0; attempt <= delays.length; attempt++) {
     try {
-      return await openai.chat.completions.create(payload);
+      return await chatCompletion({ stage: 'judge_extended_crops', service: 'judgeService', visionImages: 1 }, payload);
     } catch (err) {
       lastErr = err;
       const isCloudinaryRace =

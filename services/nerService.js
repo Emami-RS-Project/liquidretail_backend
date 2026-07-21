@@ -1,7 +1,5 @@
-const OpenAI = require('openai');
 const JSON5 = require('json5');
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 // Extract named entities (products, brands, model numbers, etc.) from a
 // Whisper transcript, tagged with the time range they appear in.
@@ -12,7 +10,9 @@ async function extractEntities(transcript) {
     .map(s => `[${s.start.toFixed(1)}s–${s.end.toFixed(1)}s] ${s.text}`)
     .join('\n');
 
-  const response = await openai.chat.completions.create({
+  // Atlas gateway (direct-OpenAI fallback inside); model id mapped by
+  // atlasModelMap. This call was previously untracked — now ledgered.
+  const response = await chatCompletion({ stage: 'ner_extraction', service: 'nerService' }, {
     model: 'gpt-4.1',
     messages: [
       {

@@ -11,11 +11,10 @@
 // or the GPT call fails, veoPromptBuilder falls back to safe defaults
 // for camera / audio / vibe so the render path stays unblocked.
 
-const OpenAI = require('openai');
 const { trackLlmCall } = require('./costTracker');
 const { archetypeDescription } = require('./veoPromptBuilder');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 
 const MODEL_ID    = process.env.VEO_STORYBOARD_MODEL_ID || 'gpt-4.1';
 const TEMPERATURE = 0.85;
@@ -154,7 +153,7 @@ async function generateStoryboard({
 
   const t0 = Date.now();
   try {
-    const completion = await trackLlmCall(
+    const completion = await chatCompletion(
       {
         stage:      'veo_storyboard',
         provider:   'openai',
@@ -164,7 +163,7 @@ async function generateStoryboard({
         visionImages: 0,
         cacheKey:   null   // per-ad, not cached — variance is the goal
       },
-      () => openai.chat.completions.create({
+      {
         model:           MODEL_ID,
         response_format: { type: 'json_schema', json_schema: RESPONSE_SCHEMA },
         messages: [
@@ -173,7 +172,7 @@ async function generateStoryboard({
         ],
         temperature: TEMPERATURE,
         max_tokens:  MAX_TOKENS
-      })
+      }
     );
 
     const raw = completion.choices?.[0]?.message?.content;

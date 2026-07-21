@@ -16,13 +16,12 @@
 // next time its website URL shows up on a new media upload.
 
 const axios = require('axios');
-const OpenAI = require('openai');
 
 const Brand = require('../models/Brand');
 const { lookupBrand: brandfetchLookup } = require('./brandfetchService');
 const { lookupBrandReviews } = require('./providers/geminiSearchProvider');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { chatCompletion } = require('./atlasLlmService');
 const MAX_HTML_CHARS = 25000;
 
 const ENRICHMENT_SCHEMA = {
@@ -77,14 +76,25 @@ async function enrichBrandFromUrl(brandId) {
   // (success, early return, thrown error). The final brand.save() also
   // writes null because the in-memory `brand.enrichmentStage` is
   // never mutated, but the explicit clear covers thrown errors.
+  const { startRun, CancelledError } = require('./progressService');
+  const run = await startRun({ kind: 'enrichment', advertiserId: brand.advertiserId, brandId, label: 'Brand enrichment' });
   try {
-    return await runEnrichment(brand, brandId);
+    const result = await runEnrichment(brand, brandId, run);
+    await run.succeed(result && typeof result === 'object' ? { ok: result.ok !== false } : undefined);
+    return result;
+  } catch (err) {
+    if (err instanceof CancelledError) {
+      console.log(`🧠 enrichment cancelled by operator: brand=${brandId}`);
+      return { ok: false, cancelled: true, reason: 'cancelled by operator' };
+    }
+    await run.fail(err);
+    throw err;
   } finally {
     await setStage(brandId, null);
   }
 }
 
-async function runEnrichment(brand, brandId) {
+async function runEnrichment(brand, brandId, run = null) {
 
   // Per-field protection (curatedFields) replaces the old wholesale
   // 'curated' / 'enriched' bail-outs. We re-run enrichment whenever an
@@ -114,6 +124,7 @@ async function runEnrichment(brand, brandId) {
   // Hits the brand kit API for native logo + colors + fonts. Skipped
   // if no API key OR if already attempted on a previous run.
   const hostname = hostnameFromUrl(brand.websiteUrl);
+  if (run) { await run.checkpoint(); run.stage('brandfetch'); }
   if (wantBrandfetch && hostname) await setStage(brandId, 'brandfetch');
   const bf = (wantBrandfetch && hostname) ? await brandfetchLookup(hostname) : null;
   if (wantBrandfetch && bf) {
@@ -125,6 +136,7 @@ async function runEnrichment(brand, brandId) {
   }
 
   // ── Tier 2: Homepage HTML ──
+  if (run && wantScraped) { await run.checkpoint(); run.stage('website scrape'); }
   if (wantScraped) await setStage(brandId, 'scraped');
   let html = '';
   let metaThemeColor = null;
@@ -181,6 +193,7 @@ async function runEnrichment(brand, brandId) {
   // Brandfetch alone can ship partial enrichment without GPT.
   let enrichment = {};
   if (!skipLLM && wantGpt) {
+    if (run) { await run.checkpoint(); run.stage('gpt derivation'); }
     await setStage(brandId, 'gpt');
     const prompt =
       `You are analyzing "${brand.name}" (${brand.websiteUrl}) to fill a brand catalog entry.\n\n` +
@@ -209,7 +222,7 @@ async function runEnrichment(brand, brandId) {
       `Ground personas in the brand's actual positioning; don't invent irrelevant personas. If the brand is niche, 2 personas is fine.`;
 
     try {
-      const response = await openai.chat.completions.create({
+      const response = await chatCompletion({ stage: 'brand_enrichment_gpt', service: 'brandEnrichmentService' }, {
         model: 'gpt-4.1',
         response_format: { type: 'json_object' },
         messages: [{ role: 'user', content: prompt }],
@@ -364,6 +377,7 @@ async function runEnrichment(brand, brandId) {
   // marked the field protected.
   let brandReviewsResult = null;
   if (wantBrandReviews && !isCurated('brandReviews')) {
+    if (run) { await run.checkpoint(); run.stage('brand reviews'); }
     await setStage(brandId, 'brand-reviews');
     try {
       brandReviewsResult = await lookupBrandReviews({

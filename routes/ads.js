@@ -34,6 +34,7 @@ const { deleteFromCloudinary } = require('../services/cloudinaryService');
 const { buildVideoCompositeUrl } = require('../services/videoCompositeService');
 const { buildPreviewHtmlForAd }  = require('../services/adPreviewPageService');
 const registry = require('../services/templateRegistry');
+const { tenantFilter, assertBrandInTenant, assertCampaignInTenant } = require('../middleware/tenantHelpers');
 
 // Lifecycle states the PATCH endpoint can flip an Ad into. queued /
 // rendering / failed are set by the pipeline only — operators don't
@@ -83,6 +84,13 @@ router.post('/preview', async (req, res) => {
     if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
     if (!templateIds.length) return res.status(400).json({ error: 'templateIds required (at least 1 template)' });
 
+    try {
+      await assertCampaignInTenant(campaignId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
+
     const job = await expandWizardJob({
       campaignId,
       productIds,
@@ -130,19 +138,31 @@ router.post('/generate', async (req, res) => {
       // expand buttons.
       includeCategoryMatched = false,
       includeBrandMatched    = false,
-      refresh     = false   // wizard checkbox / smoke-test override; bypasses de-dupe + LayoutInputArtifact cache
+      refresh     = false,  // wizard checkbox / smoke-test override; bypasses de-dupe + LayoutInputArtifact cache
+      videoDurationSec = null  // wizard format-selection stage; integer 1–15, null = standard 8s
     } = req.body || {};
 
     if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
     if (!templateIds.length) return res.status(400).json({ error: 'templateIds required (at least 1 template)' });
+
+    // Per-ad video duration from the wizard. Optional; when present must
+    // be an integer 1..15. null/''/absent → service default (standard 8s).
+    let parsedVideoDurationSec = null;
+    if (videoDurationSec !== undefined && videoDurationSec !== null && videoDurationSec !== '') {
+      const n = Number(videoDurationSec);
+      if (!Number.isInteger(n) || n < 1 || n > 15) {
+        return res.status(400).json({ error: 'videoDurationSec must be an integer 1–15' });
+      }
+      parsedVideoDurationSec = n;
+    }
 
     // Account-setup gate — refuse generation while any connected source
     // has detect in flight or hasn't completed. Mirrors the gate on
     // POST /api/campaigns so a campaign created before the gate landed
     // still can't generate ads on a half-ingested brand. brandId is
     // resolved from the Campaign so the wizard caller doesn't have to
-    // re-pass it.
-    const gateCampaign = await Campaign.findById(campaignId).select('brandId').lean();
+    // re-pass it. Tenant-scoped so cross-tenant campaignIds 404.
+    const gateCampaign = await Campaign.findOne(tenantFilter(req, { _id: campaignId })).select('brandId').lean();
     if (!gateCampaign) return res.status(404).json({ error: 'campaign not found' });
     const { getAdReadiness } = require('../services/adReadinessService');
     const readiness = await getAdReadiness(gateCampaign.brandId);
@@ -210,6 +230,7 @@ router.post('/generate', async (req, res) => {
     });
 
     setImmediate(async () => {
+      let adIds;
       try {
         const job = await expandWizardJob({
           campaignId,
@@ -223,6 +244,7 @@ router.post('/generate', async (req, res) => {
           excludePairings,
           includeCategoryMatched,
           includeBrandMatched,
+          videoDurationSec: parsedVideoDurationSec,
           requestedBy: req.user?.userId || null
         });
 
@@ -235,7 +257,7 @@ router.post('/generate', async (req, res) => {
           return;
         }
 
-        const adIds = await selectAdsForRun({ campaignId, limit: MAX_CREATIVES_PER_RUN });
+        adIds = await selectAdsForRun({ campaignId, limit: MAX_CREATIVES_PER_RUN });
         if (!adIds.length) {
           await CampaignRun.updateOne(
             { _id: run._id },
@@ -261,6 +283,12 @@ router.post('/generate', async (req, res) => {
         await runRenderLoop(run, { ...job, platformFormat }, adIds, renderToken);
       } catch (err) {
         console.error(`❌ campaign run ${runId} prep/render crashed:`, err);
+        if (adIds && adIds.length) {
+          await Ad.updateMany(
+            { _id: { $in: adIds }, status: 'rendering' },
+            { $set: { status: 'queued', updatedAt: new Date() } }
+          ).catch(() => {});
+        }
         await CampaignRun.updateOne(
           { _id: run._id },
           { status: 'failed', completedAt: new Date(),
@@ -285,6 +313,13 @@ router.post('/runs', express.json(), async (req, res) => {
   try {
     const { campaignId } = req.body || {};
     if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+
+    try {
+      await assertCampaignInTenant(campaignId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
 
     const campaign = await Campaign.findById(campaignId).lean();
     if (!campaign) return res.status(404).json({ error: 'campaign not found' });
@@ -351,6 +386,10 @@ router.post('/runs', express.json(), async (req, res) => {
     setImmediate(() => {
       runRenderLoop(run, job, adIds, renderToken).catch(err => {
         console.error(`❌ campaign run ${runId} crashed:`, err);
+        Ad.updateMany(
+          { _id: { $in: adIds }, status: 'rendering' },
+          { $set: { status: 'queued', updatedAt: new Date() } }
+        ).catch(() => {});
         CampaignRun.updateOne(
           { _id: run._id },
           { status: 'failed', completedAt: new Date() }
@@ -370,20 +409,41 @@ router.post('/runs', express.json(), async (req, res) => {
 async function runRenderLoop(run, job, adIds, renderToken) {
   const t0 = Date.now();
   // Veo calls are expensive and quota-limited — serialize them by default.
-  const isVeoRun    = job.platformFormat === 'meta_reels_9_16';
+  // Derive from the actual ads (not job.platformFormat) so mixed / non-reels
+  // veo batches still get VEO_CONCURRENCY.
+  const veoCount    = await Ad.countDocuments({ _id: { $in: adIds }, renderRoute: 'veo' });
+  const isVeoRun    = veoCount > 0;
   const concurrency = isVeoRun ? VEO_CONCURRENCY : RENDER_CONCURRENCY;
   console.log(
     `🚀 [campaignRun ${run.runId}] start — ${adIds.length} ad(s) ` +
     `concurrency=${concurrency}${isVeoRun ? ' (veo)' : ''} brand=${job.brandId} campaign=${job.campaignId} kind=${job.campaignKind || '-'}`
   );
 
+  // Unified progress row (ActivityDock) — mirrors the CampaignRun
+  // counters and adds cooperative cancel: the pool stops claiming new
+  // ads, in-flight renders finish, unclaimed ads flip to skipped.
+  const { startRun } = require('../services/progressService');
+  const brandDoc = await require('../models/Brand').findById(job.brandId).select('advertiserId').lean().catch(() => null);
+  const progressRun = await startRun({
+    kind: 'ad-batch',
+    advertiserId: brandDoc?.advertiserId,
+    brandId: job.brandId,
+    total: adIds.length,
+    label: isVeoRun ? 'Video ad generation' : 'Ad generation',
+  });
+  progressRun.stage('rendering');
+
   const queue = adIds.map((adId, i) => ({ adId, index: i }));
   let inflight = 0;
   let next     = 0;
+  let done     = 0;
+  let cancelled = false;
 
   await new Promise((resolve) => {
     const dispatch = () => {
-      while (inflight < concurrency && next < queue.length) {
+      // Refresh the cancel flag (non-throwing) before claiming more work.
+      progressRun.checkpoint().catch(() => { cancelled = true; });
+      while (!cancelled && inflight < concurrency && next < queue.length) {
         const { adId, index } = queue[next++];
         inflight++;
         renderOne(run, job, adId, index, renderToken)
@@ -392,13 +452,30 @@ async function runRenderLoop(run, job, adIds, renderToken) {
           })
           .finally(() => {
             inflight--;
-            if (next >= queue.length && inflight === 0) resolve();
+            progressRun.tick(++done, adIds.length);
+            if ((next >= queue.length || cancelled) && inflight === 0) resolve();
             else dispatch();
           });
       }
+      if (cancelled && inflight === 0) resolve();
     };
     dispatch();
   });
+
+  // Cancelled mid-batch: unclaimed ads (bulk-flipped to 'rendering' at
+  // claim time, before the loop) go BACK to the queue — they count as
+  // skipped for this run and the next run's selectAdsForRun re-drains
+  // them. Matching on status:'rendering' is load-bearing: the old
+  // status:'queued' filter matched nothing post-claim, stranding
+  // unclaimed ads in 'rendering' forever (adversarial-review find).
+  if (cancelled && next < queue.length) {
+    const remaining = queue.slice(next).map((q) => q.adId);
+    await Ad.updateMany(
+      { _id: { $in: remaining }, status: 'rendering' },
+      { $set: { status: 'queued', updatedAt: new Date() } }
+    ).catch(() => {});
+    await CampaignRun.updateOne({ _id: run._id }, { $inc: { skipped: remaining.length } }).catch(() => {});
+  }
 
   await CampaignRun.updateOne(
     { _id: run._id },
@@ -406,9 +483,11 @@ async function runRenderLoop(run, job, adIds, renderToken) {
   );
   const totalMs = Date.now() - t0;
   const final = await CampaignRun.findById(run._id).select('succeeded skipped failed').lean();
+  if (cancelled) await progressRun.markCancelled(`Stopped — ${final?.succeeded || 0} finished, rest skipped`);
+  else await progressRun.succeed({ succeeded: final?.succeeded || 0, skipped: final?.skipped || 0, failed: final?.failed || 0 });
   console.log(
     `🎉 [campaignRun ${run.runId}] done in ${totalMs}ms — ` +
-    `${final?.succeeded || 0} succeeded · ${final?.skipped || 0} skipped · ${final?.failed || 0} failed`
+    `${final?.succeeded || 0} succeeded · ${final?.skipped || 0} skipped · ${final?.failed || 0} failed${cancelled ? ' (cancelled by operator)' : ''}`
   );
 }
 
@@ -442,7 +521,7 @@ async function renderOne(run, job, adId, index, renderToken) {
         .select('fileType fileUrl brandId').lean();
       const brandDoc = sourceMedia?.brandId
         ? await Brand.findById(sourceMedia.brandId)
-            .select('name styleScript styleScriptVertical styleTheme tagline logoUrl primaryColor secondaryColor accentColor fontFamily derivedVoice').lean()
+            .select('name styleScript styleScriptVertical styleScriptLandscape styleTheme tagline logoUrl websiteUrl primaryColor secondaryColor accentColor fontFamily derivedVoice videoSettings titleStyleSpec titleStylePreset customFonts').lean()
         : null;
 
       // Grok-skip branch — when the seed is already a video, we keep
@@ -455,6 +534,7 @@ async function renderOne(run, job, adId, index, renderToken) {
       // on top.
       const isVideoSeed = sourceMedia?.fileType === 'video';
       let veoVideoUrl, veoAspectRatio, veoPrompt = null, veoStoryboard = null, veoCloudinaryPublicId = null;
+      let veoModel = null;   // stays null on the Cloudinary-segment path — no model ran
 
       if (isVideoSeed) {
         const segmentUrl = buildVideoSegmentUrl(sourceMedia.fileUrl, ad.aspectRatio || '9:16', 8);
@@ -477,9 +557,11 @@ async function renderOne(run, job, adId, index, renderToken) {
       // Grok-skip couldn't build a Cloudinary segment (non-Cloudinary
       // video host — rare but possible).
       if (!veoVideoUrl) {
-        // Stage 1 — generate the storyboard ONCE. It directs Grok's motion
-        // via camera/audio/vibe. The brand-script overlay downstream
-        // handles on-screen text independently from ad.copy + layoutInput.
+        // Stage 1 — prepare context: resolves the per-ad model + aspect
+        // and warms the layoutInput cache for the brand-script overlay.
+        // storyboard is always null on the Atlas path now (the Ken Burns
+        // prompt directs motion; the GPT storyboard stage is retired) —
+        // the stamp below only fires for legacy/vertex storyboards.
         const { storyboard } = await veoPrepareStoryboard({ ad });
         veoStoryboard = storyboard || null;
 
@@ -505,6 +587,7 @@ async function renderOne(run, job, adId, index, renderToken) {
         veoPrompt             = veoResult.prompt || null;
         veoStoryboard         = veoResult.storyboard || veoStoryboard;
         veoCloudinaryPublicId = veoResult.cloudinaryPublicId || null;
+        veoModel              = veoResult.model || null;
       }
 
       // Stamp the video URL + Ad state. Done BEFORE the brand-script
@@ -526,6 +609,7 @@ async function renderOne(run, job, adId, index, renderToken) {
             veoAspectRatio,
             veoPrompt,
             veoStoryboard,
+            veoModel,
             renderUrl:          veoVideoUrl,
             posterUrl:          fallbackPosterUrl || veoVideoUrl,
             cloudinaryPublicId: veoCloudinaryPublicId,
@@ -706,6 +790,12 @@ router.get('/runs/:runId', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const run = await CampaignRun.findOne({ runId: req.params.runId, brandId }).lean();
     if (!run) return res.status(404).json({ error: 'run not found' });
     // queuedRemaining drives the "Generate more" affordance on the
@@ -838,6 +928,12 @@ router.get('/', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
 
     const filter = { brandId };
     if (req.query.campaignId)  filter.campaignId  = req.query.campaignId;
@@ -912,6 +1008,12 @@ router.get('/meta-adsets', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const { listAdsetsForBrand } = require('../services/metaAdsPushService');
     const adsets = await listAdsetsForBrand(brandId);
     res.json({ adsets });
@@ -919,6 +1021,29 @@ router.get('/meta-adsets', async (req, res) => {
     console.error('meta-adsets list failed:', err);
     res.status(500).json({ error: err.message || 'meta-adsets list failed' });
   }
+});
+
+// GET /api/ads/video-models — the operator-selectable video generation
+// models, for the Brand settings card and the regenerate dropdown.
+// Derived from atlasVideoService.MODEL_CAPS (single source of truth);
+// `default` marks the built-in default the resolver falls back to.
+// NOTE: must stay registered above the '/:id' routes.
+router.get('/video-models', async (req, res) => {
+  const {
+    MODEL_CAPS, BUILT_IN_DEFAULT_MODEL, estimateRenderCostUsd
+  } = require('../services/atlasVideoService');
+  const models = Object.entries(MODEL_CAPS)
+    .filter(([, caps]) => caps.selectable)
+    .map(([slug, caps]) => ({
+      slug,
+      label:                 caps.label || slug,
+      default:               slug === BUILT_IN_DEFAULT_MODEL,
+      supportedAspectRatios: caps.supportedAspectRatios || [],
+      maxReferenceImages:    caps.maxReferenceImages || 1,
+      requiresVideoSeed:     !!caps.requiresVideoSeed,
+      estCostPer8s:          estimateRenderCostUsd({ model: slug, durationSec: caps.defaultDuration || 8 })
+    }));
+  res.json({ models });
 });
 
 router.post('/push-to-meta', express.json(), async (req, res) => {
@@ -929,6 +1054,12 @@ router.post('/push-to-meta', express.json(), async (req, res) => {
     if (!adsetId)         return res.status(400).json({ error: 'adsetId required' });
     if (!Array.isArray(adIds) || !adIds.length) {
       return res.status(400).json({ error: 'adIds (non-empty array) required' });
+    }
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
     }
     const { pushAdsBatch } = require('../services/metaAdsPushService');
     const result = await pushAdsBatch({
@@ -958,6 +1089,12 @@ router.post('/:id/approve', express.json(), async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const approved = req.body?.approved !== false;   // default true
     const set = {
       approved,
@@ -990,10 +1127,29 @@ router.post('/:id/regenerate', express.json(), async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const prompt = String(req.body?.prompt || '').trim();
     if (!prompt) return res.status(400).json({ error: 'prompt is required' });
     if (prompt.length > 1000) return res.status(400).json({ error: 'prompt is too long (max 1000 chars)' });
     const mode = req.body?.mode === 'full' ? 'full' : 'light';
+
+    // Optional per-run video model override (the regenerate dropdown).
+    // Only operator-selectable registry slugs are accepted — persisted
+    // env/back-compat slugs aren't offered per-run.
+    let videoModel = null;
+    if (req.body?.videoModel != null && req.body.videoModel !== '') {
+      const { MODEL_CAPS } = require('../services/atlasVideoService');
+      const slug = String(req.body.videoModel);
+      if (!MODEL_CAPS[slug]?.selectable) {
+        return res.status(400).json({ error: `unknown video model '${slug}'` });
+      }
+      videoModel = slug;
+    }
 
     const regen = require('../services/adRegenerateService');
     let ad;
@@ -1013,7 +1169,7 @@ router.post('/:id/regenerate', express.json(), async (req, res) => {
     });
 
     setImmediate(() => {
-      regen.regenerateAd({ ad, prompt, mode, requestedBy })
+      regen.regenerateAd({ ad, prompt, mode, requestedBy, videoModel })
         .catch(err => console.error(`❌ regenerate setImmediate crash: ${err.message}`));
     });
   } catch (err) {
@@ -1026,6 +1182,12 @@ router.patch('/:id', express.json(), async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const { status } = req.body || {};
     if (!AD_STATUSES.includes(status)) {
       return res.status(400).json({ error: `status must be one of: ${AD_STATUSES.join(', ')}` });
@@ -1052,6 +1214,12 @@ router.delete('/:id', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const ad = await Ad.findOneAndDelete({ _id: req.params.id, brandId }).lean();
     if (!ad) return res.status(404).json({ error: 'ad not found' });
     let cloudinary = null;
@@ -1073,6 +1241,12 @@ router.get('/:id', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const ad = await Ad.findOne({ _id: req.params.id, brandId }).lean();
     if (!ad) return res.status(404).json({ error: 'ad not found' });
     res.json({ ad: projectAd(ad, /* full */ true) });
@@ -1095,6 +1269,14 @@ router.get('/:id', async (req, res) => {
 // embedded.
 router.get('/:adId/preview-page', async (req, res) => {
   try {
+    const ad = await Ad.findById(req.params.adId).select('brandId').lean();
+    if (!ad) {
+      const err = new Error('Ad not found');
+      err.status = 404;
+      throw err;
+    }
+    await assertBrandInTenant(ad.brandId, req);
+
     const html = await buildPreviewHtmlForAd(req.params.adId);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     // Don't let browsers cache the preview — outputHtml / overlay /
