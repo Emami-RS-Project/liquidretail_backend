@@ -34,6 +34,7 @@ const { deleteFromCloudinary } = require('../services/cloudinaryService');
 const { buildVideoCompositeUrl } = require('../services/videoCompositeService');
 const { buildPreviewHtmlForAd }  = require('../services/adPreviewPageService');
 const registry = require('../services/templateRegistry');
+const { tenantFilter, assertBrandInTenant, assertCampaignInTenant } = require('../middleware/tenantHelpers');
 
 // Lifecycle states the PATCH endpoint can flip an Ad into. queued /
 // rendering / failed are set by the pipeline only — operators don't
@@ -82,6 +83,13 @@ router.post('/preview', async (req, res) => {
     } = req.body || {};
     if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
     if (!templateIds.length) return res.status(400).json({ error: 'templateIds required (at least 1 template)' });
+
+    try {
+      await assertCampaignInTenant(campaignId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
 
     const job = await expandWizardJob({
       campaignId,
@@ -153,8 +161,8 @@ router.post('/generate', async (req, res) => {
     // POST /api/campaigns so a campaign created before the gate landed
     // still can't generate ads on a half-ingested brand. brandId is
     // resolved from the Campaign so the wizard caller doesn't have to
-    // re-pass it.
-    const gateCampaign = await Campaign.findById(campaignId).select('brandId').lean();
+    // re-pass it. Tenant-scoped so cross-tenant campaignIds 404.
+    const gateCampaign = await Campaign.findOne(tenantFilter(req, { _id: campaignId })).select('brandId').lean();
     if (!gateCampaign) return res.status(404).json({ error: 'campaign not found' });
     const { getAdReadiness } = require('../services/adReadinessService');
     const readiness = await getAdReadiness(gateCampaign.brandId);
@@ -222,6 +230,7 @@ router.post('/generate', async (req, res) => {
     });
 
     setImmediate(async () => {
+      let adIds;
       try {
         const job = await expandWizardJob({
           campaignId,
@@ -248,7 +257,7 @@ router.post('/generate', async (req, res) => {
           return;
         }
 
-        const adIds = await selectAdsForRun({ campaignId, limit: MAX_CREATIVES_PER_RUN });
+        adIds = await selectAdsForRun({ campaignId, limit: MAX_CREATIVES_PER_RUN });
         if (!adIds.length) {
           await CampaignRun.updateOne(
             { _id: run._id },
@@ -274,6 +283,12 @@ router.post('/generate', async (req, res) => {
         await runRenderLoop(run, { ...job, platformFormat }, adIds, renderToken);
       } catch (err) {
         console.error(`❌ campaign run ${runId} prep/render crashed:`, err);
+        if (adIds && adIds.length) {
+          await Ad.updateMany(
+            { _id: { $in: adIds }, status: 'rendering' },
+            { $set: { status: 'queued', updatedAt: new Date() } }
+          ).catch(() => {});
+        }
         await CampaignRun.updateOne(
           { _id: run._id },
           { status: 'failed', completedAt: new Date(),
@@ -298,6 +313,13 @@ router.post('/runs', express.json(), async (req, res) => {
   try {
     const { campaignId } = req.body || {};
     if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+
+    try {
+      await assertCampaignInTenant(campaignId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
 
     const campaign = await Campaign.findById(campaignId).lean();
     if (!campaign) return res.status(404).json({ error: 'campaign not found' });
@@ -364,6 +386,10 @@ router.post('/runs', express.json(), async (req, res) => {
     setImmediate(() => {
       runRenderLoop(run, job, adIds, renderToken).catch(err => {
         console.error(`❌ campaign run ${runId} crashed:`, err);
+        Ad.updateMany(
+          { _id: { $in: adIds }, status: 'rendering' },
+          { $set: { status: 'queued', updatedAt: new Date() } }
+        ).catch(() => {});
         CampaignRun.updateOne(
           { _id: run._id },
           { status: 'failed', completedAt: new Date() }
@@ -383,7 +409,10 @@ router.post('/runs', express.json(), async (req, res) => {
 async function runRenderLoop(run, job, adIds, renderToken) {
   const t0 = Date.now();
   // Veo calls are expensive and quota-limited — serialize them by default.
-  const isVeoRun    = job.platformFormat === 'meta_reels_9_16';
+  // Derive from the actual ads (not job.platformFormat) so mixed / non-reels
+  // veo batches still get VEO_CONCURRENCY.
+  const veoCount    = await Ad.countDocuments({ _id: { $in: adIds }, renderRoute: 'veo' });
+  const isVeoRun    = veoCount > 0;
   const concurrency = isVeoRun ? VEO_CONCURRENCY : RENDER_CONCURRENCY;
   console.log(
     `🚀 [campaignRun ${run.runId}] start — ${adIds.length} ad(s) ` +
@@ -761,6 +790,12 @@ router.get('/runs/:runId', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const run = await CampaignRun.findOne({ runId: req.params.runId, brandId }).lean();
     if (!run) return res.status(404).json({ error: 'run not found' });
     // queuedRemaining drives the "Generate more" affordance on the
@@ -893,6 +928,12 @@ router.get('/', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
 
     const filter = { brandId };
     if (req.query.campaignId)  filter.campaignId  = req.query.campaignId;
@@ -967,6 +1008,12 @@ router.get('/meta-adsets', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const { listAdsetsForBrand } = require('../services/metaAdsPushService');
     const adsets = await listAdsetsForBrand(brandId);
     res.json({ adsets });
@@ -1008,6 +1055,12 @@ router.post('/push-to-meta', express.json(), async (req, res) => {
     if (!Array.isArray(adIds) || !adIds.length) {
       return res.status(400).json({ error: 'adIds (non-empty array) required' });
     }
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const { pushAdsBatch } = require('../services/metaAdsPushService');
     const result = await pushAdsBatch({
       adIds, adsetId, brandId,
@@ -1036,6 +1089,12 @@ router.post('/:id/approve', express.json(), async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const approved = req.body?.approved !== false;   // default true
     const set = {
       approved,
@@ -1068,6 +1127,12 @@ router.post('/:id/regenerate', express.json(), async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const prompt = String(req.body?.prompt || '').trim();
     if (!prompt) return res.status(400).json({ error: 'prompt is required' });
     if (prompt.length > 1000) return res.status(400).json({ error: 'prompt is too long (max 1000 chars)' });
@@ -1117,6 +1182,12 @@ router.patch('/:id', express.json(), async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const { status } = req.body || {};
     if (!AD_STATUSES.includes(status)) {
       return res.status(400).json({ error: `status must be one of: ${AD_STATUSES.join(', ')}` });
@@ -1143,6 +1214,12 @@ router.delete('/:id', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const ad = await Ad.findOneAndDelete({ _id: req.params.id, brandId }).lean();
     if (!ad) return res.status(404).json({ error: 'ad not found' });
     let cloudinary = null;
@@ -1164,6 +1241,12 @@ router.get('/:id', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
     if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
     const ad = await Ad.findOne({ _id: req.params.id, brandId }).lean();
     if (!ad) return res.status(404).json({ error: 'ad not found' });
     res.json({ ad: projectAd(ad, /* full */ true) });
@@ -1186,6 +1269,14 @@ router.get('/:id', async (req, res) => {
 // embedded.
 router.get('/:adId/preview-page', async (req, res) => {
   try {
+    const ad = await Ad.findById(req.params.adId).select('brandId').lean();
+    if (!ad) {
+      const err = new Error('Ad not found');
+      err.status = 404;
+      throw err;
+    }
+    await assertBrandInTenant(ad.brandId, req);
+
     const html = await buildPreviewHtmlForAd(req.params.adId);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     // Don't let browsers cache the preview — outputHtml / overlay /

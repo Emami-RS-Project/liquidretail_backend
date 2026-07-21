@@ -832,17 +832,56 @@ async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, v
     `paramShape=${caps.paramShape} promptChars=${prompt.length} promptBytes=${Buffer.byteLength(prompt, 'utf8')}`
   );
 
-  const res = await axios.post(
-    `${BASE_URL}/model/generateVideo`,
-    body,
-    {
-      headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' },
-      timeout: 60000
+  // Bounded rate-limit retry — same isRateLimit detection + RATE_LIMIT_BACKOFF_MS
+  // schedule as pollPrediction. Under VEO_CONCURRENCY > 1 the provider 429s
+  // (sometimes wrapped in an Atlas 500) on submit; without this the ad fails
+  // before any prediction id exists. Non-rate-limit errors still throw
+  // immediately. Cap of 4 attempts (1 initial + 3 backoffs).
+  const maxAttempts = 4;
+  let consecutiveRateLimits = 0;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await axios.post(
+        `${BASE_URL}/model/generateVideo`,
+        body,
+        {
+          headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' },
+          timeout: 60000
+        }
+      );
+      const predictionId = res.data?.data?.id;
+      if (!predictionId) throw new Error(`atlasVideo: no prediction id in response: ${JSON.stringify(res.data).slice(0, 300)}`);
+      return predictionId;
+    } catch (err) {
+      // "no prediction id" is a successful HTTP response with a bad body —
+      // not a rate-limit; rethrow immediately.
+      if (err.message && err.message.startsWith('atlasVideo: no prediction id')) throw err;
+
+      const summary = summarizeAxiosError(err);
+      if (isRateLimit(summary) && attempt < maxAttempts) {
+        consecutiveRateLimits++;
+        const backoffMs = RATE_LIMIT_BACKOFF_MS[Math.min(consecutiveRateLimits - 1, RATE_LIMIT_BACKOFF_MS.length - 1)];
+        console.warn(
+          `   ⏳ atlasVideo: submit rate-limited ` +
+          `(hit #${consecutiveRateLimits}, attempt ${attempt}/${maxAttempts}, backing off ${backoffMs / 1000}s): ${summary.body || summary.message}`
+        );
+        await new Promise(r => setTimeout(r, backoffMs));
+        continue;
+      }
+      // Exhausted retries, or a non-rate-limit error — surface immediately.
+      if (isRateLimit(summary)) {
+        throw new Error(
+          `atlasVideo: submit rate-limited after ${maxAttempts} attempts: ${summary.body || summary.message}`
+        );
+      }
+      const status = summary.status;
+      throw new Error(
+        `atlasVideo: submit failed${status ? ` (${status})` : ''}: ${summary.body || summary.message}`
+      );
     }
-  );
-  const predictionId = res.data?.data?.id;
-  if (!predictionId) throw new Error(`atlasVideo: no prediction id in response: ${JSON.stringify(res.data).slice(0, 300)}`);
-  return predictionId;
+  }
+  // Unreachable — loop either returns or throws — kept for clarity.
+  throw new Error('atlasVideo: submit failed after retries');
 }
 
 // ── Public API ────────────────────────────────────────────────────────
@@ -1121,19 +1160,26 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     durationSec,
     resolution:  renderResolution
   });
-  await recordFlatCost({
-    stage:      'atlas_video_render',
-    provider:   'atlas',
-    model,
-    purposeTag: caps.paramShape,
-    brandId:    media.brandId || null,
-    campaignId: ad.campaignId || null,
-    adId:       ad._id || null,
-    mediaId:    media._id || null,
-    productId:  ad.productId || null,
-    costUsd:    costUsd || 0,
-    durationMs: elapsedMs
-  });
+  // Non-fatal: render + Cloudinary mirror already succeeded. A telemetry
+  // rejection here must not fail generateForAd post-payment — the caller
+  // would never store videoUrl, and a retry would double-bill the provider.
+  try {
+    await recordFlatCost({
+      stage:      'atlas_video_render',
+      provider:   'atlas',
+      model,
+      purposeTag: caps.paramShape,
+      brandId:    media.brandId || null,
+      campaignId: ad.campaignId || null,
+      adId:       ad._id || null,
+      mediaId:    media._id || null,
+      productId:  ad.productId || null,
+      costUsd:    costUsd || 0,
+      durationMs: elapsedMs
+    });
+  } catch (err) {
+    console.warn('⚠️ atlasVideo cost telemetry failed (non-fatal): ' + err.message);
+  }
 
   console.log(
     `🎬 atlasVideo[ad=${ad._id}]: done — model=${model} aspect=${aspectRatio} ` +

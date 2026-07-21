@@ -107,6 +107,14 @@ function resolveSubject({ layoutInput, sourceMedia, media }) {
   } else if (subjects[0] && Number.isFinite(subjects[0].x1) && Number.isFinite(subjects[0].x2)) {
     const cx = (subjects[0].x1 + subjects[0].x2) / 2;
     hPos = cx < 0.35 ? 'left' : cx > 0.65 ? 'right' : 'center';
+  } else {
+    // Mirror vSpan fallback: when sourceMedia is absent, derive hPos
+    // from the primary entry in media.subjects (x1/x2 shape).
+    const m = (media?.subjects || []).find(s => s?.role === 'primary' || !s?.role);
+    if (m && Number.isFinite(m.x1) && Number.isFinite(m.x2)) {
+      const cx = (m.x1 + m.x2) / 2;
+      hPos = cx < 0.35 ? 'left' : cx > 0.65 ? 'right' : 'center';
+    }
   }
 
   const vSpan = (yTop != null && yBottom != null)

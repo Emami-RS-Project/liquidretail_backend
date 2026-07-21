@@ -5,6 +5,8 @@
 
 const Media     = require('../models/Media');
 const DetectRun = require('../models/DetectRun');
+const Brand     = require('../models/Brand');
+const Campaign  = require('../models/Campaign');
 
 // Inject `{ advertiserId: req.advertiserId }` into a Mongoose query
 // filter. Throws if req.advertiserId is missing — callers should
@@ -50,4 +52,36 @@ async function assertRunInTenant(runId, req) {
   return legacyRun;
 }
 
-module.exports = { tenantFilter, assertMediaInTenant, assertRunInTenant };
+// Verify that a Brand doc belongs to the requesting Advertiser.
+// Returns the Brand doc on success; throws 404 if not found OR
+// advertiserId mismatch (404 rather than 403 to avoid existence leaks).
+async function assertBrandInTenant(brandId, req) {
+  const brand = await Brand.findOne(tenantFilter(req, { _id: brandId })).lean();
+  if (!brand) {
+    const err = new Error('Brand not found');
+    err.status = 404;
+    throw err;
+  }
+  return brand;
+}
+
+// Verify that a Campaign doc belongs to the requesting Advertiser.
+// Returns the Campaign doc on success; throws 404 if not found OR
+// advertiserId mismatch (404 rather than 403 to avoid existence leaks).
+async function assertCampaignInTenant(campaignId, req) {
+  const campaign = await Campaign.findOne(tenantFilter(req, { _id: campaignId })).lean();
+  if (!campaign) {
+    const err = new Error('Campaign not found');
+    err.status = 404;
+    throw err;
+  }
+  return campaign;
+}
+
+module.exports = {
+  tenantFilter,
+  assertMediaInTenant,
+  assertRunInTenant,
+  assertBrandInTenant,
+  assertCampaignInTenant
+};

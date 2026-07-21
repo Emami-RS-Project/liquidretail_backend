@@ -107,11 +107,12 @@ async function regenerateAd({ ad, prompt, mode, requestedBy, videoModel = null }
     ` prompt="${historyEntry.prompt.slice(0, 60)}${historyEntry.prompt.length > 60 ? '…' : ''}"`
   );
 
-  // Lock the ad + append the in-flight history entry. The lock is
-  // belt-and-suspenders alongside the preflight check — race-window
-  // between preflight + setImmediate is small but non-zero.
-  await Ad.updateOne(
-    { _id: adId },
+  // Atomic lock + append in-flight history entry. Filter requires
+  // regenerating ≠ true so two concurrent workers cannot both win the
+  // race past preflight; the loser sees modifiedCount === 0 and exits
+  // without spending provider quota or touching progress.
+  const lockResult = await Ad.updateOne(
+    { _id: adId, regenerating: { $ne: true } },
     {
       $set: {
         regenerating:      true,
@@ -123,6 +124,10 @@ async function regenerateAd({ ad, prompt, mode, requestedBy, videoModel = null }
       }
     }
   );
+  if (lockResult.modifiedCount === 0) {
+    console.log(`🔁 regenerate[ad=${adId}]: already in flight — skipped`);
+    return;
+  }
 
   // Unified progress row (ActivityDock). Cancel is honored between
   // stages (veo → composite / image-gen) — the in-flight provider call
@@ -144,7 +149,13 @@ async function regenerateAd({ ad, prompt, mode, requestedBy, videoModel = null }
 
     const durationMs = Date.now() - startedAt;
     await markComplete(adId, { status: 'done', durationMs });
-    await progressRun.succeed({ durationMs });
+    // progress-row failures must not re-enter the outer catch (which
+    // would markComplete status:'failed' over a real success).
+    try {
+      await progressRun.succeed({ durationMs });
+    } catch (progErr) {
+      console.warn(`🔁 regenerate[ad=${adId}]: progressRun.succeed failed (non-fatal) — ${progErr.message}`);
+    }
     console.log(`🔁 regenerate[ad=${adId}]: done in ${Math.round(durationMs / 1000)}s`);
   } catch (err) {
     const durationMs = Date.now() - startedAt;
@@ -312,28 +323,23 @@ async function setStage(adId, stage) {
 }
 
 async function markComplete(adId, { status, durationMs, error }) {
-  // Tail history entry was pushed with status='pending'; update it in
-  // place via positional. The entry is always the LAST one (we just
-  // pushed it at lock time + capped to HISTORY_CAP), so $position via
-  // an array path with $slice already kept the right order.
-  const ad = await Ad.findById(adId).select('regenerationHistory').lean();
-  const hist = Array.isArray(ad?.regenerationHistory) ? ad.regenerationHistory.slice() : [];
-  if (hist.length) {
-    const tail = hist[hist.length - 1];
-    tail.status     = status;
-    tail.durationMs = durationMs;
-    if (error) tail.error = error;
-  }
+  // Atomic update of the pending history entry via arrayFilters.
+  // With the atomic lock in regenerateAd at most one pending entry
+  // exists, so matching e.status:'pending' is safe and avoids the
+  // prior read-modify-write that could stomp a concurrent push.
   await Ad.updateOne(
     { _id: adId },
     {
       $set: {
-        regenerating:        false,
-        regenerationStage:   null,
-        regenerationHistory: hist,
-        updatedAt:           new Date()
+        regenerating:                          false,
+        regenerationStage:                     null,
+        'regenerationHistory.$[e].status':     status,
+        'regenerationHistory.$[e].durationMs': durationMs,
+        'regenerationHistory.$[e].error':      error || null,
+        updatedAt:                             new Date()
       }
-    }
+    },
+    { arrayFilters: [{ 'e.status': 'pending' }] }
   );
 }
 

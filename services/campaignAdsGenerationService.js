@@ -401,6 +401,37 @@ async function expandWizardJob({
     return result;
   }
 
+  // Concept-driven dryRun — approximate V2 counts without running the
+  // Director. Real generate path emits ~3 judged concepts/product × kinds,
+  // then caps image→ADS_PER_PRODUCT_CAP / video→VEO_ADS_PER_PRODUCT_CAP.
+  // Concept count is decided at generate time; this is a cap-based estimate
+  // so the wizard's "will produce N ads" isn't inflated by the legacy
+  // cartesian (seeds × templates × ratios) fall-through below.
+  if (useConceptDriven && dryRun) {
+    const perProductEstimate = resolvedKinds.reduce((sum, kind) => {
+      if (kind === 'video') return sum + VEO_ADS_PER_PRODUCT_CAP;
+      // image (and any other non-video kind)
+      return sum + Math.min(3, ADS_PER_PRODUCT_CAP);
+    }, 0);
+    // Brand-only (no productIds) is one null-keyed group — same as
+    // runConceptDrivenExpansion's productIterations.
+    const estimateProducts = productIds.length > 0 ? productIds : [null];
+    const byProduct = {};
+    for (const pid of estimateProducts) {
+      byProduct[pid ? String(pid) : 'NULL'] = perProductEstimate;
+    }
+    const total = perProductEstimate * estimateProducts.length;
+    return {
+      campaignId: String(campaignId), brandId, campaignKind,
+      dryRun: true,
+      total,
+      byProduct,
+      byVariantKind: { ugc: 0, product_image: 0 },
+      seedCount:    0,
+      productCount: estimateProducts.length
+    };
+  }
+
   // ── 1. Build seeds — flat list of {productId, mediaId, matchTier, variantKind, suitabilityScore, fileType} ──
   const useBrandOnly = productIds.length === 0 && mediaIds.length === 0;
   let seeds = [];
@@ -1598,12 +1629,15 @@ async function runConceptDrivenExpansion({
     `alreadyQueued=${alreadyQueued} totalQueued=${queuedCount}`
   );
 
+  // byProduct from POST-CAP payloads (the array passed to insertMany) —
+  // r.payloads is pre-cap and would over-report vs what actually queued.
   return {
     campaignId: String(campaignId), brandId, campaignKind,
     queuedCount, newlyQueued: newAdIds.length, alreadyQueued,
     newAdIds, total: payloads.length,
-    byProduct: perProductResults.reduce((acc, r) => {
-      acc[r.productId ? String(r.productId) : 'NULL'] = r.payloads.length;
+    byProduct: payloads.reduce((acc, p) => {
+      const k = p.productId ? String(p.productId) : 'NULL';
+      acc[k] = (acc[k] || 0) + 1;
       return acc;
     }, {}),
     conceptDriven: true,
