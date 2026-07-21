@@ -70,7 +70,8 @@ function makeNoopHandle() {
     succeed() { return Promise.resolve(); },
     fail() { return Promise.resolve(); },
     async checkpoint() { return true; },
-    isCancelRequested() { return false; }
+    isCancelRequested() { return false; },
+    markCancelled() { return Promise.resolve(); }
   };
   return noop;
 }
@@ -250,6 +251,16 @@ function makeHandle(doc) {
     // Non-throwing view of the same cache checkpoint() refreshes.
     isCancelRequested() {
       return cancelCached;
+    },
+
+    // Terminal cancel WITHOUT throwing — for services with their own
+    // break-style abort flow (e.g. apify demo sync's legacy /abort flag).
+    markCancelled(note) {
+      closeTimers();
+      return flush(
+        { status: 'cancelled', endedAt: new Date(), note: note || 'Cancelled — partial results kept' },
+        { force: true }
+      ).catch(() => {});
     }
   };
 

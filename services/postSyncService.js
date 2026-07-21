@@ -107,6 +107,7 @@ function buildPlatformStats(post, insights, mediaType) {
 // per-credential ingestion.
 async function syncPosts(brandId, options = {}) {
   const t0 = Date.now();
+  const { startRun, CancelledError } = require('./progressService');
   const credFilter = {
     brandId, type: 'instagram', status: 'active', igUserId: { $exists: true, $ne: null }
   };
@@ -119,6 +120,12 @@ async function syncPosts(brandId, options = {}) {
         : 'no active Instagram credential with an igUserId for this brand' };
   }
 
+  // Unified progress row (ActivityDock) — cancellable between posts.
+  const run = options.run
+    || await startRun({ kind: 'social-ingest', advertiserId: creds[0].advertiserId, brandId, label: options.label || 'Social posts ingest' });
+  const ownRun = !options.run;
+
+  try {
   // Multi-credential path.
   if (creds.length > 1 && !options.credentialId) {
     const aggregated = { ok: true, fetched: 0, ingested: 0, skipped: 0, capSkipped: 0, errors: 0, queuedRunIds: [], perCredential: [] };
@@ -129,7 +136,9 @@ async function syncPosts(brandId, options = {}) {
       ? null
       : await capRemaining(creds[0].advertiserId, options.dailyDetectRunCap);
     for (const c of creds) {
-      const r = await syncPostsForCred(c, { ...options, capRemaining: remaining });
+      await run.checkpoint();
+      run.stage(`ingesting @${c.igUsername || c._id}`);
+      const r = await syncPostsForCred(c, { ...options, capRemaining: remaining, run });
       aggregated.perCredential.push({ credentialId: String(c._id), igUsername: c.igUsername, ...r });
       if (r.ok) {
         aggregated.fetched     += r.fetched     || 0;
@@ -142,12 +151,28 @@ async function syncPosts(brandId, options = {}) {
       }
     }
     aggregated.durationMs = Date.now() - t0;
+    if (ownRun) await run.succeed({ fetched: aggregated.fetched, ingested: aggregated.ingested, skipped: aggregated.skipped });
     return aggregated;
   }
 
-  const result = await syncPostsForCred(creds[0], options);
+  run.stage('ingesting posts');
+  const result = await syncPostsForCred(creds[0], { ...options, run });
   result.durationMs = Date.now() - t0;
+  if (ownRun) {
+    if (result.ok !== false) await run.succeed({ fetched: result.fetched, ingested: result.ingested, skipped: result.skipped });
+    else await run.fail(new Error(result.reason || 'sync failed'));
+  }
   return result;
+  } catch (err) {
+    if (err instanceof CancelledError) {
+      // Graceful stop: media ingested so far stays; run row already
+      // marked cancelled by checkpoint().
+      console.log(`📸 posts sync cancelled by operator: brand=${brandId}`);
+      return { ok: false, cancelled: true, reason: 'cancelled by operator', durationMs: Date.now() - t0 };
+    }
+    if (ownRun) await run.fail(err);
+    throw err;
+  }
 }
 
 // Count today's auto-queued DetectRuns for an advertiser, return how
@@ -225,7 +250,13 @@ async function syncPostsForCred(cred, options = {}) {
     queuedRunIds: []
   };
 
+  let postIdx = 0;
   for (const post of posts) {
+    // Cooperative cancel + live counter for the ActivityDock.
+    if (options.run) {
+      if (++postIdx % 5 === 0) await options.run.checkpoint();
+      options.run.tick(postIdx, posts.length, `${summary.ingested} ingested · ${summary.skipped} skipped`);
+    }
     const externalId = String(post.id || '').trim();
     if (!externalId) { summary.errors++; continue; }
 

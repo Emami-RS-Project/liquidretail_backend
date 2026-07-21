@@ -74,7 +74,7 @@ async function runDueSyncs() {
                   || (now - new Date(cred.lastCatalogSyncAt).getTime()) >= catalogCadenceMs;
         if (due) {
           try {
-            const result = await syncCatalog(cred.brandId, { credentialId: cred._id });
+            const result = await syncCatalog(cred.brandId, { label: 'Catalog sync (scheduled)',  credentialId: cred._id });
             if (result.ok) summary.catalogsSynced++;
             else summary.errors.push({ brandId: cred.brandId, credentialId: String(cred._id), kind: 'catalog', reason: result.reason });
           } catch (err) {
@@ -89,7 +89,7 @@ async function runDueSyncs() {
                   || (now - new Date(cred.lastPostsSyncAt).getTime()) >= postsCadenceMs;
         if (due) {
           try {
-            const result = await syncPosts(cred.brandId, {
+            const result = await syncPosts(cred.brandId, { label: 'Social posts ingest (scheduled)', 
               credentialId:      cred._id,
               limit:             25,
               dailyDetectRunCap: settings.dailyDetectRunCap ?? 50,

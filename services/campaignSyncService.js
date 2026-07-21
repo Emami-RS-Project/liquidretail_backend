@@ -46,7 +46,20 @@ async function syncCampaigns({ brandId, platform, credentialId }) {
   const t0 = Date.now();
   const summary = { ok: true, perCredential: [], totalUpserted: 0, totalErrors: 0 };
 
+  // Unified progress row (ActivityDock) — cancellable between credentials.
+  const { startRun, CancelledError } = require('./progressService');
+  const run = await startRun({ kind: 'campaign-sync', advertiserId: creds[0].advertiserId, brandId, label: `${platform} campaign sync` });
+
   for (const cred of creds) {
+    try { await run.checkpoint(); } catch (err) {
+      if (err instanceof CancelledError) {
+        summary.cancelled = true;
+        console.log(`📊 campaign sync cancelled by operator: brand=${brandId}`);
+        break;
+      }
+      throw err;
+    }
+    run.stage(`syncing ${cred.igUsername || cred.accountName || cred._id}`);
     let result;
     try {
       result = await adapter.syncForCredential(cred);
@@ -89,6 +102,8 @@ async function syncCampaigns({ brandId, platform, credentialId }) {
   }
 
   summary.durationMs = Date.now() - t0;
+  if (summary.cancelled) await run.markCancelled('Cancelled — synced credentials kept');
+  else await run.succeed({ upserted: summary.totalUpserted, errors: summary.totalErrors });
   console.log(`📣 campaign sync (${platform}): brand=${brandId} upserted=${summary.totalUpserted} errors=${summary.totalErrors} in ${summary.durationMs}ms`);
 
   // Phase 3 — auto-fire voice + brief derivation after campaign sync.

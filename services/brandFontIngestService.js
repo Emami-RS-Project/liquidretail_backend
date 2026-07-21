@@ -385,6 +385,23 @@ function familySlug(family) {
  */
 async function ingestBrandFonts(brand) {
   const t0 = Date.now();
+  const { startRun, CancelledError } = require('./progressService');
+  const run = await startRun({ kind: 'font-ingest', advertiserId: brand.advertiserId, brandId: brand._id, label: 'Website font ingest' });
+  try {
+    const result = await ingestBrandFontsInner(brand, run);
+    await run.succeed({ ingested: result.ingested?.length ?? 0, flagged: result.flagged?.length ?? 0 });
+    return result;
+  } catch (err) {
+    if (err instanceof CancelledError) {
+      return { ingested: [], flagged: [], errors: ['cancelled by operator'], cancelled: true };
+    }
+    await run.fail(err);
+    throw err;
+  }
+}
+
+async function ingestBrandFontsInner(brand, run) {
+  const t0 = Date.now();
   const websiteUrl = brand?.websiteUrl;
   if (!websiteUrl) throw new Error('brand font ingest: brand has no websiteUrl');
   const brandId = String(brand._id || brand.id || 'brand');
@@ -443,7 +460,11 @@ async function ingestBrandFonts(brand) {
   // 4–6. Classify, then mirror ingestable faces to Cloudinary.
   const ingested = [];
   const flagged = [];
+  run.stage('mirroring font faces');
+  let faceIdx = 0;
   for (const face of faces) {
+    await run.checkpoint();
+    run.tick(++faceIdx, faces.length);
     const license = classifyFontSource(face.url);
     const entryBase = {
       family: face.family,
