@@ -1,15 +1,21 @@
 // Atlas Cloud video generation — multi-model image-to-video service.
 //
-// Primary use case (today): Grok's reference-to-video model
-// (xai/grok-imagine-video/reference-to-video). Grok accepts 1–7
-// reference images and costs ~$0.50/sec. The model produces a motion-
-// only base video; all text overlays (headline, CTA, quote, brand mark)
+// Default model (today): Gemini Omni Flash image-to-video
+// (google/gemini-omni-flash/image-to-video-developer). Accepts 1–7
+// reference images, renders a fixed-duration clip (8s requested) at
+// 720p/1080p/4K, ~$1.00 per 8s/720p render. The default prompt is a
+// camera-only "Ken Burns" product-commercial spec — the model animates
+// a virtual camera over the supplied photographs and must not alter
+// the imagery. All text overlays (headline, CTA, quote, brand mark)
 // are composited downstream by the canonical brand-script overlay
 // (brandScriptExecutor + brandScripts/*.script.js).
 //
-// Reuses the existing prompt + storyboard pipeline (veoPromptBuilder +
-// veoStoryboardService). The storyboard directs Grok motion —
-// camera/audio/beats/vibe — and nothing else.
+// Model selection is per-ad via resolveVideoModel():
+//   CatalogProduct.videoSettings.model → Brand.videoSettings.model
+//   → ATLAS_VIDEO_MODEL env → BUILT_IN_DEFAULT_MODEL.
+// Every slug must exist in MODEL_CAPS; unknown overrides warn and fall
+// through to the next link. The previous default (Grok reference-to-
+// video, ~$0.50/sec) stays in the registry as an override option.
 //
 // Atlas API: 3-step async flow
 //   1. POST /model/generateVideo → { data: { id } }
@@ -25,8 +31,8 @@ const CatalogProduct            = require('../models/CatalogProduct');
 const LayoutInputArtifact       = require('../models/LayoutInputArtifact');
 const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact');
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
-const { buildVeoPrompt, resolveSubject, aspectRatioForPlatformFormat } = require('./veoPromptBuilder');
-const { generateStoryboard } = require('./veoStoryboardService');
+const { recordFlatCost } = require('./costTracker');
+const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('./veoPromptBuilder');
 const { buildLayoutInput }   = require('./layoutInputService');
 
 // Maps the concept's creative_style enum to an AI template id for
@@ -45,7 +51,7 @@ const CREATIVE_STYLE_TO_TEMPLATE = {
 };
 
 const BASE_URL     = process.env.ATLAS_BASE_URL || 'https://api.atlascloud.ai/api/v1';
-const DEFAULT_MODEL = process.env.ATLAS_VIDEO_MODEL || 'xai/grok-imagine-video/reference-to-video';
+const BUILT_IN_DEFAULT_MODEL = 'google/gemini-omni-flash/image-to-video-developer';
 const POLL_INTERVAL = parseInt(process.env.ATLAS_POLL_INTERVAL_MS, 10) || 5000;
 const MAX_POLL_MS   = parseInt(process.env.ATLAS_TIMEOUT_MS, 10)       || 600000; // 10 min
 
@@ -58,26 +64,58 @@ function enabled() {
 // ── Per-model capability table ────────────────────────────────────────
 //
 // Drives request shape:
-//   maxReferenceImages → caps how many image_urls we pack into the request
+//   maxReferenceImages → caps how many reference images we pack into the request
 //   paramShape         → which body fields Atlas expects for this provider
+//   promptByteCap      → hard prompt-size limit enforced by veoPromptBuilder
 //
 // Every model emits motion-only video. Text is composited downstream
-// by the brand-script overlay. The storyboard's beats/camera/audio
-// feed the prompt builder here.
+// by the brand-script overlay.
 const MODEL_CAPS = {
+  // Default. Duration is an ENUM (4|6|8|10), not a free range — the
+  // request must send it explicitly so the output matches the 8s @ 24fps
+  // assumption baked into the brand scripts. Aspect support is narrow
+  // (16:9 / 9:16 only): every other canvas format remaps via
+  // resolveAspectRatioForModel + the Cloudinary eager re-crop on upload.
+  // Prompt cap is 20,000 chars per Atlas's OpenAPI schema — enforced
+  // here as bytes, the conservative interpretation. Pricing:
+  // $0.20 base + $0.10/sec at 720p/1080p (8s ≈ $1.00); 4k adds $0.80.
+  // Atlas publishes no RPS figure for this slug (unlike Grok's 1 RPS) —
+  // the rate-limit backoff below stays defensive until confirmed.
+  'google/gemini-omni-flash/image-to-video-developer': {
+    minDuration: 4, maxDuration: 10,
+    durationEnum: [4, 6, 8, 10],
+    defaultDuration: 8,
+    resolutions: ['720p', '1080p', '4k'],
+    defaultResolution: '720p',
+    maxReferenceImages: 7,
+    paramShape: 'gemini-omni',
+    supportedAspectRatios: ['16:9', '9:16'],
+    promptByteCap: 20000,
+    // Atlas pricing: base fee by resolution + per-second rate.
+    // 8s/720p ≈ $1.00, 8s/4k ≈ $1.80.
+    pricing: { kind: 'base-plus-per-second', basePerResolution: { '720p': 0.20, '1080p': 0.20, '4k': 1.00 }, perSecond: 0.10 }
+  },
+  // Previous default — kept as a per-brand/per-product override option.
   'xai/grok-imagine-video/reference-to-video': {
     minDuration: 1, maxDuration: 10,
     resolutions: ['480p', '720p'],
     maxReferenceImages: 7,
     paramShape: 'grok',
-    supportedAspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3']
+    supportedAspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'],
+    promptByteCap: 4096,
+    // Flat per-second. 8s ≈ $4.00 — 4× the Gemini Omni default.
+    pricing: { kind: 'per-second', perSecond: 0.50 }
   },
   'google/veo3.1/image-to-video': {
     minDuration: 5, maxDuration: 8,
     resolutions: ['720p', '1080p'],
     maxReferenceImages: 1,
     paramShape: 'veo',
-    supportedAspectRatios: ['9:16', '16:9', '1:1']
+    supportedAspectRatios: ['9:16', '16:9', '1:1'],
+    promptByteCap: 4096,
+    // UNVERIFIED tier-dependent rate ($0.05–0.20/sec advertised) —
+    // conservative upper bound until confirmed against a real invoice.
+    pricing: { kind: 'per-second', perSecond: 0.20 }
   }
 };
 
@@ -85,8 +123,77 @@ function capsFor(model) {
   return MODEL_CAPS[model] || {
     minDuration: 5, maxDuration: 8, resolutions: ['720p'],
     maxReferenceImages: 1, paramShape: 'generic',
-    supportedAspectRatios: ['1:1', '16:9', '9:16']
+    supportedAspectRatios: ['1:1', '16:9', '9:16'],
+    promptByteCap: 4096
+    // no pricing — estimateRenderCostUsd returns null for unknown models
   };
+}
+
+// Best-effort USD estimate for one render, from the registry's pricing
+// entry. Null when the model has no pricing data — callers should log
+// 0-cost rather than guess. Not authoritative for billing (same caveat
+// as costTracker.MODEL_RATES); refresh alongside Atlas price changes.
+function estimateRenderCostUsd({ model, durationSec = 8, resolution = null } = {}) {
+  const caps = capsFor(model);
+  const p = caps.pricing;
+  if (!p) return null;
+  const dur = Number(durationSec) || 8;
+  if (p.kind === 'per-second') {
+    return Number((p.perSecond * dur).toFixed(4));
+  }
+  if (p.kind === 'base-plus-per-second') {
+    const res  = resolution || caps.defaultResolution || '720p';
+    const base = (p.basePerResolution && (p.basePerResolution[res] ?? p.basePerResolution['720p'])) || 0;
+    return Number((base + p.perSecond * dur).toFixed(4));
+  }
+  return null;
+}
+
+// ── Per-ad model resolution ───────────────────────────────────────────
+//
+// Most specific wins:
+//   product per-canvas → product model → brand per-canvas → brand model
+//   → ATLAS_VIDEO_MODEL env → built-in default.
+//
+// videoSettings shape (Brand + CatalogProduct, Mixed):
+//   { model: '<MODEL_CAPS slug>' | null,
+//     modelByCanvas: { '<platformFormat or aspectRatio>': '<slug>' } | null,
+//     referenceImageCount: 1–7 | null }   // default 3 (primary + 2 alts)
+//
+// modelByCanvas keys are matched against the ad's platformFormat first
+// (e.g. 'pmax_16_9'), then its canvas aspect ratio (e.g. '1:1', '9:16')
+// — pass both via canvasKeys. Canvas overrides exist mainly because
+// aspect support varies per model: the Gemini Omni default only renders
+// 16:9/9:16, so e.g. a 1:1 feed canvas can be pinned to Grok (native
+// 1:1) while vertical placements stay on the default.
+//
+// Every link must name a slug present in MODEL_CAPS; unknown slugs warn
+// and fall through so a typo'd override degrades to the next level
+// instead of silently running with generic caps. Both prepareStoryboard
+// and generateForAd resolve from the same persisted docs, so the two
+// stages of one ad always agree on the model.
+function resolveVideoModel({ brand = null, product = null, canvasKeys = [] } = {}) {
+  const keys = (Array.isArray(canvasKeys) ? canvasKeys : [canvasKeys]).filter(Boolean);
+  const links = [];
+  const pushCanvasLinks = (label, settings) => {
+    const map = settings?.modelByCanvas;
+    if (!map || typeof map !== 'object') return;
+    for (const k of keys) {
+      if (map[k]) links.push([`${label}.modelByCanvas['${k}']`, map[k]]);
+    }
+  };
+  pushCanvasLinks('CatalogProduct.videoSettings', product?.videoSettings);
+  links.push(['CatalogProduct.videoSettings.model', product?.videoSettings?.model]);
+  pushCanvasLinks('Brand.videoSettings', brand?.videoSettings);
+  links.push(['Brand.videoSettings.model', brand?.videoSettings?.model]);
+  links.push(['ATLAS_VIDEO_MODEL env', process.env.ATLAS_VIDEO_MODEL]);
+
+  for (const [source, slug] of links) {
+    if (!slug) continue;
+    if (MODEL_CAPS[slug]) return slug;
+    console.warn(`⚠️  resolveVideoModel: unknown slug '${slug}' from ${source} — falling through`);
+  }
+  return BUILT_IN_DEFAULT_MODEL;
 }
 
 // Atlas/Grok rejects unsupported aspect_ratio variants outright (422),
@@ -207,22 +314,32 @@ function cropImageUrlForAspect(originalUrl, aspectRatio) {
 
 // ── Reference image set ──────────────────────────────────────────────
 //
-// Minimalist 2-reference stack for Grok:
-//   Position 0: seed media (scene anchor — Director's pick, weights heaviest)
-//   Position 1: product_only image (fidelity anchor — locks the SKU's look)
+// Deterministic retrieval order:
+//   Position 0:  seed media (the ad's main image — for product-seeded
+//                ads this is the product hero)
+//   Position 1:  CatalogProduct.imageUrl (product hero) when distinct
+//   Position 2+: CatalogProduct.additionalImages in stored order
+//                (already capped at 4 by MAX_ALT_IMAGES upstream)
 //
-// Rationale: earlier stacks (up to 7 refs) diluted Grok's position-0
-// signal and occasionally caused the model to blend shot-type variants
-// into the generated video. A clean seed + one product-fidelity anchor
-// gives Grok exactly what it needs: what scene to animate, and what
-// the product looks like inside that scene. See the PR-2 canonical DR
-// design for the wider motivation.
+// How many of those actually ship is selectable: default 3 (primary +
+// first two alts), configurable from 1 up to 7 via
+// videoSettings.referenceImageCount (product → brand → env → default),
+// always clamped to the model's maxReferenceImages.
+//
+// Historical note: an earlier Grok-era iteration deliberately shipped a
+// minimalist 2-reference stack (seed + one product_only anchor) because
+// stacks of up to 7 refs diluted Grok's position-0 signal and
+// occasionally blended shot-type variants into the video. That tradeoff
+// is deliberately reversed here per operator direction — the Ken Burns
+// prompt instructs the model to treat every reference as a locked
+// photograph and never blend views. If multi-ref blending artifacts
+// reappear, this stack size is the first knob to revisit.
 
 // Return the fileUrl for the product-only reference — the first
-// product_only-classified catalog Media (already ordered by recency
-// upstream), falling back to CatalogProduct.imageUrl when no catalog
-// Media is classified. Returns null when neither is available; caller
-// logs and degrades gracefully (seed-only stack).
+// product_only-classified catalog Media, falling back to
+// CatalogProduct.imageUrl when no catalog Media is classified. Returns
+// null when neither is available; caller logs and degrades gracefully
+// (seed-only stack).
 function pickProductOnlyUrl(catalogMedias, product) {
   const first = (catalogMedias || []).find(
     m => m?.classification?.shotType === 'product_only' && m?.fileUrl
@@ -232,24 +349,89 @@ function pickProductOnlyUrl(catalogMedias, product) {
   return null;
 }
 
-function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio }) {
+// Default ships 3 references: the primary image + the first two alt
+// views. Operators can widen to the full 7-image stack (or narrow to
+// seed-only) per brand/product via videoSettings.referenceImageCount.
+const DEFAULT_REFERENCE_IMAGE_COUNT = 3;
+const MAX_REFERENCE_IMAGE_COUNT     = 7;
+
+// Same most-specific-wins chain as resolveVideoModel. Non-numeric and
+// out-of-range values warn and fall through; the result is additionally
+// clamped to the resolved model's maxReferenceImages by
+// buildReferenceImages.
+function resolveReferenceImageCount({ brand = null, product = null } = {}) {
+  const chain = [
+    ['CatalogProduct.videoSettings.referenceImageCount', product?.videoSettings?.referenceImageCount],
+    ['Brand.videoSettings.referenceImageCount',          brand?.videoSettings?.referenceImageCount],
+    ['ATLAS_REFERENCE_IMAGE_COUNT env',                  process.env.ATLAS_REFERENCE_IMAGE_COUNT]
+  ];
+  for (const [source, raw] of chain) {
+    if (raw == null || raw === '') continue;
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= MAX_REFERENCE_IMAGE_COUNT) return n;
+    console.warn(`⚠️  resolveReferenceImageCount: invalid value '${raw}' from ${source} (want 1–${MAX_REFERENCE_IMAGE_COUNT}) — falling through`);
+  }
+  return DEFAULT_REFERENCE_IMAGE_COUNT;
+}
+
+// Validate an operator-supplied videoSettings payload (Brand or
+// CatalogProduct PATCH). Returns an error string, or null when valid.
+// Render-time resolution stays defensive regardless (unknown slugs warn
+// and fall through) — this just catches typos at write time.
+function validateVideoSettings(vs) {
+  if (typeof vs !== 'object' || vs === null || Array.isArray(vs)) return 'videoSettings must be an object';
+  const badSlug = (slug) => `unknown video model '${slug}' — valid: ${Object.keys(MODEL_CAPS).join(', ')}`;
+  if (vs.model != null && vs.model !== '' && !MODEL_CAPS[vs.model]) return badSlug(vs.model);
+  if (vs.modelByCanvas != null) {
+    if (typeof vs.modelByCanvas !== 'object' || Array.isArray(vs.modelByCanvas)) {
+      return 'videoSettings.modelByCanvas must be an object map of canvas → model slug';
+    }
+    for (const [canvas, slug] of Object.entries(vs.modelByCanvas)) {
+      if (slug != null && slug !== '' && !MODEL_CAPS[slug]) return `modelByCanvas['${canvas}']: ${badSlug(slug)}`;
+    }
+  }
+  if (vs.referenceImageCount != null && vs.referenceImageCount !== '') {
+    const n = Number(vs.referenceImageCount);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_REFERENCE_IMAGE_COUNT) {
+      return `videoSettings.referenceImageCount must be an integer 1–${MAX_REFERENCE_IMAGE_COUNT}`;
+    }
+  }
+  return null;
+}
+
+function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio, caps = null, referenceCount = null }) {
+  const requested = Number.isFinite(referenceCount) && referenceCount >= 1
+    ? Math.min(referenceCount, MAX_REFERENCE_IMAGE_COUNT)
+    : DEFAULT_REFERENCE_IMAGE_COUNT;
+  const maxImages = Math.min(requested, caps?.maxReferenceImages || MAX_REFERENCE_IMAGE_COUNT);
   const urls = [];
   const seen = new Set();
 
-  const seedSource  = media?.fileUrl;
-  const seedCropped = cropImageUrlForAspect(seedSource, aspectRatio);
-  if (seedCropped) {
-    urls.push(seedCropped);
-    if (seedSource) seen.add(seedSource);
-  }
-
-  const productOnlyUrl = pickProductOnlyUrl(catalogMedias, product);
-  if (productOnlyUrl && !seen.has(productOnlyUrl)) {
-    const cropped = cropImageUrlForAspect(productOnlyUrl, aspectRatio);
+  const push = (sourceUrl) => {
+    if (!sourceUrl || seen.has(sourceUrl)) return;
+    seen.add(sourceUrl);
+    const cropped = cropImageUrlForAspect(sourceUrl, aspectRatio);
     if (cropped) urls.push(cropped);
+  };
+
+  // Main image first — always position 0.
+  push(media?.fileUrl);
+
+  // Product hero, then alts in their stored (retrieval) order. Dedupe
+  // is on the pre-crop source URL, so the same asset reached via seed
+  // and catalog never lands twice.
+  push(product?.imageUrl);
+  for (const altUrl of (Array.isArray(product?.additionalImages) ? product.additionalImages : [])) {
+    push(altUrl);
   }
 
-  return urls;
+  // Fallback: when the product carries no direct image fields, fill
+  // from the product_only-classified catalog Media (legacy behavior).
+  if (urls.length < 2) {
+    push(pickProductOnlyUrl(catalogMedias, product));
+  }
+
+  return urls.slice(0, maxImages);
 }
 
 // ── Polling ───────────────────────────────────────────────────────────
@@ -257,17 +439,30 @@ function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio 
 // Max consecutive errors for GENUINE transient failures (network blips,
 // generic 5xx). 4xx fails immediately; rate-limit responses (429 or a
 // 5xx wrapping a 429 body — see isRateLimit below) get their own
-// exponential backoff and DO NOT count against this budget, because
-// Grok's 1 RPS ceiling routinely burns through 6+ polls in a burst
-// when VEO_CONCURRENCY > 1. With POLL_INTERVAL=5s, cap of 12 gives
-// ~60s of leeway for other transients before surfacing the error.
+// exponential backoff and DO NOT count against this budget. Tuned for
+// Grok's documented 1 RPS ceiling, which routinely burned through 6+
+// polls in a burst when VEO_CONCURRENCY > 1; Gemini Omni's Atlas rate
+// limit is unpublished, so the same defensive budget stays. With
+// POLL_INTERVAL=5s, cap of 12 gives ~60s of leeway for other
+// transients before surfacing the error.
 const MAX_CONSECUTIVE_ERRORS = parseInt(process.env.ATLAS_MAX_CONSECUTIVE_ERRORS, 10) || 12;
 
 // Rate-limit backoff schedule (ms). Applied on each consecutive rate-limit
 // hit — resets on the next non-rate-limit response. Caps at the last value.
-// Grok's window is roughly per-second, so 30s should clear it easily; the
-// longer tail exists so a stuck rate-limit doesn't hammer Atlas.
-const RATE_LIMIT_BACKOFF_MS = [30_000, 60_000, 120_000, 120_000];
+// Defaults tuned for Grok's roughly per-second window (30s clears it
+// easily; the longer tail stops a stuck rate-limit from hammering Atlas).
+// Gemini Omni's real limit is unpublished — override the schedule via
+// ATLAS_RATE_LIMIT_BACKOFF_MS (comma-separated ms values) if it proves
+// tighter or looser in practice.
+const RATE_LIMIT_BACKOFF_MS = (() => {
+  const raw = String(process.env.ATLAS_RATE_LIMIT_BACKOFF_MS || '').trim();
+  if (raw) {
+    const parsed = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0);
+    if (parsed.length) return parsed;
+    console.warn(`⚠️  atlasVideo: unparseable ATLAS_RATE_LIMIT_BACKOFF_MS='${raw}' — using defaults`);
+  }
+  return [30_000, 60_000, 120_000, 120_000];
+})();
 
 function summarizeAxiosError(err) {
   const status = err.response?.status;
@@ -366,7 +561,11 @@ async function pollPrediction(predictionId) {
     const data = res.data?.data || {};
     const status = data.status;
     if (status === 'completed' || status === 'succeeded') {
-      const url = (data.outputs || [])[0];
+      // Providers vary the result field: `outputs` (array) is the
+      // common case, but some return `output` as a string or array —
+      // accept both (mirrors Atlas's own reference client).
+      const raw = data.outputs ?? data.output ?? [];
+      const url = Array.isArray(raw) ? raw[0] : raw;
       if (!url) throw new Error(`atlasVideo: ${status} but no output url (predictionId=${predictionId})`);
       const elapsedSec = Math.round((Date.now() - t0) / 1000);
       console.log(`🎬 atlasVideo: ${predictionId} done after ${elapsedSec}s (${pollCount} polls)`);
@@ -385,28 +584,49 @@ async function pollPrediction(predictionId) {
 
 // ── Submission ────────────────────────────────────────────────────────
 
-async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps }) {
-  const body = caps.paramShape === 'grok'
-    ? {
+// Pure body construction — kept side-effect free so the dry-run script
+// (scripts/dryRunVideoSubmit.js) and unit tests can exercise the exact
+// request shape without POSTing.
+function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps }) {
+  switch (caps.paramShape) {
+    case 'gemini-omni':
+      // duration MUST be sent explicitly (Atlas enum 4|6|8|10) — the 8s
+      // output is a downstream contract (brand scripts assume 8s @ 24fps).
+      return {
+        model,
+        prompt,
+        images: imageUrls,
+        duration: caps.defaultDuration || 8,
+        aspect_ratio: aspectRatio,
+        resolution: process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p'
+      };
+    case 'grok':
+      return {
         model,
         prompt,
         image_urls: imageUrls,
         duration: Math.min(caps.maxDuration, 8),
         resolution: '720p',
         aspect_ratio: aspectRatio
-      }
-    : caps.paramShape === 'veo'
-      ? {
-          model,
-          prompt,
-          image_url: imageUrls[0],
-          aspect_ratio: aspectRatio
-        }
-      : {
-          model,
-          prompt,
-          image_url: imageUrls[0]
-        };
+      };
+    case 'veo':
+      return {
+        model,
+        prompt,
+        image_url: imageUrls[0],
+        aspect_ratio: aspectRatio
+      };
+    default:
+      return {
+        model,
+        prompt,
+        image_url: imageUrls[0]
+      };
+  }
+}
+
+async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps }) {
+  const body = buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps });
 
   console.log(
     `🎬 atlasVideo.submit: model=${model} aspect=${aspectRatio} refs=${imageUrls.length} ` +
@@ -437,11 +657,6 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
   const media = await Media.findById(ad.mediaId).lean();
   if (!media) throw new Error(`Media ${ad.mediaId} not found`);
 
-  const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
-  const model = DEFAULT_MODEL;
-  const caps  = capsFor(model);
-  const aspectRatio = resolveAspectRatioForModel(platformAspect, caps);
-
   const [brand, product, layoutInputInitial, campaign] = await Promise.all([
     Brand.findById(media.brandId).lean(),
     ad.productId ? CatalogProduct.findById(ad.productId).lean() : null,
@@ -449,6 +664,14 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
       .sort({ createdAt: -1 }).lean(),
     ad.campaignId ? Campaign.findById(ad.campaignId).select('kind').lean() : null
   ]);
+
+  // Model resolution needs the brand + product docs, and aspect
+  // resolution needs the model's supportedAspectRatios — so this block
+  // must come after the loads.
+  const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
+  const model = resolveVideoModel({ brand, product, canvasKeys: [ad.platformFormat, platformAspect] });
+  const caps  = capsFor(model);
+  const aspectRatio = resolveAspectRatioForModel(platformAspect, caps);
 
   let concept = null;
   if (ad.conceptId && ad.conceptArtifactId) {
@@ -487,22 +710,13 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
     }
   }
 
-  const lpInput    = layoutInput?.input || null;
-  const lpSrcMedia = lpInput?.source_media || null;
-  const subject    = resolveSubject({ layoutInput: lpInput, sourceMedia: lpSrcMedia, media });
-
-  const storyboard = await generateStoryboard({
-    concept, brand, product,
-    layoutInput:  lpInput,
-    sourceMedia:  lpSrcMedia,
-    subject,
-    aspectRatio,
-    operatorPrompt,
-    brandId:   media.brandId,
-    productId: ad.productId || null
-  });
-
-  return { storyboard, aspectRatio };
+  // Storyboard retired on the Atlas path: the Ken Burns prompt fully
+  // specifies camera + timeline for every registered model, so the GPT
+  // storyboard stage adds nothing here (the Vertex provider keeps its
+  // own). This function's remaining jobs are warming the layoutInput
+  // cache (the brand-script overlay reads it downstream) and resolving
+  // the per-ad model + aspect for the orchestrator.
+  return { storyboard: null, aspectRatio, model };
 }
 
 async function generateForAd({ ad, operatorPrompt = null, storyboard: precomputedStoryboard = null }) {
@@ -510,17 +724,6 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
 
   const media = await Media.findById(ad.mediaId).lean();
   if (!media) throw new Error(`Media ${ad.mediaId} not found`);
-
-  const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
-  const model = DEFAULT_MODEL;
-  const caps  = capsFor(model);
-  const aspectRatio = resolveAspectRatioForModel(platformAspect, caps);
-  if (aspectRatio !== platformAspect) {
-    console.log(
-      `🎬 atlasVideo[ad=${ad._id}]: remapped aspect ${platformAspect} → ${aspectRatio} ` +
-      `(unsupported by ${model}; closest of ${caps.supportedAspectRatios.join(', ')})`
-    );
-  }
 
   const [brand, product, layoutInputInitial, campaign, catalogMedias] = await Promise.all([
     Brand.findById(media.brandId).lean(),
@@ -532,9 +735,30 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
       ? Media.find({
           source: 'catalog-product',
           'metadata.catalogProductId': ad.productId
-        }).select('_id fileUrl classification adSuitability metadata').lean()
+        }).select('_id fileUrl classification adSuitability metadata')
+          // Deterministic order for the reference-stack fallback: the
+          // unsorted query returned insertion-order-ish results that
+          // could shuffle between runs. hero materializes before alts,
+          // so createdAt asc ≈ hero-first, alts in stored order.
+          .sort({ createdAt: 1 })
+          .lean()
       : []
   ]);
+
+  // Model resolution needs the brand + product docs (per-canvas /
+  // per-product / per-brand overrides), and aspect resolution needs the
+  // resolved model's supportedAspectRatios — so this block must come
+  // after the loads.
+  const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
+  const model = resolveVideoModel({ brand, product, canvasKeys: [ad.platformFormat, platformAspect] });
+  const caps  = capsFor(model);
+  const aspectRatio = resolveAspectRatioForModel(platformAspect, caps);
+  if (aspectRatio !== platformAspect) {
+    console.log(
+      `🎬 atlasVideo[ad=${ad._id}]: remapped aspect ${platformAspect} → ${aspectRatio} ` +
+      `(unsupported by ${model}; closest of ${caps.supportedAspectRatios.join(', ')})`
+    );
+  }
 
   let concept = null;
   if (ad.conceptId && ad.conceptArtifactId) {
@@ -581,43 +805,40 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
 
   const lpInput    = layoutInput?.input || null;
   const lpSrcMedia = lpInput?.source_media || null;
-  const subject    = resolveSubject({ layoutInput: lpInput, sourceMedia: lpSrcMedia, media });
 
-  // Storyboard may be supplied by the caller (orchestrator generated it
-  // via prepareStoryboard). Falls back to generating locally for legacy
-  // callers.
-  const storyboard = precomputedStoryboard || await generateStoryboard({
-    concept, brand, product,
-    layoutInput:  lpInput,
-    sourceMedia:  lpSrcMedia,
-    subject,
-    aspectRatio,
-    operatorPrompt,
-    brandId:   media.brandId,
-    productId: ad.productId || null
-  });
+  // Storyboard retired on the Atlas path — the Ken Burns prompt fully
+  // specifies camera + timeline, so nothing is generated here. A
+  // caller-supplied storyboard (legacy orchestrators) still flows
+  // through to the result / Ad doc for debugging continuity, but the
+  // prompt builder ignores it.
+  const storyboard = precomputedStoryboard || null;
 
   // Build the reference stack first so buildVeoPrompt knows whether a
   // product-fidelity anchor actually landed (rare gap: no product_only
-  // catalog Media AND no CatalogProduct.imageUrl).
+  // catalog Media AND no CatalogProduct.imageUrl). Capped at the
+  // operator-selected reference count (default 3) AND the model's
+  // maxReferenceImages, so hasProductAnchor is truthful for every
+  // paramShape — including 1-ref models where nothing beyond the seed
+  // is actually transmitted.
+  const referenceCount = resolveReferenceImageCount({ brand, product });
   const imageUrls = buildReferenceImages({
-    media, product, catalogMedias, aspectRatio
+    media, product, catalogMedias, aspectRatio, caps, referenceCount
   });
   if (!imageUrls.length) throw new Error(`atlasVideo[ad=${ad._id}]: no reference images available`);
 
   const hasProductAnchor = imageUrls.length >= 2;
   if (!hasProductAnchor) {
     console.warn(
-      `⚠️  atlasVideo[ad=${ad._id}]: no product_only reference found ` +
-      `(catalog product_only Media missing AND CatalogProduct.imageUrl null) — shipping with seed only`
+      `⚠️  atlasVideo[ad=${ad._id}]: no product reference beyond the seed ` +
+      `(product imageUrl/additionalImages missing, or model caps at 1 ref) — shipping with seed only`
     );
   }
   console.log(
     `🎬 atlasVideo[ad=${ad._id}]: model=${model} aspect=${aspectRatio} ` +
-    `refs=${imageUrls.length} (seed + ${hasProductAnchor ? 'product_only' : 'no-anchor'}) submitting...`
+    `refs=${imageUrls.length} (seed${hasProductAnchor ? ' + product refs' : ', no product anchor'}) submitting...`
   );
 
-  // Motion-only prompt — the canonical brand-script overlay composites
+  // Camera-only prompt — the canonical brand-script overlay composites
   // all on-screen text downstream from ad.copy + LayoutInputArtifact.
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
   const prompt = buildVeoPrompt({
@@ -628,7 +849,8 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     seedHasText,
     hasProductReference: hasProductAnchor,
     operatorPrompt,
-    storyboard
+    storyboard,
+    caps
   });
 
   const t0 = Date.now();
@@ -640,11 +862,12 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
 
   // Mirror to Cloudinary. The eager transform pre-generates the
   // canvas-aspect saliency-crop derivative at upload time — but ONLY
-  // when Grok's rendered aspect differs from the canvas (i.e. we had to
-  // remap because the model didn't support the canvas aspect natively).
-  // When they match (e.g. pmax_16_9 + Grok 16:9), the composite skips
-  // the transform entirely, so pre-generating it would be pointless work
-  // that triggers a transcode 423 race for no reason.
+  // when the model's rendered aspect differs from the canvas (i.e. we
+  // had to remap because the model didn't support the canvas aspect
+  // natively — common on the Gemini Omni default, which only renders
+  // 16:9/9:16). When they match, the composite skips the transform
+  // entirely, so pre-generating it would be pointless work that
+  // triggers a transcode 423 race for no reason.
   const aspectsMatch = (() => {
     const parse = (s) => {
       const m = String(s || '').match(/^([\d.]+)\s*:\s*([\d.]+)$/);
@@ -664,9 +887,36 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   const uploaded = await uploadBufferToCloudinary(videoBuffer, uploadOpts);
 
   const elapsedMs = Date.now() - t0;
+
+  // Cost telemetry — flat per-render estimate from the registry's
+  // pricing entry, mirroring the duration/resolution the submission
+  // body requested. Lands in CostLog alongside the pipeline's LLM
+  // entries so per-brand/per-campaign rollups include video spend.
+  const renderResolution = caps.paramShape === 'gemini-omni'
+    ? (process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p')
+    : (caps.defaultResolution || '720p');
+  const costUsd = estimateRenderCostUsd({
+    model,
+    durationSec: caps.defaultDuration || Math.min(caps.maxDuration, 8),
+    resolution:  renderResolution
+  });
+  await recordFlatCost({
+    stage:      'atlas_video_render',
+    provider:   'atlas',
+    model,
+    purposeTag: caps.paramShape,
+    brandId:    media.brandId || null,
+    campaignId: ad.campaignId || null,
+    adId:       ad._id || null,
+    mediaId:    media._id || null,
+    productId:  ad.productId || null,
+    costUsd:    costUsd || 0,
+    durationMs: elapsedMs
+  });
+
   console.log(
     `🎬 atlasVideo[ad=${ad._id}]: done — model=${model} aspect=${aspectRatio} ` +
-    `took=${Math.round(elapsedMs / 1000)}s`
+    `took=${Math.round(elapsedMs / 1000)}s cost≈$${(costUsd ?? 0).toFixed(2)}`
   );
 
   return {
@@ -678,7 +928,8 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     prompt,
     storyboard,
     elapsedMs,
-    model
+    model,
+    costUsd
   };
 }
 
@@ -696,7 +947,15 @@ module.exports = {
   prepareStoryboard,
   enabled,
   MODEL_CAPS,
+  BUILT_IN_DEFAULT_MODEL,
+  DEFAULT_REFERENCE_IMAGE_COUNT,
+  MAX_REFERENCE_IMAGE_COUNT,
   capsFor,
+  resolveVideoModel,
+  resolveReferenceImageCount,
+  estimateRenderCostUsd,
+  validateVideoSettings,
+  buildSubmissionBody,
   imageDimsForAspect,
   cropImageUrlForAspect,
   buildVideoSegmentUrl,

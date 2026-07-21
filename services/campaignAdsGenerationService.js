@@ -561,8 +561,10 @@ async function expandWizardJob({
     }
   }
 
-  // Per-(product, kind) cap. Video is expensive (~$1.75/Veo call, or
-  // ~$0 for the Grok-skip Cloudinary segment) so it caps at
+  // Per-(product, kind) cap. Video is the expensive kind (≈$1.00 per
+  // 8s/720p render on the Gemini Omni default, ≈$4.00 on the Grok
+  // override — see atlasVideoService.estimateRenderCostUsd — or ~$0
+  // for the video-seed Cloudinary segment path) so it caps at
   // VEO_ADS_PER_PRODUCT_CAP (1); image uses ADS_PER_PRODUCT_CAP (3).
   // Brand-only seeds (productId null) form one product group per kind
   // — so brand + meta feed + both nets 3 image + 1 video rather than

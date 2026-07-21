@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 //
-// inspectAdPrompt.js — dump the stored Veo/Grok prompt + storyboard for a
-// generated Ad. Useful for debugging prompt-cap issues against Atlas's
-// 4096-byte cap on Grok.
+// inspectAdPrompt.js — dump the stored video prompt + storyboard for a
+// generated Ad. Useful for debugging prompt-cap issues against the
+// per-model caps in atlasVideoService.MODEL_CAPS (promptByteCap —
+// 20,000 for the Gemini Omni default, 4,096 for the legacy Grok/Veo
+// entries).
 //
 // Usage:
 //   node scripts/inspectAdPrompt.js <adId>

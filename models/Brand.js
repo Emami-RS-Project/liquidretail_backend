@@ -207,6 +207,19 @@ const brandSchema = new mongoose.Schema({
     autoCreateFromDetect: { type: Boolean, default: false }
   },
 
+  // Per-brand (per-client) video-generation settings. Mixed so the
+  // per-canvas override map can use aspect-ratio keys like '1.91:1'
+  // (dots are illegal in Mongoose Map keys). Shape:
+  //   { model:               '<atlasVideoService.MODEL_CAPS slug>' | null,
+  //     modelByCanvas:       { '<platformFormat or aspectRatio>': '<slug>' } | null,
+  //     referenceImageCount: 1–7 | null }   // default 3 (primary + 2 alts)
+  // Resolution chain (most specific wins): CatalogProduct.videoSettings
+  // → Brand.videoSettings → ATLAS_VIDEO_MODEL env → built-in default.
+  // Slugs are validated against MODEL_CAPS on PATCH and again at render
+  // time (unknown slugs warn + fall through). Mixed field — route
+  // handlers must markModified('videoSettings') on writes.
+  videoSettings: { type: mongoose.Schema.Types.Mixed, default: null },
+
   // Sales demo brand. Owned by the "Sales Demos" Advertiser and
   // populated via Apify scraping (public IG posts + Shopify products)
   // instead of OAuth ingest. Filtered out of normal customer-facing

@@ -75,6 +75,15 @@ async function recordCacheHit(meta) {
   await persistCost({ ...meta, cacheHit: true, costUsd: 0, durationMs: 0, status: 'ok' });
 }
 
+// Flat-fee (non-token) call logging — video renders and other calls
+// priced per generation rather than per token. The caller supplies
+// costUsd (e.g. atlasVideoService.estimateRenderCostUsd); token fields
+// stay 0 so the per-brand/per-stage rollups aggregate cleanly alongside
+// LLM entries. Never throws (persistCost warns internally).
+async function recordFlatCost(meta) {
+  await persistCost({ status: 'ok', ...meta, costUsd: meta.costUsd || 0 });
+}
+
 async function persistCost(record) {
   try {
     await CostLog.create({
@@ -159,6 +168,7 @@ function computeCost(model, usage, visionImages) {
 module.exports = {
   trackLlmCall,
   recordCacheHit,
+  recordFlatCost,
   MODEL_RATES,
   VISION_IMAGE_COST_PER_IMAGE_USD
 };

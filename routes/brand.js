@@ -9,6 +9,7 @@ const CatalogProduct = require('../models/CatalogProduct');
 const Campaign = require('../models/Campaign');
 const IntegrationCredential = require('../models/IntegrationCredential');
 const ProductMatchArtifact = require('../models/ProductMatchArtifact');
+const { validateVideoSettings } = require('../services/atlasVideoService');
 
 // ── Preview plate resolver ─────────────────────────────────────────
 //
@@ -244,7 +245,17 @@ router.patch('/:id', express.json(), async (req, res) => {
                       'primaryColor', 'secondaryColor', 'accentColor', 'fontColor',
                       'fontFamily', 'tone', 'hashtags', 'tags', 'demographics',
                       'brandSafety', 'styleOverrides', 'styleScript',
-                      'styleScriptVertical', 'styleScriptLandscape', 'styleTheme'];
+                      'styleScriptVertical', 'styleScriptLandscape', 'styleTheme',
+                      'videoSettings'];
+
+    // videoSettings carries model slugs consumed at render time — reject
+    // unknown slugs here (nicer UX than the render-time warn-and-fall-
+    // through in resolveVideoModel). Shape: { model, modelByCanvas,
+    // referenceImageCount } — see models/Brand.js.
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'videoSettings') && req.body.videoSettings != null) {
+      const err = validateVideoSettings(req.body.videoSettings);
+      if (err) return res.status(400).json({ error: err });
+    }
 
     // Entry log for style-related mutations so we can trace why a
     // Clear button isn't sticking. Non-noisy: only fires when one of
@@ -270,7 +281,7 @@ router.patch('/:id', express.json(), async (req, res) => {
     // markModified is required to guarantee the change persists,
     // ESPECIALLY when clearing to null. Applies to any field the
     // Brand schema declares as mongoose.Schema.Types.Mixed.
-    const MIXED_FIELDS = new Set(['styleOverrides', 'styleTheme', 'brandSafety']);
+    const MIXED_FIELDS = new Set(['styleOverrides', 'styleTheme', 'brandSafety', 'videoSettings']);
 
     for (const k of editable) {
       if (Object.prototype.hasOwnProperty.call(req.body || {}, k)) {

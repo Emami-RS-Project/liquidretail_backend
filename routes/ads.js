@@ -455,6 +455,7 @@ async function renderOne(run, job, adId, index, renderToken) {
       // on top.
       const isVideoSeed = sourceMedia?.fileType === 'video';
       let veoVideoUrl, veoAspectRatio, veoPrompt = null, veoStoryboard = null, veoCloudinaryPublicId = null;
+      let veoModel = null;   // stays null on the Cloudinary-segment path — no model ran
 
       if (isVideoSeed) {
         const segmentUrl = buildVideoSegmentUrl(sourceMedia.fileUrl, ad.aspectRatio || '9:16', 8);
@@ -477,9 +478,11 @@ async function renderOne(run, job, adId, index, renderToken) {
       // Grok-skip couldn't build a Cloudinary segment (non-Cloudinary
       // video host — rare but possible).
       if (!veoVideoUrl) {
-        // Stage 1 — generate the storyboard ONCE. It directs Grok's motion
-        // via camera/audio/vibe. The brand-script overlay downstream
-        // handles on-screen text independently from ad.copy + layoutInput.
+        // Stage 1 — prepare context: resolves the per-ad model + aspect
+        // and warms the layoutInput cache for the brand-script overlay.
+        // storyboard is always null on the Atlas path now (the Ken Burns
+        // prompt directs motion; the GPT storyboard stage is retired) —
+        // the stamp below only fires for legacy/vertex storyboards.
         const { storyboard } = await veoPrepareStoryboard({ ad });
         veoStoryboard = storyboard || null;
 
@@ -505,6 +508,7 @@ async function renderOne(run, job, adId, index, renderToken) {
         veoPrompt             = veoResult.prompt || null;
         veoStoryboard         = veoResult.storyboard || veoStoryboard;
         veoCloudinaryPublicId = veoResult.cloudinaryPublicId || null;
+        veoModel              = veoResult.model || null;
       }
 
       // Stamp the video URL + Ad state. Done BEFORE the brand-script
@@ -526,6 +530,7 @@ async function renderOne(run, job, adId, index, renderToken) {
             veoAspectRatio,
             veoPrompt,
             veoStoryboard,
+            veoModel,
             renderUrl:          veoVideoUrl,
             posterUrl:          fallbackPosterUrl || veoVideoUrl,
             cloudinaryPublicId: veoCloudinaryPublicId,

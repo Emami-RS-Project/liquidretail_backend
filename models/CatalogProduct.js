@@ -117,6 +117,15 @@ const catalogProductSchema = new mongoose.Schema({
   // Destination
   productUrl:   String,
 
+  // Per-product video-generation settings — same shape and semantics as
+  // Brand.videoSettings (see models/Brand.js); this level wins over the
+  // brand's. Used for SKUs that render better on a specific model or
+  // need a wider/narrower reference-image stack.
+  //   { model:               '<atlasVideoService.MODEL_CAPS slug>' | null,
+  //     modelByCanvas:       { '<platformFormat or aspectRatio>': '<slug>' } | null,
+  //     referenceImageCount: 1–7 | null }
+  videoSettings: mongoose.Schema.Types.Mixed,
+
   // Provenance + raw payload for debugging / future field unlocks.
   // Limited to ~8KB so a chatty source doesn't bloat the doc.
   rawData:      mongoose.Schema.Types.Mixed,

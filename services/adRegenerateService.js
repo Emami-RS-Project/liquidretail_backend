@@ -154,9 +154,10 @@ async function loadBrand(adId) {
 // Video regen — always full. Regenerates the storyboard + Grok base
 // video, then applies brand-script chrome (or no chrome, per resolver).
 async function runVideoFull(adId, prompt) {
-  // Stage 1 — storyboard. The operator's refinement prompt threads
-  // through here so the creative direction updates in step with the
-  // new video.
+  // Stage 1 — context prep (model + aspect resolution, layoutInput
+  // warm). storyboard is null on the Atlas path — the Ken Burns prompt
+  // directs motion; the operator's refinement prompt is threaded into
+  // the video prompt itself in Stage 2.
   await setStage(adId, 'veo');
   const ad1 = await Ad.findById(adId).lean();
   const { storyboard } = await veoService.prepareStoryboard({ ad: ad1, operatorPrompt: prompt });
@@ -177,6 +178,7 @@ async function runVideoFull(adId, prompt) {
       veoAspectRatio: veoResult.aspectRatio || null,
       veoPrompt:      veoResult.prompt || null,
       veoStoryboard:  veoResult.storyboard || storyboard || null,
+      veoModel:       veoResult.model || null,
       renderUrl:      veoResult.videoUrl,
       updatedAt:      new Date()
     }

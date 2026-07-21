@@ -220,11 +220,18 @@ const adSchema = new mongoose.Schema({
   // photorealUrl never lands and the badge would otherwise stay on
   // forever.
   sourceFileType:     { type: String, enum: ['image', 'video', null], default: null },
-  veoVideoUrl:        { type: String, default: null },  // raw Veo base video (before chrome + Puppeteer)
-  // Aspect ratio Grok actually rendered (may differ from ad.aspectRatio
-  // when the model didn't support the canvas aspect natively and we had
-  // to remap). Composite skips its saliency-crop transform when this
-  // matches the canvas aspect — same source, no transcode, no 423 race.
+  veoVideoUrl:        { type: String, default: null },  // raw base video from the AI model (before brand-script chrome)
+  // Which Atlas model actually rendered this ad's base video (audit
+  // trail for the per-brand/per-product/per-canvas resolution chain —
+  // see atlasVideoService.resolveVideoModel). Null for video ads whose
+  // base came from a Cloudinary segment extract (no model ran) and for
+  // ads rendered before this field existed.
+  veoModel:           { type: String, default: null },
+  // Aspect ratio the model actually rendered (may differ from
+  // ad.aspectRatio when the model didn't support the canvas aspect
+  // natively and we had to remap). Composite skips its saliency-crop
+  // transform when this matches the canvas aspect — same source, no
+  // transcode, no 423 race.
   veoAspectRatio:     { type: String, default: null },
   veoPrompt:          { type: String, default: null },  // storyboard prompt sent to Veo — preserved for debugging + reproduction
   // GPT-composed structured storyboard. Null when VEO_USE_GPT_STORYBOARD
