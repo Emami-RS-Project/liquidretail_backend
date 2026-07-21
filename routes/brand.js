@@ -520,7 +520,7 @@ function buildPreviewSampleMeta(brand, themeForPreview) {
 
 // Disk cache for preview plates so the fast still loop doesn't re-download
 // the brand's lifestyle image on every nudge. TTL'd; keyed by brand.
-const previewPlateCache = new Map(); // brandId|format → { path, source, at, temp }
+const previewPlateCache = new Map(); // brandId|format (stand-in) or ad:adId (real footage) → { path, source, at, temp, video? }
 const PREVIEW_PLATE_TTL_MS = 10 * 60 * 1000;
 async function getCachedPreviewPlate(brand, format) {
   const key = `${brand._id}|${format}`;
@@ -548,6 +548,22 @@ async function getCachedPreviewPlate(brand, format) {
   return entry;
 }
 
+// Ad-footage plates: stills render over the ad's REAL base video, so what
+// the operator refines against is exactly what the visibility scan judges.
+// Throws on download failure — the caller falls back to the brand plate.
+async function getCachedAdPlate(ad) {
+  const key = `ad:${ad._id}`;
+  const hit = previewPlateCache.get(key);
+  if (hit && Date.now() - hit.at < PREVIEW_PLATE_TTL_MS) return hit;
+  const p = await downloadUrlToTemp(ad.veoVideoUrl, '.mp4');
+  const entry = { path: p, source: 'ad-video', at: Date.now(), temp: true, video: true };
+  if (hit?.temp && hit.path && hit.path !== entry.path) {
+    require('fs').promises.unlink(hit.path).catch(() => {});
+  }
+  previewPlateCache.set(key, entry);
+  return entry;
+}
+
 // POST /api/brand/:id/title-still — the FAST refinement loop for the
 // Remotion engine. Synchronous: renders 1-4 still frames (no video
 // encode) from a spec — pass the spec being tweaked in the body, get
@@ -563,6 +579,21 @@ router.post('/:id/title-still', express.json({ limit: '1mb' }), async (req, res)
     if (!['vertical', 'feed', 'landscape'].includes(rawFormat)) {
       return res.status(400).json({ error: `unknown format '${rawFormat}'` });
     }
+
+    // Optional ad-footage mode: stills render over this ad's actual base
+    // video — the same frames the visibility scan analyzes — instead of a
+    // stand-in brand plate. Brand is already tenant-scoped and Ad.brandId
+    // is a required ref, so the brandId match completes the tenancy check.
+    let ad = null;
+    if (req.body?.adId != null && String(req.body.adId).trim() !== '') {
+      const adId = String(req.body.adId).trim();
+      if (!require('mongoose').isValidObjectId(adId)) return res.status(400).json({ error: 'invalid adId' });
+      const Ad = require('../models/Ad');
+      ad = await Ad.findOne({ _id: adId, brandId: brand._id }).lean();
+      if (!ad) return res.status(404).json({ error: 'ad not found' });
+      if (!ad.veoVideoUrl) return res.status(400).json({ error: 'ad has no base video' });
+    }
+
     const { resolveSpecForBrand, buildBrandTokens } = require('../services/titleSpecService');
     const { validateTitleSpec } = require('../services/titleSpecValidator');
 
@@ -589,9 +620,31 @@ router.post('/:id/title-still', express.json({ limit: '1mb' }), async (req, res)
         if (META_TEXT_FIELDS.has(k) && (v == null || typeof v === 'string' || typeof v === 'number')) metaOverrides[k] = v;
       }
     }
-    const meta = { ...buildPreviewSampleMeta(brand, null), ...metaOverrides };
+    // Ad mode uses the ad's REAL production meta (same builder the render
+    // pipeline uses) so the preview text matches what would actually ship;
+    // body overrides still win on top.
+    let baseMeta;
+    if (ad) {
+      const { buildMetaForAd } = require('../services/brandScriptExecutor');
+      baseMeta = await buildMetaForAd(ad, brand);
+    } else {
+      baseMeta = buildPreviewSampleMeta(brand, null);
+    }
+    const meta = { ...baseMeta, ...metaOverrides };
     const tokens = await buildBrandTokens(brand, { specFontOverrides: spec.tokenOverrides?.fonts || {} });
-    const plate = await getCachedPreviewPlate(brand, rawFormat);
+
+    let plate = null;
+    if (ad) {
+      try {
+        plate = await getCachedAdPlate(ad);
+      } catch (e) {
+        console.warn(`title-still: ad plate download failed (${e.message}) — falling back to brand plate`);
+      }
+    }
+    if (!plate) {
+      const fallback = await getCachedPreviewPlate(brand, rawFormat);
+      plate = ad ? { ...fallback, source: `${fallback.source} (ad-video failed)` } : fallback;
+    }
 
     const { renderPreview } = require('../services/remotionRenderService');
     const result = await renderPreview({
@@ -599,7 +652,8 @@ router.post('/:id/title-still', express.json({ limit: '1mb' }), async (req, res)
       spec,
       tokens,
       format:         rawFormat,
-      plateImagePath: plate.path,
+      plateVideoPath: plate.video ? plate.path : null,
+      plateImagePath: plate.video ? null : plate.path,
       plateColor:     brand.primaryColor || '#3D3D3D',
       scale,
       durationSec:    8,
@@ -607,7 +661,17 @@ router.post('/:id/title-still', express.json({ limit: '1mb' }), async (req, res)
       includeVideo:   false
     });
 
-    res.json({ ok: true, format: rawFormat, plateSource: plate.source, frames: result.frames, tookMs: Date.now() - t0 });
+    res.json({
+      ok:               true,
+      format:           rawFormat,
+      plateSource:      plate.source,
+      frames:           result.frames,
+      fps:              result.fps ?? null,
+      plateDurationSec: result.durationSec ?? null,
+      plateHints:       result.plateHints ?? null,
+      scanSampleTimes:  (result.plateHints?.samples || []).map((s) => s.atSec),
+      tookMs:           Date.now() - t0
+    });
   } catch (err) {
     console.error('title-still failed:', err.message);
     res.status(err.status || 500).json({ error: err.message || 'title-still failed', tookMs: Date.now() - t0 });

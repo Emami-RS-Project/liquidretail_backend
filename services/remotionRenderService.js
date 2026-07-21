@@ -440,11 +440,13 @@ async function renderTitles({ videoUrl, meta, spec, tokens, format, brandName = 
 
 /**
  * Preview renders for the operator UI. Same spec/tokens pipeline but over a
- * static plate image (or flat color), half-resolution, no audio. Returns
- * { videoDataUrl, sizeBytes, timings } to preserve the existing preview
- * contract, and optionally still frames.
+ * static plate image, a real plate VIDEO (plateVideoPath — probed fps/
+ * duration, exact source frames under every still), or a flat color;
+ * half-resolution, no audio. Returns { videoDataUrl, sizeBytes, timings,
+ * plateHints, fps, durationSec } to preserve the existing preview contract,
+ * and optionally still frames.
  */
-async function renderPreview({ meta, spec, tokens, format, plateImagePath = null, plateColor = '#3D3D3D', scale = 0.5, durationSec = 8, stillTimesSec = null, includeVideo = true }) {
+async function renderPreview({ meta, spec, tokens, format, plateImagePath = null, plateVideoPath = null, plateColor = '#3D3D3D', scale = 0.5, durationSec = 8, stillTimesSec = null, includeVideo = true }) {
   const compositionId = COMPOSITION_BY_FORMAT[format];
   if (!compositionId) throw new Error(`renderPreview: unknown format '${format}'`);
 
@@ -464,19 +466,30 @@ async function renderPreview({ meta, spec, tokens, format, plateImagePath = null
     await fsp.mkdir(jobDir, { recursive: true });
 
     try {
-      const fps = 24;
-      const durationInFrames = Math.round(durationSec * fps);
-
+      let fps = 24;
       let plate = { color: plateColor };
       let plateHints = null;
-      if (plateImagePath) {
+      const { analyzePlate } = require('./plateIntelService');
+      if (plateVideoPath) {
+        // Real footage: renderStill + OffthreadVideo composites titles onto
+        // the exact source frame at each timestamp, fps/duration follow the
+        // probe (so specTimeScale previews true pacing), and the visibility
+        // scan sees the same plate production would — mirrors renderTitles.
+        const target = path.join(jobDir, 'plate.mp4');
+        await fsp.copyFile(plateVideoPath, target);
+        const probe = await probePlate(target);
+        fps = probe.fps;
+        durationSec = probe.durationSec;
+        plate = { videoUrl: `${base}/jobs/${jobId}/plate.mp4` };
+        plateHints = await analyzePlate(target, { durationSec: probe.durationSec });
+      } else if (plateImagePath) {
         const ext = path.extname(plateImagePath) || '.jpg';
         const target = path.join(jobDir, `plate${ext}`);
         await fsp.copyFile(plateImagePath, target);
         plate = { imageUrl: `${base}/jobs/${jobId}/plate${ext}` };
-        const { analyzePlate } = require('./plateIntelService');
         plateHints = await analyzePlate(plateImagePath, { isImage: true });
       }
+      const durationInFrames = Math.max(1, Math.round(durationSec * fps));
 
       const cleanMeta = { ...stripHeavyMeta(meta), brandWebsiteDomain: websiteDomain(meta?.brandWebsiteUrl) };
       if (cleanMeta.brandLogoUrl && /^https?:\/\//i.test(cleanMeta.brandLogoUrl)) {
@@ -515,7 +528,9 @@ async function renderPreview({ meta, spec, tokens, format, plateImagePath = null
         timeoutInMilliseconds: RENDER_TIMEOUT_MS,
       });
 
-      const result = { timings };
+      // plateHints/fps/durationSec ride along so callers (title-still) can
+      // hand the visibility-scan data to the operator UI.
+      const result = { timings, plateHints, fps, durationSec };
 
       if (stillTimesSec && stillTimesSec.length) {
         t = Date.now();

@@ -26,8 +26,16 @@
   legend { color: #9aa4b8; font-size: 12px; padding: 0 6px; }
   #frames { display: flex; gap: 12px; flex-wrap: wrap; }
   #frames figure { margin: 0; }
+  #frames .shot { position: relative; display: inline-block; }
   #frames img { max-height: 62vh; border-radius: 8px; border: 1px solid #232a3a; display: block; }
   #frames figcaption { text-align: center; color: #9aa4b8; font-size: 12px; margin-top: 4px; }
+  /* Visibility-scan band overlays — extents mirror plateIntelService BANDS */
+  .band { position: absolute; left: 0; right: 0; border: 1px dashed rgba(148,163,184,0.55); pointer-events: none; }
+  .band.avoid { background: rgba(248,113,113,0.16); border-color: rgba(248,113,113,0.8); }
+  .band span { position: absolute; top: 1px; left: 4px; font-size: 10px; color: rgba(203,213,225,0.85); text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
+  .chips { display: flex; gap: 6px; justify-content: center; margin-top: 3px; }
+  .chips i { font: 10px/1.6 ui-monospace, monospace; font-style: normal; color: #9aa4b8; background: #161b26; border: 1px solid #232a3a; border-radius: 4px; padding: 0 5px; }
+  .chips i.avoid { color: #f87171; border-color: #7f1d1d; }
   #status { color: #9aa4b8; font-size: 12px; min-height: 18px; margin: 6px 0; }
   #specText { width: 100%; height: 260px; font: 12px/1.4 ui-monospace, monospace; white-space: pre; }
   .err { color: #f87171; }
@@ -41,9 +49,11 @@
   <input id="token" placeholder="Bearer token" size="24" type="password">
   <input id="advertiser" placeholder="X-Advertiser-Id (optional)" size="20">
   <input id="brandId" placeholder="Brand ID" size="22">
+  <input id="adId" placeholder="Ad ID (optional — real footage)" size="24" title="render stills over this ad's actual base video, the same footage the visibility scan analyzes">
   <select id="format"><option>vertical</option><option>feed</option><option>landscape</option></select>
   <select id="scale"><option value="0.35">fast (0.35×)</option><option value="0.5" selected>medium (0.5×)</option><option value="0.75">sharp (0.75×)</option></select>
-  <input id="frameTimes" value="1.5, 4.5" size="10" title="frame times in seconds (max 4)">
+  <input id="frameTimes" value="1.5, 4.5" size="10" title="frame times in seconds (max 4) — with an Ad ID this auto-fills to the visibility scan's sample times until you edit it">
+  <label style="font-size:12px;color:#9aa4b8"><input type="checkbox" id="showBands"> scan bands</label>
   <button id="loadBtn" class="primary">Load brand</button>
   <button id="renderBtn">Render</button>
   <button id="saveBtn">Save spec</button>
@@ -88,8 +98,10 @@
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { spec: null, specDoc: null, rendering: false, pendingRender: false };
+  const state = { spec: null, specDoc: null, rendering: false, pendingRender: false, lastData: null, frameTimesTouched: false };
   const SLIDERS = ['sizeScale', 'offsetX', 'offsetY', 'maxWidthPct', 'trackingPx', 'weight'];
+  // Band extents mirror plateIntelService BANDS (fractions of plate height).
+  const SCAN_BANDS = { top: [0.06, 0.38], middle: [0.38, 0.6], bottom: [0.54, 0.92] };
 
   const api = async (method, path, body) => {
     const headers = { 'Authorization': 'Bearer ' + $('token').value.trim() };
@@ -153,22 +165,72 @@
     status('rendering…');
     try {
       const frames = $('frameTimes').value.split(',').map(Number).filter((n) => !isNaN(n)).slice(0, 4);
-      const data = await api('POST', '/api/brand/' + $('brandId').value.trim() + '/title-still', {
-        format: $('format').value, spec: state.spec, frames, scale: +$('scale').value
-      });
-      $('frames').innerHTML = '';
-      for (const f of data.frames) {
-        const fig = document.createElement('figure');
-        const img = document.createElement('img'); img.src = f.dataUrl;
-        const cap = document.createElement('figcaption'); cap.textContent = (f.index != null ? 't=' + (f.index / 24).toFixed(1) + 's' : '');
-        fig.append(img, cap); $('frames').appendChild(fig);
+      const body = { format: $('format').value, spec: state.spec, frames, scale: +$('scale').value };
+      const adId = $('adId').value.trim();
+      if (adId) body.adId = adId;
+      const data = await api('POST', '/api/brand/' + $('brandId').value.trim() + '/title-still', body);
+      state.lastData = data;
+      drawFrames();
+      // First render against an ad: default the frame times to the scan's
+      // own sample times (until the operator edits the field) and re-render
+      // once — you're then literally previewing on the scanned frames.
+      if (adId && !state.frameTimesTouched && Array.isArray(data.scanSampleTimes) && data.scanSampleTimes.length) {
+        const scanVal = data.scanSampleTimes.join(', ');
+        if ($('frameTimes').value.replace(/\s/g, '') !== scanVal.replace(/\s/g, '')) {
+          $('frameTimes').value = scanVal;
+          state.pendingRender = true;
+        }
       }
-      status('rendered in ' + (Date.now() - t0) + 'ms · plate: ' + data.plateSource, 'ok');
+      status('rendered in ' + (Date.now() - t0) + 'ms · plate: ' + data.plateSource +
+        (data.plateDurationSec ? ' · ' + Number(data.plateDurationSec).toFixed(1) + 's plate' : ''), 'ok');
     } catch (e) {
       status('render failed: ' + e.message, 'err');
     } finally {
       state.rendering = false;
       if (state.pendingRender) { state.pendingRender = false; render(); }
+    }
+  }
+
+  // Redraws stills from the last response only — the scan-band toggle and
+  // chips never trigger a re-render.
+  function drawFrames() {
+    const data = state.lastData;
+    $('frames').innerHTML = '';
+    if (!data) return;
+    const fps = data.fps || 24;
+    const nearestSample = (t) => (data.plateHints?.samples || []).reduce(
+      (best, s) => (!best || Math.abs(s.atSec - t) < Math.abs(best.atSec - t)) ? s : best, null);
+    for (const f of data.frames) {
+      const t = f.index / fps;
+      const fig = document.createElement('figure');
+      const shot = document.createElement('div'); shot.className = 'shot';
+      const img = document.createElement('img'); img.src = f.dataUrl;
+      shot.appendChild(img);
+      const samp = nearestSample(t);
+      if ($('showBands').checked && samp) {
+        for (const [band, [y0, y1]] of Object.entries(SCAN_BANDS)) {
+          const div = document.createElement('div');
+          div.className = 'band' + (samp.bands[band]?.avoid ? ' avoid' : '');
+          div.style.top = (y0 * 100) + '%'; div.style.height = ((y1 - y0) * 100) + '%';
+          const tag = document.createElement('span'); tag.textContent = band; div.appendChild(tag);
+          shot.appendChild(div);
+        }
+      }
+      const cap = document.createElement('figcaption');
+      cap.textContent = 't=' + t.toFixed(1) + 's' + (samp && Math.abs(samp.atSec - t) < 0.35 ? ' · scanned' : '');
+      fig.append(shot, cap);
+      if (samp) {
+        const chips = document.createElement('div'); chips.className = 'chips';
+        for (const band of ['top', 'middle', 'bottom']) {
+          const b = samp.bands[band]; if (!b) continue;
+          const i = document.createElement('i');
+          if (b.avoid) i.className = 'avoid';
+          i.textContent = band + ' lum ' + Number(b.lum).toFixed(2) + ' busy ' + Number(b.busy).toFixed(2) + (b.avoid ? ' ⛔' : '');
+          chips.appendChild(i);
+        }
+        fig.appendChild(chips);
+      }
+      $('frames').appendChild(fig);
     }
   }
 
@@ -222,6 +284,10 @@
     $(id).addEventListener('input', () => { writeControlsToSlot(); debouncedRender(); });
   }
   $('slotSel').addEventListener('change', syncControlsFromSlot);
+  $('showBands').addEventListener('change', drawFrames);
+  $('adId').addEventListener('change', debouncedRender);
+  $('frameTimes').addEventListener('input', () => { state.frameTimesTouched = true; });
+  $('frameTimes').addEventListener('change', debouncedRender);
   $('specText').addEventListener('change', () => {
     try { setSpec(JSON.parse($('specText').value)); debouncedRender(); }
     catch { status('spec JSON parse error (fix and blur again)', 'err'); }
