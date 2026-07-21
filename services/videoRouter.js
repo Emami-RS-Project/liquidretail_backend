@@ -35,22 +35,24 @@ function activeProvider() {
 // Burns prompt fully directs motion). Only the Atlas provider exposes
 // this hook; on Vertex the caller should pass null and accept
 // sequential execution.
-async function prepareStoryboard({ ad, operatorPrompt = null }) {
+async function prepareStoryboard({ ad, operatorPrompt = null, modelOverride = null }) {
   if (activeProvider() !== 'atlas') return { storyboard: null };
-  return atlasVideoService.prepareStoryboard({ ad, operatorPrompt });
+  return atlasVideoService.prepareStoryboard({ ad, operatorPrompt, modelOverride });
 }
 
 // storyboard (optional) — when supplied by the orchestrator (parallel
 // execution path), it's passed through so the provider uses it instead
 // of generating a new one. Lets chrome and the video model share the
 // same script.
-async function generateForAd({ ad, operatorPrompt = null, storyboard = null }) {
+// modelOverride (optional) — per-run model slug from the operator's
+// regenerate dropdown; Atlas provider only (Vertex has a single model).
+async function generateForAd({ ad, operatorPrompt = null, storyboard = null, modelOverride = null }) {
   const provider = activeProvider();
   const t0 = Date.now();
 
   let result;
   if (provider === 'atlas') {
-    result = await atlasVideoService.generateForAd({ ad, operatorPrompt, storyboard });
+    result = await atlasVideoService.generateForAd({ ad, operatorPrompt, storyboard, modelOverride });
   } else {
     // Default: Vertex Veo direct. Backward compatible — no behavioral
     // change for deployments that haven't set VIDEO_PROVIDER.

@@ -71,6 +71,9 @@ const adSchema = new mongoose.Schema({
     index:   true
   },
 
+  // requested video length in seconds (wizard format-selection stage); null = standard 8s
+  videoDurationSec: { type: Number, default: null },
+
   // Which match outcome produced this Ad. brand_only is the no-pick
   // path (no operator picks → top brand_match media wide).
   matchTier: {
@@ -188,6 +191,7 @@ const adSchema = new mongoose.Schema({
       prompt:      String,
       mode:        { type: String, enum: ['light', 'full'] },  // light = chrome-only re-comp; full = re-run pipeline
       requestedBy: String,
+      videoModel:  String,   // per-run model override from the regenerate dropdown (null = brand/product default)
       at:          Date,
       status:      { type: String, enum: ['pending', 'done', 'failed'] },
       error:       String,

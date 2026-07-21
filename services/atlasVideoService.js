@@ -70,18 +70,26 @@ function enabled() {
 //
 // Every model emits motion-only video. Text is composited downstream
 // by the brand-script overlay.
+// `label` + `selectable: true` mark the entries offered in the operator
+// UI (Brand settings card + regenerate dropdown — routes/brand.js
+// exposes them as `videoModels`). Non-selectable entries stay registered
+// so persisted videoSettings/env overrides keep resolving.
 const MODEL_CAPS = {
   // Default. Duration is an ENUM (4|6|8|10), not a free range — the
   // request must send it explicitly so the output matches the 8s @ 24fps
   // assumption baked into the brand scripts. Aspect support is narrow
-  // (16:9 / 9:16 only): every other canvas format remaps via
-  // resolveAspectRatioForModel + the Cloudinary eager re-crop on upload.
+  // (16:9 / 9:16 only): every other canvas format routes to the Grok
+  // aspect-fallback model (ASPECT_FALLBACK_MODEL below) via
+  // resolveModelAndAspect, riding the existing reference pre-crop.
   // Prompt cap is 20,000 chars per Atlas's OpenAPI schema — enforced
   // here as bytes, the conservative interpretation. Pricing:
-  // $0.20 base + $0.10/sec at 720p/1080p (8s ≈ $1.00); 4k adds $0.80.
+  // $0.20 base + $0.10/sec at 720p/1080p (8s ≈ $1.00); 4k base $1.00
+  // (schema + readme re-verified 2026-07-21).
   // Atlas publishes no RPS figure for this slug (unlike Grok's 1 RPS) —
   // the rate-limit backoff below stays defensive until confirmed.
   'google/gemini-omni-flash/image-to-video-developer': {
+    label: 'Google Omni Image-to-Video',
+    selectable: true,
     minDuration: 4, maxDuration: 10,
     durationEnum: [4, 6, 8, 10],
     defaultDuration: 8,
@@ -95,8 +103,57 @@ const MODEL_CAPS = {
     // 8s/720p ≈ $1.00, 8s/4k ≈ $1.80.
     pricing: { kind: 'base-plus-per-second', basePerResolution: { '720p': 0.20, '1080p': 0.20, '4k': 1.00 }, perSecond: 0.10 }
   },
-  // Previous default — kept as a per-brand/per-product override option.
+  // Video-transform variant: REQUIRES a source video clip (≤30s asset,
+  // ≤10s trimmed window) plus up to 5 style/character reference images
+  // — schema live-verified 2026-07-21. Only usable for video-seeded ads;
+  // resolveModelAndAspect degrades image-seeded ads to the i2v default.
+  // Same 16:9/9:16-only aspect support as i2v, so the Grok aspect
+  // fallback applies identically. Pricing: FIXED per generation
+  // ($1.60 at 720p/1080p, $2.40 at 4k) — duration does not affect price.
+  'google/gemini-omni-flash/reference-to-video-developer': {
+    label: 'Google Omni Reference-to-Video (video-seeded)',
+    selectable: true,
+    minDuration: 4, maxDuration: 10,
+    durationEnum: [4, 6, 8, 10],
+    defaultDuration: 8,
+    resolutions: ['720p', '1080p', '4k'],
+    defaultResolution: '720p',
+    maxReferenceImages: 5,
+    paramShape: 'gemini-omni-r2v',
+    requiresVideoSeed: true,
+    supportedAspectRatios: ['16:9', '9:16'],
+    promptByteCap: 20000,
+    pricing: { kind: 'flat-per-generation', perResolution: { '720p': 1.60, '1080p': 1.60, '4k': 2.40 } }
+  },
+  // Grok Imagine 1.5 — the operator-selectable Grok line AND the
+  // automatic aspect-fallback target for formats the Omni models can't
+  // render. SINGLE starting-frame image only (schema live-verified
+  // 2026-07-21: `image_url` is one string — the multi-image stack of the
+  // v1 reference-to-video line below does NOT carry over); the frame it
+  // receives is the position-0 pre-cropped seed, so composition still
+  // matches the canvas. Duration is a free 1–15s range, default 8.
+  'xai/grok-imagine-video-v1.5/image-to-video': {
+    label: 'Grok Imagine Video 1.5',
+    selectable: true,
+    minDuration: 1, maxDuration: 15,
+    defaultDuration: 8,
+    resolutions: ['480p', '720p', '1080p'],
+    defaultResolution: '720p',
+    maxReferenceImages: 1,
+    paramShape: 'grok-i2v',
+    supportedAspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'],
+    promptByteCap: 4096,
+    // UNVERIFIED — neither the readme nor the catalog publishes a usable
+    // rate for this slug (catalog base_price units are opaque). Carrying
+    // the v1 line's $0.50/sec as a conservative upper bound until the
+    // first live render's billing confirms; revisit alongside costTracker.
+    pricing: { kind: 'per-second', perSecond: 0.50 }
+  },
+  // Previous default — kept registered (not selectable) so persisted
+  // videoSettings / ATLAS_VIDEO_MODEL values keep resolving. Multi-image
+  // reference stack (up to 7 refs).
   'xai/grok-imagine-video/reference-to-video': {
+    label: 'Grok Imagine Video 1.0 (multi-reference)',
     minDuration: 1, maxDuration: 10,
     resolutions: ['480p', '720p'],
     maxReferenceImages: 7,
@@ -107,6 +164,7 @@ const MODEL_CAPS = {
     pricing: { kind: 'per-second', perSecond: 0.50 }
   },
   'google/veo3.1/image-to-video': {
+    label: 'Google Veo 3.1',
     minDuration: 5, maxDuration: 8,
     resolutions: ['720p', '1080p'],
     maxReferenceImages: 1,
@@ -118,6 +176,14 @@ const MODEL_CAPS = {
     pricing: { kind: 'per-second', perSecond: 0.20 }
   }
 };
+
+// Where non-16:9/9:16 canvases go when an Omni model is selected: the
+// references are already pre-cropped to the canvas aspect by the
+// existing resize system (cropImageUrlForAspect), and Grok 1.5 renders
+// most of those aspects natively — the pre-Omni behavior, per operator
+// direction. Env-overridable; must name a MODEL_CAPS slug.
+const ASPECT_FALLBACK_MODEL =
+  process.env.ATLAS_VIDEO_FALLBACK_MODEL || 'xai/grok-imagine-video-v1.5/image-to-video';
 
 function capsFor(model) {
   return MODEL_CAPS[model] || {
@@ -145,6 +211,11 @@ function estimateRenderCostUsd({ model, durationSec = 8, resolution = null } = {
     const res  = resolution || caps.defaultResolution || '720p';
     const base = (p.basePerResolution && (p.basePerResolution[res] ?? p.basePerResolution['720p'])) || 0;
     return Number((base + p.perSecond * dur).toFixed(4));
+  }
+  if (p.kind === 'flat-per-generation') {
+    const res = resolution || caps.defaultResolution || '720p';
+    const flat = p.perResolution && (p.perResolution[res] ?? p.perResolution['720p']);
+    return flat != null ? Number(flat.toFixed(4)) : null;
   }
   return null;
 }
@@ -236,6 +307,59 @@ function resolveAspectRatioForModel(requested, caps) {
     if (delta < bestDelta) { best = ar; bestDelta = delta; }
   }
   return best;
+}
+
+// ── Model + aspect resolution (shared) ────────────────────────────────
+//
+// The single decision point both prepareStoryboard and generateForAd go
+// through, so the two stages of one ad always agree. Order:
+//   1. modelOverride (per-run, e.g. the regenerate dropdown) beats the
+//      persisted chain; unknown slugs warn and fall through to it.
+//   2. requiresVideoSeed degrade: Omni reference-to-video transforms an
+//      existing clip — an image-seeded ad can't feed it, so it degrades
+//      to the built-in i2v default rather than failing the render.
+//   3. Aspect fallback: Omni models only render 16:9/9:16. Any other
+//      canvas routes to ASPECT_FALLBACK_MODEL (Grok 1.5), whose refs are
+//      already pre-cropped to the canvas by the existing resize system.
+//      Explicitly-selected Grok/Veo models never "fall back".
+//   4. resolveAspectRatioForModel runs against the FINAL model's caps
+//      (formats even Grok lacks — 4:5, 5:4, 1.91:1 — keep the
+//      closest-aspect render + Cloudinary eager re-crop path).
+//
+// Returns { model, caps, aspectRatio, fallback } where fallback is
+// null or { from, reason } for logging / the Ad doc.
+function resolveModelAndAspect({
+  brand = null, product = null, canvasKeys = [],
+  platformAspect, modelOverride = null, hasVideoSeed = false
+} = {}) {
+  let model;
+  if (modelOverride && MODEL_CAPS[modelOverride]) {
+    model = modelOverride;
+  } else {
+    if (modelOverride) {
+      console.warn(`⚠️  resolveModelAndAspect: unknown modelOverride '${modelOverride}' — using the persisted chain`);
+    }
+    model = resolveVideoModel({ brand, product, canvasKeys });
+  }
+
+  let fallback = null;
+  let caps = capsFor(model);
+
+  if (caps.requiresVideoSeed && !hasVideoSeed) {
+    fallback = { from: model, reason: 'model requires a video seed; ad is image-seeded' };
+    model = BUILT_IN_DEFAULT_MODEL;
+    caps = capsFor(model);
+  }
+
+  const isOmni = String(caps.paramShape || '').startsWith('gemini-omni');
+  if (isOmni && platformAspect && !(caps.supportedAspectRatios || []).includes(platformAspect)) {
+    fallback = { from: model, reason: `aspect ${platformAspect} unsupported (${(caps.supportedAspectRatios || []).join('/')})` };
+    model = ASPECT_FALLBACK_MODEL;
+    caps = capsFor(model);
+  }
+
+  const aspectRatio = resolveAspectRatioForModel(platformAspect, caps);
+  return { model, caps, aspectRatio, fallback };
 }
 
 // ── Cloudinary aspect cropping ────────────────────────────────────────
@@ -372,6 +496,36 @@ function resolveReferenceImageCount({ brand = null, product = null } = {}) {
     console.warn(`⚠️  resolveReferenceImageCount: invalid value '${raw}' from ${source} (want 1–${MAX_REFERENCE_IMAGE_COUNT}) — falling through`);
   }
   return DEFAULT_REFERENCE_IMAGE_COUNT;
+}
+
+// Resolve per-ad render duration. Operators may set Ad.videoDurationSec
+// (1–15); null/undefined/invalid falls back to caps.defaultDuration || 8,
+// then clamps to [minDuration, maxDuration]. When caps.durationEnum is a
+// non-empty array (Gemini Omni accepts only 4|6|8|10), snap to the
+// NEAREST enum value — ties go to the smaller value — so the request
+// body always carries a provider-legal duration.
+function resolveDurationSec(requested, caps) {
+  let n = parseInt(requested, 10);
+  if (!Number.isFinite(n) || n < 1) n = caps?.defaultDuration || 8;
+  const min = caps?.minDuration || 1;
+  const max = caps?.maxDuration || 15;
+  n = Math.max(min, Math.min(max, n));
+  const enumer = caps?.durationEnum;
+  if (Array.isArray(enumer) && enumer.length) {
+    let best = enumer[0];
+    let bestDelta = Math.abs(best - n);
+    for (const v of enumer.slice(1)) {
+      const delta = Math.abs(v - n);
+      // Strict < keeps the smaller value on a tie (encountered first when
+      // the enum is ascending, which every MODEL_CAPS entry is).
+      if (delta < bestDelta || (delta === bestDelta && v < best)) {
+        best = v;
+        bestDelta = delta;
+      }
+    }
+    n = best;
+  }
+  return n | 0;
 }
 
 // Validate an operator-supplied videoSettings payload (Brand or
@@ -598,7 +752,11 @@ async function pollPrediction(predictionId, { shouldCancel = null } = {}) {
 // Pure body construction — kept side-effect free so the dry-run script
 // (scripts/dryRunVideoSubmit.js) and unit tests can exercise the exact
 // request shape without POSTing.
-function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps }) {
+// durationSec is expected already clamped by resolveDurationSec — each
+// paramShape still applies model-specific bounds (enum snap, ends≤10,
+// maxDuration) as a defensive floor, but callers should not rely on
+// that path for operator-facing validation.
+function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl = null, durationSec = null }) {
   switch (caps.paramShape) {
     case 'gemini-omni':
       // duration MUST be sent explicitly (Atlas enum 4|6|8|10) — the 8s
@@ -607,17 +765,47 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps }) {
         model,
         prompt,
         images: imageUrls,
-        duration: caps.defaultDuration || 8,
+        duration: durationSec || caps.defaultDuration || 8,
         aspect_ratio: aspectRatio,
         resolution: process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p'
       };
+    case 'gemini-omni-r2v': {
+      // Schema requires video_clips: [{url, start, ends}] with a ≤10s
+      // trimmed window. The Cloudinary segment URL is already trimmed
+      // (du_N), so start/ends restate the same window for the API;
+      // when the seed isn't a Cloudinary asset we send the raw URL and
+      // let start/ends do the trim server-side.
+      const duration = durationSec || caps.defaultDuration || 8;
+      return {
+        model,
+        prompt,
+        video_clips: [{ url: videoClipUrl, start: 0, ends: Math.min(10, duration) }],
+        images: imageUrls.slice(0, caps.maxReferenceImages || 5),
+        duration,
+        aspect_ratio: aspectRatio,
+        resolution: process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p'
+      };
+    }
     case 'grok':
       return {
         model,
         prompt,
         image_urls: imageUrls,
-        duration: Math.min(caps.maxDuration, 8),
+        duration: Math.min(caps.maxDuration, durationSec || 8),
         resolution: '720p',
+        aspect_ratio: aspectRatio
+      };
+    case 'grok-i2v':
+      // Single starting frame (schema: image_url is one string). The
+      // position-0 reference is the pre-cropped seed composition, so
+      // the frame already matches the canvas aspect. durationSec is
+      // already clamped by resolveDurationSec at the call site.
+      return {
+        model,
+        prompt,
+        image_url: imageUrls[0],
+        duration: durationSec || caps.defaultDuration || 8,
+        resolution: caps.defaultResolution || '720p',
         aspect_ratio: aspectRatio
       };
     case 'veo':
@@ -636,8 +824,8 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps }) {
   }
 }
 
-async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps }) {
-  const body = buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps });
+async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl = null, durationSec = null }) {
+  const body = buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec });
 
   console.log(
     `🎬 atlasVideo.submit: model=${model} aspect=${aspectRatio} refs=${imageUrls.length} ` +
@@ -664,7 +852,7 @@ async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps })
 // the storyboard once before dispatching Grok and chrome in parallel.
 // Returns { storyboard, aspectRatio } so the caller can stamp it on
 // the Ad doc and pass it to both renderers.
-async function prepareStoryboard({ ad, operatorPrompt = null }) {
+async function prepareStoryboard({ ad, operatorPrompt = null, modelOverride = null }) {
   const media = await Media.findById(ad.mediaId).lean();
   if (!media) throw new Error(`Media ${ad.mediaId} not found`);
 
@@ -678,11 +866,16 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
 
   // Model resolution needs the brand + product docs, and aspect
   // resolution needs the model's supportedAspectRatios — so this block
-  // must come after the loads.
+  // must come after the loads. Shared with generateForAd so both stages
+  // of one ad agree on model + aspect (incl. the Grok aspect fallback).
   const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
-  const model = resolveVideoModel({ brand, product, canvasKeys: [ad.platformFormat, platformAspect] });
-  const caps  = capsFor(model);
-  const aspectRatio = resolveAspectRatioForModel(platformAspect, caps);
+  const { model, aspectRatio, fallback } = resolveModelAndAspect({
+    brand, product, canvasKeys: [ad.platformFormat, platformAspect],
+    platformAspect, modelOverride, hasVideoSeed: media.fileType === 'video'
+  });
+  if (fallback) {
+    console.log(`🎬 atlasVideo[ad=${ad._id}]: model fallback ${fallback.from} → ${model} (${fallback.reason})`);
+  }
 
   let concept = null;
   if (ad.conceptId && ad.conceptArtifactId) {
@@ -730,7 +923,7 @@ async function prepareStoryboard({ ad, operatorPrompt = null }) {
   return { storyboard: null, aspectRatio, model };
 }
 
-async function generateForAd({ ad, operatorPrompt = null, storyboard: precomputedStoryboard = null }) {
+async function generateForAd({ ad, operatorPrompt = null, storyboard: precomputedStoryboard = null, modelOverride = null }) {
   if (!enabled()) return { skipped: true, reason: 'VIDEO_PROVIDER != atlas or ATLAS_API_KEY missing' };
 
   const media = await Media.findById(ad.mediaId).lean();
@@ -759,17 +952,26 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   // Model resolution needs the brand + product docs (per-canvas /
   // per-product / per-brand overrides), and aspect resolution needs the
   // resolved model's supportedAspectRatios — so this block must come
-  // after the loads.
+  // after the loads. resolveModelAndAspect additionally applies the
+  // per-run override, the r2v video-seed degrade, and the Omni → Grok
+  // aspect fallback (shared with prepareStoryboard).
   const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
-  const model = resolveVideoModel({ brand, product, canvasKeys: [ad.platformFormat, platformAspect] });
-  const caps  = capsFor(model);
-  const aspectRatio = resolveAspectRatioForModel(platformAspect, caps);
+  const { model, caps, aspectRatio, fallback } = resolveModelAndAspect({
+    brand, product, canvasKeys: [ad.platformFormat, platformAspect],
+    platformAspect, modelOverride, hasVideoSeed: media.fileType === 'video'
+  });
+  if (fallback) {
+    console.log(`🎬 atlasVideo[ad=${ad._id}]: model fallback ${fallback.from} → ${model} (${fallback.reason})`);
+  }
   if (aspectRatio !== platformAspect) {
     console.log(
       `🎬 atlasVideo[ad=${ad._id}]: remapped aspect ${platformAspect} → ${aspectRatio} ` +
       `(unsupported by ${model}; closest of ${caps.supportedAspectRatios.join(', ')})`
     );
   }
+  // Per-ad render length — wizard-stamped Ad.videoDurationSec (or the
+  // standard 8s), clamped/enum-snapped to the resolved model's caps.
+  const durationSec = resolveDurationSec(ad.videoDurationSec, caps);
 
   let concept = null;
   if (ad.conceptId && ad.conceptArtifactId) {
@@ -861,11 +1063,19 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     hasProductReference: hasProductAnchor,
     operatorPrompt,
     storyboard,
-    caps
+    caps,
+    durationSec
   });
 
+  // Omni reference-to-video consumes the seed VIDEO itself (trimmed to
+  // the render window via the existing Cloudinary segment builder);
+  // resolveModelAndAspect guarantees hasVideoSeed for this paramShape.
+  const videoClipUrl = caps.paramShape === 'gemini-omni-r2v'
+    ? (buildVideoSegmentUrl(media.fileUrl, aspectRatio, durationSec) || media.fileUrl)
+    : null;
+
   const t0 = Date.now();
-  const predictionId = await submitGeneration({ model, prompt, imageUrls, aspectRatio, caps });
+  const predictionId = await submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec });
   console.log(`🎬 atlasVideo[ad=${ad._id}]: prediction=${predictionId} polling...`);
 
   const remoteVideoUrl = await pollPrediction(predictionId);
@@ -903,12 +1113,12 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   // pricing entry, mirroring the duration/resolution the submission
   // body requested. Lands in CostLog alongside the pipeline's LLM
   // entries so per-brand/per-campaign rollups include video spend.
-  const renderResolution = caps.paramShape === 'gemini-omni'
+  const renderResolution = String(caps.paramShape || '').startsWith('gemini-omni')
     ? (process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p')
     : (caps.defaultResolution || '720p');
   const costUsd = estimateRenderCostUsd({
     model,
-    durationSec: caps.defaultDuration || Math.min(caps.maxDuration, 8),
+    durationSec,
     resolution:  renderResolution
   });
   await recordFlatCost({
@@ -940,6 +1150,7 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     storyboard,
     elapsedMs,
     model,
+    modelFallback:      fallback,
     costUsd
   };
 }
@@ -963,7 +1174,10 @@ module.exports = {
   MAX_REFERENCE_IMAGE_COUNT,
   capsFor,
   resolveVideoModel,
+  resolveModelAndAspect,
+  ASPECT_FALLBACK_MODEL,
   resolveReferenceImageCount,
+  resolveDurationSec,
   estimateRenderCostUsd,
   validateVideoSettings,
   buildSubmissionBody,

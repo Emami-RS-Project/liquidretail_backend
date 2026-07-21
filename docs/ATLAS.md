@@ -27,6 +27,27 @@ retained as automatic fallbacks. Migrated 2026-07-21.
 - **`services/atlasVideoService.js`** — video generation (predates this
   migration). `services/videoRouter.js` now defaults `VIDEO_PROVIDER=atlas`;
   the direct-Veo `aiVideoReferenceService` remains the `vertex` fallback.
+  Operator-selectable models (schemas live-verified 2026-07-21) via the
+  Brand "Video Generation" card + the regenerate dropdown
+  (`GET /api/ads/video-models`):
+  - `google/gemini-omni-flash/image-to-video-developer` — DEFAULT; ≤7 ref
+    images; 16:9/9:16 only; $0.20 + $0.10/s (4k base $1.00).
+  - `google/gemini-omni-flash/reference-to-video-developer` — transforms
+    the ad's seed VIDEO (`video_clips` + ≤5 ref images; image-seeded ads
+    degrade to the i2v default); 16:9/9:16 only; flat $1.60/gen ($2.40 4k).
+  - `xai/grok-imagine-video-v1.5/image-to-video` — SINGLE starting-frame
+    `image_url` (the multi-image stack is the v1 reference-to-video line,
+    kept registered but not selectable); 7 aspect ratios; pricing
+    UNVERIFIED (carrying v1's $0.50/s until a live render confirms).
+  Canvas formats outside an Omni model's 16:9/9:16 support automatically
+  route through the existing reference pre-crop to Grok 1.5
+  (`ASPECT_FALLBACK_MODEL`, env `ATLAS_VIDEO_FALLBACK_MODEL`) — see
+  `resolveModelAndAspect`.
+  Render length: standard 8s; the wizard's format-selection stage can
+  pick 1–15s, stamped per-ad as `Ad.videoDurationSec`. At render time
+  `resolveDurationSec` clamps to the model's range and snaps to the
+  Omni duration enum (4|6|8|10, nearest); the Ken Burns prompt's Output
+  line and 3-scene timeline scale to the same value.
 
 ## 2) Model map (live-verified 2026-07-21)
 

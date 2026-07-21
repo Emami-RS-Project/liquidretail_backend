@@ -279,6 +279,10 @@ async function expandWizardJob({
   // declared kinds (services/platformFormats.js) — picking 'image' on
   // Reels falls back to 'video'. null defers to campaign.adKinds.
   kinds = null,
+  // Wizard format-selection stage: requested video length in seconds
+  // (integer 1–15). null = standard 8s. Stamped on video Ad payloads
+  // only; not part of identityDigest.
+  videoDurationSec = null,
   // Dry-run mode — runs the entire seed assembly + cartesian + caps
   // but skips the Ad.insertMany. Returns the would-be payload counts
   // grouped by productId so the wizard can show "this will produce N
@@ -391,7 +395,8 @@ async function expandWizardJob({
       platformFormat: effectivePlatformFormat,
       kinds: resolvedKinds,
       includeCategoryMatched, includeBrandMatched,
-      excludePairings, creativeIntent: null
+      excludePairings, creativeIntent: null,
+      videoDurationSec
     });
     return result;
   }
@@ -542,6 +547,7 @@ async function expandWizardJob({
               aspectRatio:    cell.aspectRatio,
               campaignKind,
               platformFormat: effectivePlatformFormat,
+              videoDurationSec: kind === 'video' ? (videoDurationSec || null) : null,
               matchTier:      seed.matchTier,
               variantKind:    seed.variantKind,
               paletteSource,
@@ -1340,7 +1346,8 @@ async function runConceptDrivenExpansion({
   platformFormat,
   kinds,                                            // [] of 'image'|'video' — what pipelines to emit per concept
   includeCategoryMatched, includeBrandMatched,
-  excludePairings, creativeIntent
+  excludePairings, creativeIntent,
+  videoDurationSec = null                           // wizard-requested video length (sec); null = standard 8s
 }) {
   const { resolveKinds, renderRouteForKind } = require('./platformFormats');
   const resolvedKinds = (Array.isArray(kinds) && kinds.length)
@@ -1482,6 +1489,7 @@ async function runConceptDrivenExpansion({
             aspectRatio:       aspectRatioForPlatformFormat(platformFormat) || '1:1',
             campaignKind,
             platformFormat,
+            videoDurationSec:  kind === 'video' ? (videoDurationSec || null) : null,
             matchTier:         matchTierForUniverseRole(role),
             variantKind:       variantKindForUniverseRole(role),
             paletteSource:     'media',

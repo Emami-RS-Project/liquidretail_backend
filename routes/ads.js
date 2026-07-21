@@ -130,11 +130,23 @@ router.post('/generate', async (req, res) => {
       // expand buttons.
       includeCategoryMatched = false,
       includeBrandMatched    = false,
-      refresh     = false   // wizard checkbox / smoke-test override; bypasses de-dupe + LayoutInputArtifact cache
+      refresh     = false,  // wizard checkbox / smoke-test override; bypasses de-dupe + LayoutInputArtifact cache
+      videoDurationSec = null  // wizard format-selection stage; integer 1–15, null = standard 8s
     } = req.body || {};
 
     if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
     if (!templateIds.length) return res.status(400).json({ error: 'templateIds required (at least 1 template)' });
+
+    // Per-ad video duration from the wizard. Optional; when present must
+    // be an integer 1..15. null/''/absent → service default (standard 8s).
+    let parsedVideoDurationSec = null;
+    if (videoDurationSec !== undefined && videoDurationSec !== null && videoDurationSec !== '') {
+      const n = Number(videoDurationSec);
+      if (!Number.isInteger(n) || n < 1 || n > 15) {
+        return res.status(400).json({ error: 'videoDurationSec must be an integer 1–15' });
+      }
+      parsedVideoDurationSec = n;
+    }
 
     // Account-setup gate — refuse generation while any connected source
     // has detect in flight or hasn't completed. Mirrors the gate on
@@ -223,6 +235,7 @@ router.post('/generate', async (req, res) => {
           excludePairings,
           includeCategoryMatched,
           includeBrandMatched,
+          videoDurationSec: parsedVideoDurationSec,
           requestedBy: req.user?.userId || null
         });
 
@@ -956,6 +969,29 @@ router.get('/meta-adsets', async (req, res) => {
   }
 });
 
+// GET /api/ads/video-models — the operator-selectable video generation
+// models, for the Brand settings card and the regenerate dropdown.
+// Derived from atlasVideoService.MODEL_CAPS (single source of truth);
+// `default` marks the built-in default the resolver falls back to.
+// NOTE: must stay registered above the '/:id' routes.
+router.get('/video-models', async (req, res) => {
+  const {
+    MODEL_CAPS, BUILT_IN_DEFAULT_MODEL, estimateRenderCostUsd
+  } = require('../services/atlasVideoService');
+  const models = Object.entries(MODEL_CAPS)
+    .filter(([, caps]) => caps.selectable)
+    .map(([slug, caps]) => ({
+      slug,
+      label:                 caps.label || slug,
+      default:               slug === BUILT_IN_DEFAULT_MODEL,
+      supportedAspectRatios: caps.supportedAspectRatios || [],
+      maxReferenceImages:    caps.maxReferenceImages || 1,
+      requiresVideoSeed:     !!caps.requiresVideoSeed,
+      estCostPer8s:          estimateRenderCostUsd({ model: slug, durationSec: caps.defaultDuration || 8 })
+    }));
+  res.json({ models });
+});
+
 router.post('/push-to-meta', express.json(), async (req, res) => {
   try {
     const brandId = req.body?.brandId || req.query.brandId || req.headers['x-brand-id'];
@@ -1030,6 +1066,19 @@ router.post('/:id/regenerate', express.json(), async (req, res) => {
     if (prompt.length > 1000) return res.status(400).json({ error: 'prompt is too long (max 1000 chars)' });
     const mode = req.body?.mode === 'full' ? 'full' : 'light';
 
+    // Optional per-run video model override (the regenerate dropdown).
+    // Only operator-selectable registry slugs are accepted — persisted
+    // env/back-compat slugs aren't offered per-run.
+    let videoModel = null;
+    if (req.body?.videoModel != null && req.body.videoModel !== '') {
+      const { MODEL_CAPS } = require('../services/atlasVideoService');
+      const slug = String(req.body.videoModel);
+      if (!MODEL_CAPS[slug]?.selectable) {
+        return res.status(400).json({ error: `unknown video model '${slug}'` });
+      }
+      videoModel = slug;
+    }
+
     const regen = require('../services/adRegenerateService');
     let ad;
     try {
@@ -1048,7 +1097,7 @@ router.post('/:id/regenerate', express.json(), async (req, res) => {
     });
 
     setImmediate(() => {
-      regen.regenerateAd({ ad, prompt, mode, requestedBy })
+      regen.regenerateAd({ ad, prompt, mode, requestedBy, videoModel })
         .catch(err => console.error(`❌ regenerate setImmediate crash: ${err.message}`));
     });
   } catch (err) {

@@ -6,11 +6,13 @@
 // Zero API spend; needs only MongoDB access.
 //
 // Usage:
-//   node scripts/dryRunVideoSubmit.js <adId> [--prompt "operator refinement"]
+//   node scripts/dryRunVideoSubmit.js <adId> [--prompt "operator refinement"] [--model <slug>]
 //
 // Checks worth eyeballing in the output:
 //   - model: reflects the CatalogProduct/Brand videoSettings overrides
-//     (per-canvas first) and falls back to the Gemini Omni default
+//     (per-canvas first), optional --model override, and falls back to the
+//     Gemini Omni default; formats outside an Omni model's 16:9/9:16 route
+//     to the Grok 1.5 fallback; r2v needs a video seed
 //   - images: 1–7 entries, seed first, then product hero + alts in
 //     stored order (default count 3)
 //   - body.duration === 8 for the gemini-omni paramShape
@@ -25,12 +27,13 @@ const Media          = require('../models/Media');
 const Brand          = require('../models/Brand');
 const CatalogProduct = require('../models/CatalogProduct');
 const {
-  capsFor,
-  resolveVideoModel,
+  resolveModelAndAspect,
   resolveReferenceImageCount,
+  resolveDurationSec,
   estimateRenderCostUsd,
   buildSubmissionBody,
-  buildReferenceImages
+  buildReferenceImages,
+  buildVideoSegmentUrl
 } = require('../services/atlasVideoService');
 const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('../services/veoPromptBuilder');
 
@@ -39,7 +42,9 @@ const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('../services/ve
   const adId = args[0];
   const promptFlagIdx = args.indexOf('--prompt');
   const operatorPrompt = promptFlagIdx >= 0 ? (args[promptFlagIdx + 1] || null) : null;
-  if (!adId) { console.error('Usage: node scripts/dryRunVideoSubmit.js <adId> [--prompt "refinement"]'); process.exit(1); }
+  const modelFlagIdx = args.indexOf('--model');
+  const modelOverride = modelFlagIdx >= 0 ? (args[modelFlagIdx + 1] || null) : null;
+  if (!adId) { console.error('Usage: node scripts/dryRunVideoSubmit.js <adId> [--prompt "refinement"] [--model <slug>]'); process.exit(1); }
 
   await mongoose.connect(process.env.MONGODB_URI);
 
@@ -60,24 +65,31 @@ const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('../services/ve
 
   // Same resolution sequence as atlasVideoService.generateForAd.
   const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
-  const model = resolveVideoModel({ brand, product, canvasKeys: [ad.platformFormat, platformAspect] });
-  const caps  = capsFor(model);
-  const supported = caps.supportedAspectRatios || [];
-  const aspectRatio = supported.includes(platformAspect) ? platformAspect : (supported[0] || platformAspect);
+  const { model, caps, aspectRatio, fallback } = resolveModelAndAspect({
+    brand, product, canvasKeys: [ad.platformFormat, platformAspect],
+    platformAspect, modelOverride, hasVideoSeed: media.fileType === 'video'
+  });
 
   const referenceCount = resolveReferenceImageCount({ brand, product });
   const imageUrls = buildReferenceImages({ media, product, catalogMedias, aspectRatio, caps, referenceCount });
   const hasProductAnchor = imageUrls.length >= 2;
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
 
+  // Same per-ad duration resolution as generateForAd (wizard-stamped
+  // Ad.videoDurationSec, clamped/enum-snapped to the model's caps).
+  const durationSec = resolveDurationSec(ad.videoDurationSec, caps);
+
   const prompt = buildVeoPrompt({
     concept: null, brand, product, media,
     aspectRatio, seedHasText,
     hasProductReference: hasProductAnchor,
-    operatorPrompt, storyboard: null, caps
+    operatorPrompt, storyboard: null, caps, durationSec
   });
 
-  const body = buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps });
+  const videoClipUrl = caps.paramShape === 'gemini-omni-r2v'
+    ? (buildVideoSegmentUrl(media.fileUrl, aspectRatio, durationSec) || media.fileUrl)
+    : undefined;
+  const body = buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec });
   const costUsd = estimateRenderCostUsd({
     model,
     durationSec: body.duration || caps.defaultDuration || 8,
@@ -91,6 +103,8 @@ const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('../services/ve
     requestedAspect: platformAspect,
     resolvedAspect: aspectRatio,
     model,
+    modelOverride,
+    fallback: fallback || null,
     paramShape: caps.paramShape,
     brandOverride: brand?.videoSettings || null,
     productOverride: product?.videoSettings || null,
@@ -100,6 +114,11 @@ const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('../services/ve
 
   console.log(`\n=== Reference images (${imageUrls.length}) ===`);
   imageUrls.forEach((u, i) => console.log(`  [${i}] ${u}`));
+
+  if (videoClipUrl) {
+    console.log(`\n=== Video clip URL ===`);
+    console.log(videoClipUrl);
+  }
 
   const bytes = Buffer.byteLength(prompt, 'utf8');
   console.log(`\n=== Prompt (chars=${prompt.length} bytes=${bytes} cap=${caps.promptByteCap || 4096} ${bytes < (caps.promptByteCap || 4096) ? 'OK' : 'OVER CAP'}) ===`);

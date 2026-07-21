@@ -150,7 +150,8 @@ function buildVeoPrompt({
   hasProductReference = false,
   operatorPrompt = null,
   storyboard = null,      // eslint-disable-line no-unused-vars
-  caps = null
+  caps = null,
+  durationSec = 8         // per-ad render length (wizard format-selection stage)
 }) {
   const lines = [];
 
@@ -190,11 +191,17 @@ function buildVeoPrompt({
   // reveal is the closing beat — there is no endcard overlay
   // downstream (removed deliberately; endcards, when desired, are
   // prompted in a custom titling script instead).
+  // Scene marks scale proportionally with the requested duration so a
+  // 4s or 15s render keeps the same pan → logo zoom → reveal arc
+  // (canonical 8.0s beats were 2.66 / 5.12 — ratios 1/3 and 0.64).
+  const dur = Number(durationSec || 8);
+  const t1  = (dur / 3).toFixed(2);
+  const t2  = (dur * 0.64).toFixed(2);
   lines.push(
-    `Timeline (8.0s): ` +
-    `Scene 1 (0.0–2.66s): slow horizontal pan left→right, ~10–15% movement. No zoom, rotation, or perspective shift. ` +
-    `Scene 2 (2.66–5.12s): slow zoom toward the logo or most distinctive product detail (~8–10%), centered. No rotation or distortion. ` +
-    `Scene 3 (5.12–8.0s): begin slightly cropped, slow zoom out ~10–12% to reveal the full product. Maintain center framing.`
+    `Timeline (${dur.toFixed(1)}s): ` +
+    `Scene 1 (0.0–${t1}s): slow horizontal pan left→right, ~10–15% movement. No zoom, rotation, or perspective shift. ` +
+    `Scene 2 (${t1}–${t2}s): slow zoom toward the logo or most distinctive product detail (~8–10%), centered. No rotation or distortion. ` +
+    `Scene 3 (${t2}–${dur.toFixed(1)}s): begin slightly cropped, slow zoom out ~10–12% to reveal the full product. Maintain center framing.`
   );
   lines.push(`Transitions: Smooth crossfades only, ~0.25s. No wipes, flashes, or animated transitions.`);
   lines.push(
@@ -261,7 +268,7 @@ function buildVeoPrompt({
   );
 
   lines.push(
-    `Output: 8.0s duration. Camera movement only. Product unchanged. Luxury ecommerce aesthetic. ` +
+    `Output: ${Number(durationSec || 8).toFixed(1)}s duration. Camera movement only. Product unchanged. Luxury ecommerce aesthetic. ` +
     `Final result should look like a professional camera moving over the original photographs, with no sign that AI touched the product.`
   );
 

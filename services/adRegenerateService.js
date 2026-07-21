@@ -84,7 +84,7 @@ async function preflight(adId, brandId) {
 // route responds 202 with { regenerating: true } and the worker runs
 // in the background. The frontend polls /api/catalog/:id/ads-detail
 // every 5s watching Ad.regenerating.
-async function regenerateAd({ ad, prompt, mode, requestedBy }) {
+async function regenerateAd({ ad, prompt, mode, requestedBy, videoModel = null }) {
   const adId      = String(ad._id);
   const kind      = ad.kind || 'image';
   // Video always regens fully (new Grok video + brand-script chrome).
@@ -96,13 +96,15 @@ async function regenerateAd({ ad, prompt, mode, requestedBy }) {
     prompt:      String(prompt || '').slice(0, 1000),
     mode:        effMode,
     requestedBy: requestedBy || null,
+    videoModel:  videoModel || null,
     at:          new Date(startedAt),
     status:      'pending'
   };
 
   console.log(
-    `🔁 regenerate[ad=${adId}]: kind=${kind} mode=${effMode} ` +
-    `prompt="${historyEntry.prompt.slice(0, 60)}${historyEntry.prompt.length > 60 ? '…' : ''}"`
+    `🔁 regenerate[ad=${adId}]: kind=${kind} mode=${effMode}` +
+    (videoModel ? ` videoModel=${videoModel}` : '') +
+    ` prompt="${historyEntry.prompt.slice(0, 60)}${historyEntry.prompt.length > 60 ? '…' : ''}"`
   );
 
   // Lock the ad + append the in-flight history entry. The lock is
@@ -135,7 +137,7 @@ async function regenerateAd({ ad, prompt, mode, requestedBy }) {
 
   try {
     if (kind === 'video') {
-      await runVideoFull(adId, prompt, progressRun);
+      await runVideoFull(adId, prompt, progressRun, videoModel);
     } else {
       await runImage(adId, prompt, progressRun);
     }
@@ -172,22 +174,24 @@ async function loadBrand(adId) {
 
 // Video regen — always full. Regenerates the storyboard + Grok base
 // video, then applies brand-script chrome (or no chrome, per resolver).
-async function runVideoFull(adId, prompt, progressRun = null) {
+async function runVideoFull(adId, prompt, progressRun = null, videoModel = null) {
   // Stage 1 — context prep (model + aspect resolution, layoutInput
   // warm). storyboard is null on the Atlas path — the Ken Burns prompt
   // directs motion; the operator's refinement prompt is threaded into
-  // the video prompt itself in Stage 2.
+  // the video prompt itself in Stage 2. videoModel (the regenerate
+  // dropdown's per-run override) goes to BOTH stages so they resolve
+  // the same model.
   if (progressRun) { await progressRun.checkpoint(); progressRun.stage('generating video'); }
   await setStage(adId, 'veo');
   const ad1 = await Ad.findById(adId).lean();
-  const { storyboard } = await veoService.prepareStoryboard({ ad: ad1, operatorPrompt: prompt });
+  const { storyboard } = await veoService.prepareStoryboard({ ad: ad1, operatorPrompt: prompt, modelOverride: videoModel });
 
   if (storyboard) {
     await Ad.updateOne({ _id: adId }, { $set: { veoStoryboard: storyboard, updatedAt: new Date() } });
   }
 
-  // Stage 2 — new Grok base video.
-  const veoResult = await veoService.generateForAd({ ad: ad1, operatorPrompt: prompt, storyboard });
+  // Stage 2 — new base video (model per override → settings → default).
+  const veoResult = await veoService.generateForAd({ ad: ad1, operatorPrompt: prompt, storyboard, modelOverride: videoModel });
   if (veoResult.skipped) throw new Error(`Veo skipped: ${veoResult.reason}`);
 
   // Stamp the raw render before chrome so a chrome failure still
