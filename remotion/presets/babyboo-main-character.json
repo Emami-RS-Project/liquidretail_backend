@@ -301,7 +301,8 @@
             "maxLines": 1,
             "colorToken": "ctaText",
             "trackingPx": 2
-          }
+          },
+          "visible": false
         },
         {
           "key": "deliveryLine",
@@ -606,7 +607,8 @@
             "maxLines": 1,
             "colorToken": "ctaText",
             "trackingPx": 2
-          }
+          },
+          "visible": false
         }
       ]
     },
@@ -898,7 +900,8 @@
             "maxLines": 1,
             "colorToken": "ctaText",
             "trackingPx": 2
-          }
+          },
+          "visible": false
         }
       ]
     }

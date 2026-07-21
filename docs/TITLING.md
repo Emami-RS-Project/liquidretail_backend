@@ -25,6 +25,8 @@ Loopback asset server (services/remotionRenderService.js): http on 127.0.0.1, se
 
 Full schema contract + validator in `services/titleSpecValidator.js` (v1). Declarative JSON rendered by canonical compositions. Shipped canonicals are presets (remotion/presets/*.json); brands override via Brand.titleStyleSpec or pin via titleStylePreset.
 
+CTA default: every shipped preset ships its `cta` slot `visible: false` — all current placements (meta_feed_*, meta_reels/stories, pmax_16_9) render the platform's own CTA button, so a baked-in chip duplicates chrome. The slot keeps its timing/positioning; re-enable per brand (spec PATCH / playground) for channels without native CTAs.
+
 ```json
 {
   "version": 1,
@@ -115,7 +117,7 @@ Fonts (`services/fontResolverService.js` `resolveBrandFonts`):
 - basic: ffmpeg extract (3 samples or [0] for image), sharp greyscale 96x96, per-band (top/middle/bottom) lum (0..1) + busy (0..1) inside safe zones (BAND_FOR_ANCHOR maps anchors).
 - gemini: + vision pass (TITLE_SCAN_MODEL=gemini-2.5-flash) marking avoid bands (faces/product/focal); falls back silently.
 - Output: {samples: [{atSec, bands: {top|middle|bottom: {lum, busy, avoid}}}] }.
-- Composition uses nearest sample for contrast (textOnLight tokens) + keep-out nudge.
+- Contrast: ONE global ink decision per render (plateIsLightGlobal in Canonical.jsx) — band verdicts weighted by how many slots render copy there; majority wins, so copy never mixes ink colors across light/dark bands in one video (the minority band leans on the layered shadows). Keep-out `avoid` nudges stay per-band (positional only).
 
 ## 5) Operator flows (routes/brand.js, all under /api/brand/:id, Bearer + tenant-scoped)
 

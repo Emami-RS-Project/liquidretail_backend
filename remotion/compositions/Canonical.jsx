@@ -35,6 +35,28 @@ function bandStateFor(plateHints, anchor, atSec) {
   return { isLight: band.lum > 0.62, avoid: !!band.avoid };
 }
 
+// ONE contrast decision per render, not per band: copy must never mix ink
+// colors within a video (dark headline on a light band + light CTA on a
+// dark band reads as a bug, not adaptivity). Weigh each group's band
+// verdict by how many slots actually render copy there — the scheme
+// follows the bulk of the visible copy, and the layered shadows carry
+// the minority band.
+function plateIsLightGlobal(plateHints, groups, timeScale, meta) {
+  if (!plateHints?.samples?.length) return false;
+  let lightWeight = 0;
+  let darkWeight = 0;
+  for (const group of groups) {
+    const first = group.items[0];
+    const rendered = group.items.filter((s) => resolveSlotContent(s, meta) != null).length;
+    if (!rendered) continue;
+    const { isLight } = bandStateFor(plateHints, group.anchor, first.timing.enterAtSec * timeScale + 0.5);
+    if (isLight) lightWeight += rendered;
+    else darkWeight += rendered;
+  }
+  // Tie or no copy → keep the brand's default (light-type) tokens.
+  return lightWeight > darkWeight;
+}
+
 function resolveSlotContent(slot, meta) {
   const brandMode = meta?.endcardMode === 'brand';
   if (!slot.visible) return null;
@@ -100,6 +122,8 @@ export const Canonical = ({ format = 'feed', plate, meta = {}, tokens = {}, spec
   const groups = useMemo(() => (spec?.slots ? groupSlots(spec.slots) : []), [spec]);
   // Compress spec-authored times onto shorter real plates (see timing.js).
   const timeScale = useMemo(() => specTimeScale(spec, durationInFrames, fps), [spec, durationInFrames, fps]);
+  // Global ink color — every group flips together or not at all.
+  const inkOnLight = useMemo(() => plateIsLightGlobal(plateHints, groups, timeScale, meta), [plateHints, groups, timeScale, meta]);
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
@@ -127,9 +151,9 @@ export const Canonical = ({ format = 'feed', plate, meta = {}, tokens = {}, spec
                 if (content == null) return null;
                 const Renderer = SLOT_RENDERERS[rawSlot.key];
                 if (!Renderer) return null;
-                // Bright band under this group → flip text tokens to their
-                // on-light variants (brand pills/CTA keep brand color).
-                const slot = band.isLight
+                // Bright plate (globally decided) → flip text tokens to
+                // their on-light variants (brand pills/CTA keep brand color).
+                const slot = inkOnLight
                   ? {
                       ...rawSlot,
                       treatment: {

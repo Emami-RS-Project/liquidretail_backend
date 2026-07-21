@@ -284,7 +284,8 @@
             "maxLines": 1,
             "colorToken": "ctaText",
             "trackingPx": 1.2
-          }
+          },
+          "visible": false
         }
       ]
     },
@@ -525,7 +526,8 @@
             "maxLines": 1,
             "colorToken": "ctaText",
             "trackingPx": 1.2
-          }
+          },
+          "visible": false
         }
       ]
     },
@@ -777,7 +779,8 @@
             "maxLines": 1,
             "colorToken": "ctaText",
             "trackingPx": 1.2
-          }
+          },
+          "visible": false
         }
       ]
     }
