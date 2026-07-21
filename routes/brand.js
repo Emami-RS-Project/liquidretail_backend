@@ -246,15 +246,31 @@ router.patch('/:id', express.json(), async (req, res) => {
                       'fontFamily', 'tone', 'hashtags', 'tags', 'demographics',
                       'brandSafety', 'styleOverrides', 'styleScript',
                       'styleScriptVertical', 'styleScriptLandscape', 'styleTheme',
-                      'videoSettings'];
+                      'videoSettings', 'titleStyleSpec', 'titleStylePreset'];
 
     // videoSettings carries model slugs consumed at render time — reject
     // unknown slugs here (nicer UX than the render-time warn-and-fall-
     // through in resolveVideoModel). Shape: { model, modelByCanvas,
-    // referenceImageCount } — see models/Brand.js.
+    // referenceImageCount, titlingEngine } — see models/Brand.js.
     if (Object.prototype.hasOwnProperty.call(req.body || {}, 'videoSettings') && req.body.videoSettings != null) {
       const err = validateVideoSettings(req.body.videoSettings);
       if (err) return res.status(400).json({ error: err });
+    }
+
+    // titleStyleSpec is rendered by the Remotion engine — schema-validate
+    // at write time so a bad LLM edit can never be persisted. Render time
+    // re-validates and falls back to the canonical preset regardless.
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'titleStyleSpec') && req.body.titleStyleSpec != null) {
+      const { validateTitleStyleSpecDoc } = require('../services/titleSpecValidator');
+      const specRes = validateTitleStyleSpecDoc(req.body.titleStyleSpec);
+      if (!specRes.ok) return res.status(400).json({ error: `titleStyleSpec invalid: ${specRes.errors.slice(0, 5).join('; ')}` });
+      req.body.titleStyleSpec = specRes.normalized;
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'titleStylePreset') && req.body.titleStylePreset != null && req.body.titleStylePreset !== '') {
+      const { loadPresetFile } = require('../services/titleSpecService');
+      if (!loadPresetFile(req.body.titleStylePreset)) {
+        return res.status(400).json({ error: `unknown titleStylePreset '${req.body.titleStylePreset}'` });
+      }
     }
 
     // Entry log for style-related mutations so we can trace why a
@@ -281,7 +297,7 @@ router.patch('/:id', express.json(), async (req, res) => {
     // markModified is required to guarantee the change persists,
     // ESPECIALLY when clearing to null. Applies to any field the
     // Brand schema declares as mongoose.Schema.Types.Mixed.
-    const MIXED_FIELDS = new Set(['styleOverrides', 'styleTheme', 'brandSafety', 'videoSettings']);
+    const MIXED_FIELDS = new Set(['styleOverrides', 'styleTheme', 'brandSafety', 'videoSettings', 'titleStyleSpec']);
 
     for (const k of editable) {
       if (Object.prototype.hasOwnProperty.call(req.body || {}, k)) {
@@ -380,7 +396,7 @@ function reapPreviewJob(jobId) {
 // previewJobs.set so the poller sees each state transition. Any thrown
 // error is captured into { status: 'failed', error }.
 async function runPreviewRender(jobId, brand, opts) {
-  const { styleScript, useCanonical, canonicalFormat, meta, dims, totalFrames } = opts;
+  const { styleScript, useCanonical, canonicalFormat, meta, dims, totalFrames, engine, spec, tokens } = opts;
   let brandPlateTempPath = null;
   try {
     // Plate resolution — brand image first, then picsum sample.
@@ -404,19 +420,36 @@ async function runPreviewRender(jobId, brand, opts) {
       }
     }
 
-    const { previewBrandScriptAsVideo } = require('../services/brandScriptExecutor');
-    const result = await previewBrandScriptAsVideo({
-      styleScript,
-      useCanonical,
-      canonicalFormat,
-      meta,
-      width:           dims.width,
-      height:          dims.height,
-      totalFrames,
-      plateImagePath,
-      plateBackground: brand.primaryColor || '#3D3D3D',
-      brandName:       brand.name
-    });
+    let result;
+    if (engine === 'remotion') {
+      // Remotion preview: same spec/tokens pipeline as production, static
+      // plate, half-scale. Returns the identical videoDataUrl contract.
+      const { renderPreview } = require('../services/remotionRenderService');
+      result = await renderPreview({
+        meta,
+        spec,
+        tokens,
+        format:         canonicalFormat,
+        plateImagePath,
+        plateColor:     brand.primaryColor || '#3D3D3D',
+        scale:          0.5,
+        durationSec:    totalFrames / 24
+      });
+    } else {
+      const { previewBrandScriptAsVideo } = require('../services/brandScriptExecutor');
+      result = await previewBrandScriptAsVideo({
+        styleScript,
+        useCanonical,
+        canonicalFormat,
+        meta,
+        width:           dims.width,
+        height:          dims.height,
+        totalFrames,
+        plateImagePath,
+        plateBackground: brand.primaryColor || '#3D3D3D',
+        brandName:       brand.name
+      });
+    }
 
     const prev = previewJobs.get(jobId) || {};
     previewJobs.set(jobId, {
@@ -483,10 +516,32 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
       feed:      'styleScript'
     })[format];
 
+    // Engine: previews honor the production dispatch chain (custom script
+    // forces canvas), with an explicit body.engine escape hatch and
+    // body.spec for previewing an unsaved LLM-modified spec.
+    const { resolveTitlingEngine } = require('../services/brandScriptExecutor');
+    const bodyEngine = ['canvas', 'remotion'].includes(req.body?.engine) ? req.body.engine : null;
+    let engine = bodyScript
+      ? 'canvas'
+      : bodyEngine || resolveTitlingEngine(brand, { platformFormat: format === 'feed' ? 'feed_4_5' : format }).engine;
+
     let styleScript = null;
     let themeForPreview = null;
     let useCanonical = false;
-    if (bodyScript) {
+    let previewSpec = null;
+    let previewTokens = null;
+    if (engine === 'remotion') {
+      const { resolveSpecForBrand, buildBrandTokens } = require('../services/titleSpecService');
+      const { validateTitleSpec } = require('../services/titleSpecValidator');
+      if (req.body?.spec != null) {
+        const specRes = validateTitleSpec(req.body.spec, { format });
+        if (!specRes.ok) return res.status(400).json({ error: `spec invalid: ${specRes.errors.slice(0, 5).join('; ')}` });
+        previewSpec = specRes.normalized;
+      } else {
+        previewSpec = resolveSpecForBrand(brand, format).spec;
+      }
+      previewTokens = await buildBrandTokens(brand, { specFontOverrides: previewSpec.tokenOverrides?.fonts || {} });
+    } else if (bodyScript) {
       styleScript = bodyScript;
     } else if (bodyTheme) {
       useCanonical = true;
@@ -542,15 +597,16 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
       brand:     String(brand._id),
       format
     });
-    console.log(`🎬 preview-script[${jobId}]: brand="${brand.name}" format=${format} scriptChars=${styleScript?.length || 0} themeMode=${useCanonical}`);
+    console.log(`🎬 preview-script[${jobId}]: brand="${brand.name}" format=${format} engine=${engine} scriptChars=${styleScript?.length || 0} themeMode=${useCanonical}`);
 
     // Fire-and-forget. The runner flips the job to done/failed when it
     // finishes; errors are captured into the job entry, never crash.
     runPreviewRender(jobId, brand, {
-      styleScript, useCanonical, canonicalFormat: format, meta, dims, totalFrames
+      styleScript, useCanonical, canonicalFormat: format, meta, dims, totalFrames,
+      engine, spec: previewSpec, tokens: previewTokens
     });
 
-    res.status(202).json({ ok: true, jobId, status: 'pending', format });
+    res.status(202).json({ ok: true, jobId, status: 'pending', format, engine });
   } catch (err) {
     console.error('preview-script kick failed:', err);
     res.status(err.status || 500).json({ error: err.message || 'preview-script failed' });
@@ -586,6 +642,250 @@ router.get('/:id/preview-script/:jobId', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message || 'preview status lookup failed' });
   }
+});
+
+// POST /api/brand/:id/ingest-fonts — pull the brand website's actual
+// font files (the "titling must use the brand's real fonts" scan).
+// Synchronous (a site fetch + a few font downloads — seconds, not
+// minutes). OFL/Google/self-hosted faces are mirrored to Cloudinary and
+// upserted into brand.customFonts; commercial-foundry faces are recorded
+// flagged-only (needsLicense) and never downloaded.
+router.post('/:id/ingest-fonts', express.json(), async (req, res) => {
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id }));
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+    if (!brand.websiteUrl) return res.status(400).json({ error: 'brand has no websiteUrl to scan' });
+
+    const { ingestBrandFonts } = require('../services/brandFontIngestService');
+    const { ingested, flagged, errors } = await ingestBrandFonts(brand);
+
+    // Merge by family+weight+style — re-ingests refresh, never duplicate.
+    const keyOf = (f) => `${String(f.family).toLowerCase()}|${f.weight || 400}|${f.style || 'normal'}`;
+    const merged = new Map((brand.customFonts || []).map((f) => [keyOf(f), f]));
+    for (const entry of [...ingested, ...flagged]) merged.set(keyOf(entry), entry);
+    brand.customFonts = [...merged.values()];
+    brand.markModified('customFonts');
+    await brand.save();
+
+    console.log(`🔤 ingest-fonts[${brand.name}]: ${ingested.length} ingested, ${flagged.length} flagged, ${errors.length} errors`);
+    res.json({ ok: true, ingested, flagged, errors, customFonts: brand.customFonts });
+  } catch (err) {
+    console.error('ingest-fonts failed:', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'font ingest failed' });
+  }
+});
+
+// GET /api/brand/:id/title-spec — the Remotion titling state for the
+// operator UI: the brand's saved per-format overrides, the resolved
+// effective spec per format (with its source), available presets, and
+// the resolved brand tokens (colors + fonts) the specs render with.
+router.get('/:id/title-spec', async (req, res) => {
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+
+    const { resolveSpecForBrand, buildBrandTokens, PRESET_DIR } = require('../services/titleSpecService');
+    const resolved = {};
+    for (const format of ['vertical', 'feed', 'landscape']) {
+      try {
+        const { spec, source } = resolveSpecForBrand(brand, format);
+        resolved[format] = { spec, source };
+      } catch (e) {
+        resolved[format] = { spec: null, source: `error: ${e.message}` };
+      }
+    }
+    const fs = require('fs');
+    const presets = fs.readdirSync(PRESET_DIR)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => f.replace(/\.json$/, ''));
+    const tokens = await buildBrandTokens(brand, {});
+    // Local font-file paths are server internals — expose family/source only.
+    const fonts = Object.fromEntries(Object.entries(tokens.fonts).map(([r, f]) => [r, { family: f.family, weight: f.weight, source: f.source }]));
+
+    res.json({
+      titleStyleSpec: brand.titleStyleSpec || null,
+      titleStylePreset: brand.titleStylePreset || null,
+      titlingEngine: brand.videoSettings?.titlingEngine || process.env.TITLING_ENGINE || 'canvas',
+      resolved,
+      presets,
+      tokens: { colors: tokens.colors, fonts },
+      customFonts: brand.customFonts || []
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'title-spec lookup failed' });
+  }
+});
+
+// In-memory job store for async title-spec modification (same
+// pattern/TTL as scriptJobs below — Netlify's proxy timeout forces the
+// 202+poll shape for anything that waits on Atlas).
+const specJobs = new Map();
+const SPEC_JOB_TTL_MS = 5 * 60 * 1000;
+function reapSpecJob(jobId) {
+  setTimeout(() => specJobs.delete(jobId), SPEC_JOB_TTL_MS).unref?.();
+}
+
+// Compact schema reference the LLM edits against — generated from the
+// validator's own vocabulary so prompt and validation can't drift.
+function titleSpecSchemaPrompt() {
+  const V = require('../services/titleSpecValidator');
+  return [
+    'TITLE STYLE SPEC SCHEMA (v1) — a per-format JSON document:',
+    '{ "version": 1,',
+    '  "phases": [{ "key": str, "startSec": num, "endSec": num }],  // 1-4 phases, 0..15s',
+    '  "stack": { "rowGapPct": 0..0.08 },                            // optional',
+    '  "tokenOverrides": {                                           // optional',
+    `    "colors": { <${V.TOKEN_COLOR_KEYS.join('|')}>: "#RRGGBB" },`,
+    '    "fonts": { "heading"|"body"|"quote": { "family": str, "weight": 100-900 } } },',
+    '  "slots": [{',
+    `    "key": ${V.SLOT_KEYS.join('|')},                            // unique per spec`,
+    '    "visible": bool,',
+    `    "bind": [meta fields: ${V.BINDABLE_META_FIELDS.join(', ')}], // content source, first non-empty wins`,
+    '    "phase": str,                                               // must reference a phase key',
+    `    "position": { "anchor": ${V.ANCHORS.join('|')}, "align": ${V.ALIGNS.join('|')},`,
+    '                  "offsetX": -0.25..0.25, "offsetY": -0.25..0.25, "maxWidthPct": 0.2..1, "row": str|null },',
+    '    "timing": { "enterAtSec": num, "exitAtSec": num|null (null = hold to end), "enterDurationSec": 0..2, "exitDurationSec": 0..2 },',
+    `    "transition": { "type": ${V.TRANSITIONS.join('|')}, "direction": up|down|left|right, "spring": { "damping", "stiffness", "mass" }|null },`,
+    `    "treatment": { "scrim": ${V.SCRIMS.join('|')}, "scrimOpacity": 0..1, "scrimColorToken": color token,`,
+    `                   "shadow": ${V.SHADOWS.join('|')}, "casing": ${V.CASINGS.join('|')}, "fontRole": heading|body|quote,`,
+    '                   "weight": 100-900, "sizeScale": 0.5..2, "maxLines": 1-4, "trackingPx": 0..8,',
+    '                   "colorToken": color token, "accent": { "type": underline|bar|none, "colorToken": color token, "animate": bool } }',
+    '  }]',
+    '}',
+    'Slots sharing (phase, anchor) stack top-to-bottom in array order; a shared position.row renders side by side.',
+    'Positions are safe-zone clamped at render time. Slots whose bound meta field is empty are skipped automatically.',
+  ].join('\n');
+}
+
+async function runModifyTitleSpec(jobId, brand, { format, currentSpec, request }) {
+  const { validateTitleSpec } = require('../services/titleSpecValidator');
+  const { buildBrandTokens } = require('../services/titleSpecService');
+  const { generate } = require('../services/atlasTextService');
+  try {
+    const tokens = await buildBrandTokens(brand, {});
+    const system = [
+      'You are a video-ad title stylist. You edit a declarative "title style spec" that a rendering engine consumes.',
+      'Apply the operator\'s requested modifications to the CURRENT SPEC and return the COMPLETE updated spec as raw JSON.',
+      'Rules: return ONLY the JSON document (no markdown fences, no commentary). Keep every part of the current spec the',
+      'operator did not ask to change. Stay strictly inside the schema and its bounds. Colors are #RRGGBB. Fonts should be',
+      'Google Fonts families or the brand\'s ingested families. The clip is nominally 8 seconds.',
+      '',
+      titleSpecSchemaPrompt(),
+    ].join('\n');
+    const userMsg = (extra) => [
+      `FORMAT: ${format}`,
+      `BRAND TOKENS (defaults the spec inherits — override via tokenOverrides only when asked): ${JSON.stringify({ colors: tokens.colors, fonts: Object.fromEntries(Object.entries(tokens.fonts).map(([r, f]) => [r, f.family])) })}`,
+      `CURRENT SPEC:\n${JSON.stringify(currentSpec, null, 2)}`,
+      `OPERATOR REQUEST: ${request}`,
+      extra || '',
+    ].join('\n\n');
+
+    const parseSpec = (text) => {
+      const cleaned = String(text).replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+      try {
+        return JSON.parse(cleaned);
+      } catch {
+        const m = cleaned.match(/\{[\s\S]*\}/);
+        if (!m) throw new Error('no JSON object in response');
+        return require('json5').parse(m[0]);
+      }
+    };
+
+    let lastErrors = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const extra = lastErrors
+        ? `YOUR PREVIOUS ATTEMPT FAILED VALIDATION with these errors — fix them and return the corrected full spec:\n${lastErrors.join('\n')}`
+        : '';
+      const result = await generate({ system, user: userMsg(extra), temperature: 0.3, maxTokens: 8000 });
+      let candidate;
+      try {
+        candidate = parseSpec(result.text);
+      } catch (e) {
+        lastErrors = [`response was not parseable JSON: ${e.message}`];
+        continue;
+      }
+      const check = validateTitleSpec(candidate, { format });
+      if (check.ok) {
+        const prev = specJobs.get(jobId) || {};
+        specJobs.set(jobId, {
+          ...prev,
+          status: 'done',
+          spec: check.normalized,
+          model: result.model,
+          usage: result.usage,
+          attempts: attempt,
+          completedAt: Date.now(),
+        });
+        reapSpecJob(jobId);
+        console.log(`🎨 modify-title-spec[${jobId}]: DONE (attempt ${attempt})`);
+        return;
+      }
+      lastErrors = check.errors.slice(0, 10);
+      console.warn(`🎨 modify-title-spec[${jobId}]: attempt ${attempt} invalid — ${lastErrors[0]}`);
+    }
+    throw new Error(`spec failed validation after retry: ${lastErrors.join('; ')}`);
+  } catch (err) {
+    const prev = specJobs.get(jobId) || {};
+    specJobs.set(jobId, { ...prev, status: 'failed', error: err.message, completedAt: Date.now() });
+    reapSpecJob(jobId);
+    console.error(`🎨 modify-title-spec[${jobId}]: FAILED — ${err.message}`);
+  }
+}
+
+// POST /api/brand/:id/title-spec/modify — natural-language spec editing.
+// Body: { request: string, format?: 'vertical'|'feed'|'landscape' (default vertical) }
+// The LLM receives the schema + the brand's current effective spec +
+// tokens and returns a full updated spec; it is validated (one repair
+// retry) but NOT persisted — the operator previews it (POST
+// /preview-script with body.spec) and saves via PATCH titleStyleSpec.
+router.post('/:id/title-spec/modify', express.json(), async (req, res) => {
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+    const request = String(req.body?.request || '').trim();
+    if (!request) return res.status(400).json({ error: 'request text required' });
+    if (request.length > 2000) return res.status(400).json({ error: 'request too long (2000 chars max)' });
+    const rawFormat = String(req.body?.format || 'vertical').toLowerCase();
+    if (!['vertical', 'feed', 'landscape'].includes(rawFormat)) {
+      return res.status(400).json({ error: `unknown format '${rawFormat}'` });
+    }
+
+    const { resolveSpecForBrand } = require('../services/titleSpecService');
+    const { spec: currentSpec, source } = resolveSpecForBrand(brand, rawFormat);
+
+    const crypto = require('crypto');
+    const jobId = crypto.randomBytes(6).toString('hex');
+    specJobs.set(jobId, { status: 'pending', startedAt: Date.now(), brand: String(brand._id), format: rawFormat, baseSource: source });
+    console.log(`🎨 modify-title-spec[${jobId}]: brand="${brand.name}" format=${rawFormat} base=${source} request="${request.slice(0, 80)}"`);
+
+    runModifyTitleSpec(jobId, brand, { format: rawFormat, currentSpec, request });
+    res.status(202).json({ ok: true, jobId, status: 'pending', format: rawFormat, baseSource: source });
+  } catch (err) {
+    console.error('modify-title-spec kick failed:', err);
+    res.status(err.status || 500).json({ error: err.message || 'modify-title-spec failed' });
+  }
+});
+
+// Poll target for the modify job. On done: { status:'done', spec, ... } —
+// preview it via POST /:id/preview-script { spec, format, engine:'remotion' },
+// persist via PATCH /:id { titleStyleSpec: { [format]: spec } }.
+router.get('/:id/title-spec/modify/:jobId', async (req, res) => {
+  const job = specJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'spec job not found or expired' });
+  if (job.brand && String(job.brand) !== String(req.params.id)) {
+    return res.status(404).json({ error: 'spec job not found' });
+  }
+  res.json({
+    status: job.status,
+    format: job.format,
+    baseSource: job.baseSource,
+    spec: job.spec,
+    error: job.error,
+    model: job.model,
+    usage: job.usage,
+    attempts: job.attempts,
+    elapsedMs: Date.now() - (job.startedAt || Date.now())
+  });
 });
 
 // In-memory job store for async script generation. Claude can take
@@ -1166,7 +1466,12 @@ router.get('/:id/style', async (req, res) => {
       scriptLandscape:  brand.styleScriptLandscape || null,
       theme:            brand.styleTheme || null,
       scriptTemplates,
-      previewPlate:     previewPick ? { url: previewPick.url, source: `brand-media (${previewPick.shotType})` } : null
+      previewPlate:     previewPick ? { url: previewPick.url, source: `brand-media (${previewPick.shotType})` } : null,
+      // Remotion titling engine state (full detail via GET /:id/title-spec)
+      titleStyleSpec:   brand.titleStyleSpec || null,
+      titleStylePreset: brand.titleStylePreset || null,
+      customFonts:      brand.customFonts || [],
+      titlingEngine:    brand.videoSettings?.titlingEngine || process.env.TITLING_ENGINE || 'canvas'
     });
   } catch (err) {
     res.status(500).json({ error: err.message || 'style lookup failed' });

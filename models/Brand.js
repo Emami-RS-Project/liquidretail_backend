@@ -212,11 +212,15 @@ const brandSchema = new mongoose.Schema({
   // (dots are illegal in Mongoose Map keys). Shape:
   //   { model:               '<atlasVideoService.MODEL_CAPS slug>' | null,
   //     modelByCanvas:       { '<platformFormat or aspectRatio>': '<slug>' } | null,
-  //     referenceImageCount: 1–7 | null }   // default 3 (primary + 2 alts)
+  //     referenceImageCount: 1–7 | null,    // default 3 (primary + 2 alts)
+  //     titlingEngine:       'canvas' | 'remotion' | null }
   // Resolution chain (most specific wins): CatalogProduct.videoSettings
   // → Brand.videoSettings → ATLAS_VIDEO_MODEL env → built-in default.
   // Slugs are validated against MODEL_CAPS on PATCH and again at render
-  // time (unknown slugs warn + fall through). Mixed field — route
+  // time (unknown slugs warn + fall through). titlingEngine picks the
+  // title compositor per brand (chain: custom styleScript forces canvas →
+  // brand titlingEngine → TITLING_ENGINE env → 'canvas'); validated in
+  // atlasVideoService.validateVideoSettings. Mixed field — route
   // handlers must markModified('videoSettings') on writes.
   videoSettings: { type: mongoose.Schema.Types.Mixed, default: null },
 
@@ -281,6 +285,35 @@ const brandSchema = new mongoose.Schema({
   // overrides — layout and animation stay fixed in the canonical.
   // Passed into meta.theme at render time.
   styleTheme: { type: mongoose.Schema.Types.Mixed, default: null },
+
+  // Remotion titling engine — per-format declarative style specs. Shape:
+  //   { vertical?: <spec>, feed?: <spec>, landscape?: <spec> }
+  // where <spec> follows services/titleSpecValidator.js (phases, slots
+  // with position/timing/transition/treatment, tokenOverrides). Written
+  // by the operator style-modification flow (LLM emits a full updated
+  // spec → validated → previewed → saved). Wins over titleStylePreset
+  // and the shipped canonical preset for its format. Mixed — validated
+  // by validateTitleStyleSpecDoc on PATCH, never trusted at render time
+  // either (titleSpecService re-validates and falls back on invalid).
+  titleStyleSpec: { type: mongoose.Schema.Types.Mixed, default: null },
+
+  // Named preset from remotion/presets/*.json this brand renders with
+  // when it has no titleStyleSpec override for a format (e.g.
+  // 'babyboo-main-character'). Null → shipped canonical.
+  titleStylePreset: { type: String, default: null },
+
+  // Font files ingested from the brand's own website by
+  // brandFontIngestService (the "titling must use the brand's real
+  // fonts" pipeline). Entries:
+  //   { family, weight, style, format ('woff2'|'woff'|'ttf'|'otf'),
+  //     url (Cloudinary raw mirror — null when flagged),
+  //     sourceUrl, source: 'website',
+  //     license: 'google'|'open'|'commercial'|'unknown',
+  //     needsLicense, ingestedAt }
+  // Commercial-foundry faces are recorded but never downloaded — the
+  // client must supply licensed files. fontResolverService prefers
+  // these over Google Fonts when families match.
+  customFonts: { type: [mongoose.Schema.Types.Mixed], default: [] },
 
   // Derived voice — structured profile extracted by
   // brandVoiceDerivationService from the brand's existing Meta/Google

@@ -442,7 +442,7 @@ async function renderOne(run, job, adId, index, renderToken) {
         .select('fileType fileUrl brandId').lean();
       const brandDoc = sourceMedia?.brandId
         ? await Brand.findById(sourceMedia.brandId)
-            .select('name styleScript styleScriptVertical styleTheme tagline logoUrl primaryColor secondaryColor accentColor fontFamily derivedVoice').lean()
+            .select('name styleScript styleScriptVertical styleScriptLandscape styleTheme tagline logoUrl websiteUrl primaryColor secondaryColor accentColor fontFamily derivedVoice videoSettings titleStyleSpec titleStylePreset customFonts').lean()
         : null;
 
       // Grok-skip branch — when the seed is already a video, we keep

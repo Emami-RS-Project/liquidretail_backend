@@ -314,5 +314,13 @@ require('./services/fontLoader')
   .ensureFontsLoaded()
   .catch(err => console.warn(`🔤 fontLoader: unexpected failure (${err.message})`));
 
+// Remotion titling engine warmup — webpack-bundles the remotion/ island
+// and prepares the headless browser + loopback asset server so the first
+// render doesn't pay the ~30s cold start. Same non-blocking contract as
+// the font warmup: failure logs and the first render retries from cold.
+require('./services/remotionRenderService')
+  .warmup()
+  .catch(err => console.warn(`🎬 remotion: warmup failed (${err.message}) — first render will retry`));
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));

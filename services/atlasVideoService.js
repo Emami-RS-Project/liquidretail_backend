@@ -396,6 +396,9 @@ function validateVideoSettings(vs) {
       return `videoSettings.referenceImageCount must be an integer 1–${MAX_REFERENCE_IMAGE_COUNT}`;
     }
   }
+  if (vs.titlingEngine != null && vs.titlingEngine !== '' && !['canvas', 'remotion'].includes(vs.titlingEngine)) {
+    return "videoSettings.titlingEngine must be 'canvas' or 'remotion'";
+  }
   return null;
 }
 
