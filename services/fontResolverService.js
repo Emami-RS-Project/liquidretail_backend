@@ -38,6 +38,7 @@ const DEFAULT_ROLE_FONTS = {
 const SERIF_HINTS = /serif|playfair|lora|cormorant|garamond|fraunces|caslon|bodoni|didot|georgia|times|libre|crimson|merriweather|spectral|eb garamond|prata|domine/i;
 
 const memoryCache = new Map(); // family|weight -> resolved entry or null
+const CACHE_VER = 'v2'; // v2: latin-subset selection (v1 files may be cyrillic-only)
 
 function slugify(family, weight, ext) {
   return `${family.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${weight}.${ext}`;
@@ -60,8 +61,35 @@ async function downloadTo(url, filePath, { headers = {} } = {}) {
   });
   const buf = Buffer.from(res.data);
   if (buf.length < 1024) throw new Error(`suspiciously small font payload (${buf.length}B) from ${url}`);
-  await fsp.writeFile(filePath, buf);
+  // temp + rename: a partially-written file must never satisfy the
+  // size-based cache check on the next run.
+  const tmp = `${filePath}.tmp-${process.pid}`;
+  await fsp.writeFile(tmp, buf);
+  await fsp.rename(tmp, filePath);
   return filePath;
+}
+
+/**
+ * Pick the LATIN @font-face block out of a css2 response. Google emits one
+ * block per unicode subset with latin LAST — taking the first woff2 match
+ * yields a cyrillic-subset file with zero Latin glyphs (all titles would
+ * silently render in the browser's generic fallback).
+ * Returns { url, weight|null } or throws.
+ */
+function pickLatinFace(cssText) {
+  const faces = String(cssText).match(/@font-face\s*\{[^}]*\}/g) || [];
+  let fallback = null;
+  for (const face of faces) {
+    const url = face.match(/src:\s*url\((https:\/\/fonts\.gstatic\.com\/[^)]+\.woff2)\)/)?.[1];
+    if (!url) continue;
+    const weight = Number(face.match(/font-weight:\s*(\d{3})/)?.[1]) || null;
+    const entry = { url, weight };
+    fallback = entry; // latin is last — keep overwriting
+    // Basic-latin range: U+0000-00FF (the /* latin */ subset always carries it).
+    if (/unicode-range:[^;]*U\+0000-00FF/i.test(face)) return entry;
+  }
+  if (fallback) return fallback;
+  throw new Error('no woff2 src found in css2 response');
 }
 
 /**
@@ -78,50 +106,61 @@ async function resolveGoogleFamily(family, weight = 400) {
     const fam = encodeURIComponent(family).replace(/%20/g, '+');
     const cssUrl = `https://fonts.googleapis.com/css2?family=${fam}${withWeight ? `:wght@${weight}` : ''}&display=swap`;
     const css = await axios.get(cssUrl, { timeout: 15_000, headers: { 'User-Agent': UA } });
-    const m = String(css.data).match(/src:\s*url\((https:\/\/fonts\.gstatic\.com\/[^)]+\.woff2)\)/);
-    if (!m) throw new Error('no woff2 src found in css2 response');
-    return m[1];
+    return pickLatinFace(css.data);
   };
 
   try {
+    let face;
     let effectiveWeight = weight;
-    let url;
     try {
-      url = await fetchCss2(true);
+      face = await fetchCss2(true);
     } catch (e) {
       const missingWeight = e.response?.status === 400 || e.response?.status === 404;
       if (!missingWeight) throw e;
       // Family may not carry the requested weight (display faces often ship
       // 400 only) — take the default cut and let the browser synthesize.
-      url = await fetchCss2(false);
-      effectiveWeight = 400;
+      face = await fetchCss2(false);
+      effectiveWeight = face.weight || 400;
     }
-    const woff2Path = path.join(FONT_CACHE_DIR, slugify(family, effectiveWeight, 'woff2'));
+    // CACHE_VER busts pre-latin-fix cache files (they hold non-Latin subsets).
+    const woff2Path = path.join(FONT_CACHE_DIR, slugify(family, effectiveWeight, `${CACHE_VER}.woff2`));
     const stat = await fsp.stat(woff2Path).catch(() => null);
-    if (!stat || stat.size < 1024) await downloadTo(url, woff2Path);
+    if (!stat || stat.size < 1024) await downloadTo(face.url, woff2Path);
     // remoteUrl: browser-loadable origin (gstatic serves CORS *) — the
     // frontend @remotion/player preview loads fonts from here directly.
-    const entry = { family, weight: effectiveWeight, localPath: woff2Path, remoteUrl: url, fallback: fallbackFor(family), source: 'google' };
+    const entry = { family, weight: effectiveWeight, localPath: woff2Path, remoteUrl: face.url, fallback: fallbackFor(family), source: 'google' };
     memoryCache.set(cacheKey, entry);
     return entry;
   } catch (e) {
     const notFound = e.response?.status === 400 || e.response?.status === 404;
-    if (!notFound) console.warn(`🔤 fontResolver: google fetch failed for '${family}' (${e.message})`);
-    memoryCache.set(cacheKey, null);
+    if (notFound) {
+      // Definitive: not a Google family. Transient failures are NOT cached
+      // so the next render can retry instead of silently defaulting forever.
+      memoryCache.set(cacheKey, null);
+    } else {
+      console.warn(`🔤 fontResolver: google fetch failed for '${family}' (${e.message})`);
+    }
     return null;
   }
 }
 
-/** Find an ingested website font on the brand matching `family` (case/space-insensitive). */
-function matchCustomFont(brand, family) {
+/**
+ * Find an ingested website font on the brand matching `family`
+ * (case/space-insensitive), preferring the requested weight and normal
+ * style (an italic-only match still wins over no match).
+ */
+function matchCustomFont(brand, family, { weight = 400, style = 'normal' } = {}) {
   const list = Array.isArray(brand?.customFonts) ? brand.customFonts : [];
   const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
   const want = norm(family);
   if (!want) return null;
   const usable = list.filter((f) => f && f.url && f.license !== 'commercial' && norm(f.family) === want);
   if (!usable.length) return null;
-  // prefer normal-style, weight closest to 400/700
-  usable.sort((a, b) => Math.abs((a.weight || 400) - 400) - Math.abs((b.weight || 400) - 400));
+  usable.sort((a, b) => {
+    const styleRank = (f) => ((f.style || 'normal') === style ? 0 : 1);
+    if (styleRank(a) !== styleRank(b)) return styleRank(a) - styleRank(b);
+    return Math.abs((a.weight || 400) - weight) - Math.abs((b.weight || 400) - weight);
+  });
   return usable[0];
 }
 
@@ -147,7 +186,10 @@ async function resolveCustomFont(brand, custom) {
     return entry;
   } catch (e) {
     console.warn(`🔤 fontResolver: custom font download failed for '${custom.family}' (${e.message})`);
-    memoryCache.set(cacheKey, null);
+    // Cache the miss only when the mirror URL is definitively gone —
+    // transient failures must stay retryable.
+    const gone = e.response?.status === 404 || e.response?.status === 400;
+    if (gone) memoryCache.set(cacheKey, null);
     return null;
   }
 }
@@ -161,7 +203,7 @@ async function resolveFamily(family, { brand = null, weight = 400 } = {}) {
   if (!family || !String(family).trim()) return null;
   family = String(family).trim();
 
-  const custom = matchCustomFont(brand, family);
+  const custom = matchCustomFont(brand, family, { weight });
   if (custom) {
     const entry = await resolveCustomFont(brand, custom);
     if (entry) return entry;

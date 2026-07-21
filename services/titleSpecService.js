@@ -29,7 +29,10 @@ function loadPresetFile(name) {
     parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch (e) {
     if (e.code !== 'ENOENT') console.warn(`🎬 titleSpec: preset '${name}' unreadable (${e.message})`);
-    parsed = null;
+    // Misses are NOT cached: a preset deployed later (or fixed on disk)
+    // must become loadable without a restart, and the cache stays bounded
+    // to real preset names instead of arbitrary PATCH input.
+    return null;
   }
   presetCache.set(name, parsed);
   return parsed;
@@ -78,8 +81,12 @@ function resolveSpecForBrand(brand, format) {
 }
 
 function hexOrNull(v) {
-  const m = /^#?([0-9a-fA-F]{6})$/.exec(String(v || '').trim());
-  return m ? `#${m[1].toUpperCase()}` : null;
+  const s = String(v || '').trim();
+  const m6 = /^#?([0-9a-fA-F]{6})$/.exec(s);
+  if (m6) return `#${m6[1].toUpperCase()}`;
+  const m3 = /^#?([0-9a-fA-F]{3})$/.exec(s);
+  if (m3) return `#${m3[1].split('').map((c) => c + c).join('').toUpperCase()}`;
+  return null;
 }
 
 function rgbArrToHex(arr) {
@@ -106,20 +113,26 @@ async function buildBrandTokens(brand, { layoutInputBrand = null, specFontOverri
   const secondary = themeColor(theme, 'secondaryColor') || hexOrNull(brand?.secondaryColor) || hexOrNull(layoutInputBrand?.secondary_color);
   const accent = themeColor(theme, 'accentColor') || hexOrNull(brand?.accentColor) || hexOrNull(layoutInputBrand?.accent_color) || primary;
 
+  // Curated styleTheme docs use the CANVAS engine's key vocabulary
+  // (ctaBgColor, badgeTextColor, promoBgColor, accentGold, …) — read those
+  // first so a brand renders identically on both engines; the short forms
+  // are accepted as aliases for hand-written specs.
   const colors = {
     primary: primary || '#0B0F14',
     secondary: secondary || '#DCDCDC',
     accent: accent || '#F5B70A',
-    ctaBg: themeColor(theme, 'ctaBg') || accent || primary || '#46783E',
-    ctaText: themeColor(theme, 'ctaText') || '#FFFFFF',
+    ctaBg: themeColor(theme, 'ctaBgColor') || themeColor(theme, 'ctaBg') || accent || primary || '#46783E',
+    ctaText: themeColor(theme, 'ctaTextColor') || themeColor(theme, 'ctaText') || '#FFFFFF',
     scrim: themeColor(theme, 'scrimColor') || '#0C0906',
     textPrimary: themeColor(theme, 'textPrimary') || '#FFFFFF',
     textSecondary: themeColor(theme, 'textSecondary') || secondary || '#DCDCDC',
     // stars deliberately never fall to brand accent (dark accents = invisible
     // stars) — same rule as the canvas deriveTheme.
-    stars: themeColor(theme, 'starColor') || '#F5B70A',
-    badgeBg: themeColor(theme, 'badgeBg') || accent || '#BEC282',
-    badgeText: themeColor(theme, 'badgeText') || '#1F2219',
+    stars: themeColor(theme, 'starColor') || themeColor(theme, 'accentGold') || '#F5B70A',
+    badgeBg: themeColor(theme, 'badgeBgColor') || themeColor(theme, 'badgeBg') || themeColor(theme, 'calloutBgColor') || accent || '#BEC282',
+    badgeText: themeColor(theme, 'badgeTextColor') || themeColor(theme, 'badgeText') || '#1F2219',
+    promoBg: themeColor(theme, 'promoBgColor') || themeColor(theme, 'promoBg') || accent || '#F5B70A',
+    promoText: themeColor(theme, 'promoTextColor') || themeColor(theme, 'promoText') || '#16161A',
     // Plate-intelligence contrast flips (light footage → dark type).
     textOnLight: themeColor(theme, 'textOnLight') || primary || '#16181D',
     textSecondaryOnLight: themeColor(theme, 'textSecondaryOnLight') || '#3A4048',

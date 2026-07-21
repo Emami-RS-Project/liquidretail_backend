@@ -15,7 +15,7 @@ import { AbsoluteFill, useCurrentFrame, useVideoConfig } from 'remotion';
 import { BasePlate } from '../components/BasePlate.jsx';
 import { useBrandFonts } from '../components/FontLoader.jsx';
 import { SLOT_RENDERERS } from '../components/slotRenderers.jsx';
-import { slotEnvelope, slotProgress } from '../lib/timing.js';
+import { slotEnvelope, slotProgress, specTimeScale } from '../lib/timing.js';
 import { stackContainerStyle, SAFE_ZONES } from '../lib/safeZones.js';
 import { contrastToken } from '../lib/tokens.js';
 
@@ -98,6 +98,8 @@ export const Canonical = ({ format = 'feed', plate, meta = {}, tokens = {}, spec
 
   const dims = { width, height };
   const groups = useMemo(() => (spec?.slots ? groupSlots(spec.slots) : []), [spec]);
+  // Compress spec-authored times onto shorter real plates (see timing.js).
+  const timeScale = useMemo(() => specTimeScale(spec, durationInFrames, fps), [spec, durationInFrames, fps]);
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
@@ -105,7 +107,7 @@ export const Canonical = ({ format = 'feed', plate, meta = {}, tokens = {}, spec
       {groups.map((group) => {
         const rows = foldRows(group.items);
         const first = group.items[0];
-        const band = bandStateFor(plateHints, group.anchor, first.timing.enterAtSec + 0.5);
+        const band = bandStateFor(plateHints, group.anchor, first.timing.enterAtSec * timeScale + 0.5);
         // Keep-out nudge: slide the group away from the flagged band —
         // downward for top-anchored groups, upward for bottom-anchored.
         const nudge = band.avoid ? (group.anchor === 'bottom' || group.anchor === 'lowerThird' ? -0.05 : 0.05) : 0;
@@ -136,8 +138,8 @@ export const Canonical = ({ format = 'feed', plate, meta = {}, tokens = {}, spec
                       },
                     }
                   : rawSlot;
-                const env = slotEnvelope({ frame, fps, timing: slot.timing, transition: slot.transition, durationInFrames });
-                const progress = slotProgress({ frame, fps, timing: slot.timing, durationInFrames });
+                const env = slotEnvelope({ frame, fps, timing: slot.timing, transition: slot.transition, durationInFrames, timeScale });
+                const progress = slotProgress({ frame, fps, timing: slot.timing, durationInFrames, timeScale });
                 return (
                   <div
                     key={slot.key}
@@ -159,12 +161,16 @@ export const Canonical = ({ format = 'feed', plate, meta = {}, tokens = {}, spec
                       frame={frame}
                       fps={fps}
                       progress={progress}
+                      timeScale={timeScale}
                     />
                   </div>
                 );
               }).filter(Boolean);
               if (!rendered.length) return null;
-              if (row.slots.length > 1) {
+              // Row wrapper only when 2+ slots actually rendered — a lone
+              // survivor (e.g. deliveryLine empty, CTA present) falls back
+              // to the column path so its own align still applies.
+              if (rendered.length > 1) {
                 return (
                   <div key={`row-${ri}`} style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: Math.round(width * 0.02) }}>
                     {rendered}

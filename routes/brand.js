@@ -517,10 +517,10 @@ function buildPreviewSampleMeta(brand, themeForPreview) {
 
 // Disk cache for preview plates so the fast still loop doesn't re-download
 // the brand's lifestyle image on every nudge. TTL'd; keyed by brand.
-const previewPlateCache = new Map(); // brandId → { path, source, at }
+const previewPlateCache = new Map(); // brandId|format → { path, source, at, temp }
 const PREVIEW_PLATE_TTL_MS = 10 * 60 * 1000;
 async function getCachedPreviewPlate(brand, format) {
-  const key = String(brand._id);
+  const key = `${brand._id}|${format}`;
   const hit = previewPlateCache.get(key);
   if (hit && Date.now() - hit.at < PREVIEW_PLATE_TTL_MS) return hit;
   let entry = null;
@@ -528,14 +528,19 @@ async function getCachedPreviewPlate(brand, format) {
   if (brandPick?.url) {
     try {
       const p = await downloadUrlToTemp(brandPick.url);
-      entry = { path: p, source: `brand-media (${brandPick.shotType})`, at: Date.now() };
+      entry = { path: p, source: `brand-media (${brandPick.shotType})`, at: Date.now(), temp: true };
     } catch {}
   }
   if (!entry) {
     const sampleFile = await ensureSamplePlate(format).catch(() => null);
-    if (sampleFile) entry = { path: sampleFile, source: 'sample', at: Date.now() };
+    if (sampleFile) entry = { path: sampleFile, source: 'sample', at: Date.now(), temp: false };
   }
-  if (!entry) entry = { path: null, source: 'solid', at: Date.now() };
+  if (!entry) entry = { path: null, source: 'solid', at: Date.now(), temp: false };
+  // Replacing a downloaded temp plate: unlink the stale file (samples are
+  // shared disk-cached assets and stay).
+  if (hit?.temp && hit.path && hit.path !== entry.path) {
+    require('fs').promises.unlink(hit.path).catch(() => {});
+  }
   previewPlateCache.set(key, entry);
   return entry;
 }
@@ -572,7 +577,16 @@ router.post('/:id/title-still', express.json({ limit: '1mb' }), async (req, res)
     if (!frames.length) return res.status(400).json({ error: 'frames must contain 1-4 timestamps in seconds' });
     const scale = Math.min(1, Math.max(0.2, Number(req.body?.scale) || 0.5));
 
-    const meta = { ...buildPreviewSampleMeta(brand, null), ...(req.body?.meta && typeof req.body.meta === 'object' ? req.body.meta : {}) };
+    // Only text fields may be overridden — asset URLs/paths from the body
+    // would let a caller render arbitrary server-readable files.
+    const META_TEXT_FIELDS = new Set(['headline', 'quote', 'quoteSnippet', 'reviewer', 'badgeText', 'productName', 'price', 'deliveryLine', 'ctaText', 'cta', 'promoText', 'brandName', 'brandTagline', 'reviewsText', 'rating', 'reviewCount', 'endcardMode']);
+    const metaOverrides = {};
+    if (req.body?.meta && typeof req.body.meta === 'object') {
+      for (const [k, v] of Object.entries(req.body.meta)) {
+        if (META_TEXT_FIELDS.has(k) && (v == null || typeof v === 'string' || typeof v === 'number')) metaOverrides[k] = v;
+      }
+    }
+    const meta = { ...buildPreviewSampleMeta(brand, null), ...metaOverrides };
     const tokens = await buildBrandTokens(brand, { specFontOverrides: spec.tokenOverrides?.fonts || {} });
     const plate = await getCachedPreviewPlate(brand, rawFormat);
 
@@ -635,9 +649,12 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
     // body.spec for previewing an unsaved LLM-modified spec.
     const { resolveTitlingEngine } = require('../services/brandScriptExecutor');
     const bodyEngine = ['canvas', 'remotion'].includes(req.body?.engine) ? req.body.engine : null;
+    // classifyFormat keys off platformFormat regexes / aspectRatio — the
+    // synthetic ad must use an aspectRatio it actually recognizes.
+    const fakeAd = { aspectRatio: { vertical: '9:16', landscape: '16:9', feed: '4:5' }[format] };
     let engine = bodyScript
       ? 'canvas'
-      : bodyEngine || resolveTitlingEngine(brand, { platformFormat: format === 'feed' ? 'feed_4_5' : format }).engine;
+      : bodyEngine || resolveTitlingEngine(brand, fakeAd).engine;
 
     let styleScript = null;
     let themeForPreview = null;
@@ -784,7 +801,11 @@ router.get('/:id/title-spec', async (req, res) => {
     for (const format of ['vertical', 'feed', 'landscape']) {
       try {
         const { spec, source } = resolveSpecForBrand(brand, format);
-        resolved[format] = { spec, source };
+        // Per-format fonts resolved WITH the spec's own overrides so the
+        // operator preview matches what production renders.
+        const fmtTokens = await buildBrandTokens(brand, { specFontOverrides: spec.tokenOverrides?.fonts || {} });
+        const fonts = Object.fromEntries(Object.entries(fmtTokens.fonts).map(([r, f]) => [r, { family: f.family, weight: f.weight, source: f.source, url: f.remoteUrl || null, fallback: f.fallback }]));
+        resolved[format] = { spec, source, fonts };
       } catch (e) {
         resolved[format] = { spec: null, source: `error: ${e.message}` };
       }
@@ -972,6 +993,9 @@ router.get('/:id/title-spec/modify/:jobId', async (req, res) => {
   if (job.brand && String(job.brand) !== String(req.params.id)) {
     return res.status(404).json({ error: 'spec job not found' });
   }
+  // Tenant scope: the jobId alone must not leak results across advertisers.
+  const owned = await Brand.exists(tenantFilter(req, { _id: req.params.id })).catch(() => null);
+  if (!owned) return res.status(404).json({ error: 'spec job not found' });
   res.json({
     status: job.status,
     format: job.format,

@@ -82,7 +82,7 @@ const BINDABLE_META_FIELDS = [
 const TOKEN_COLOR_KEYS = [
   'primary', 'secondary', 'accent', 'ctaBg', 'ctaText', 'scrim',
   'textPrimary', 'textSecondary', 'stars', 'badgeBg', 'badgeText',
-  'textOnLight', 'textSecondaryOnLight',
+  'promoBg', 'promoText', 'textOnLight', 'textSecondaryOnLight',
 ];
 
 const FONT_ROLES = ['heading', 'body', 'quote'];

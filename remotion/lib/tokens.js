@@ -15,6 +15,8 @@ const COLOR_DEFAULTS = {
   stars: '#F5B70A',
   badgeBg: '#BEC282',
   badgeText: '#1F2219',
+  promoBg: '#F5B70A',
+  promoText: '#16161A',
   // Contrast flips applied when plate intelligence reports a light band
   // under a text slot (no scrims — dark type IS the legibility strategy).
   textOnLight: '#16181D',

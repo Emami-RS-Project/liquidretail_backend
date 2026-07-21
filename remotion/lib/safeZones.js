@@ -51,8 +51,10 @@ export function stackContainerStyle({ format, anchor, offsetX, offsetY, width, h
     case 'center':
       return {
         ...base,
-        top: safe.top * height + offsetY * height,
-        bottom: safe.bottom * height - offsetY * height,
+        // Both insets clamped: an offset shifts the centering window but
+        // can never push it outside the safe area.
+        top: clampFrac(safe.top + offsetY, safe.top, 0.7) * height,
+        bottom: clampFrac(safe.bottom - offsetY, safe.bottom, 0.7) * height,
         justifyContent: 'center',
       };
     case 'lowerThird':
@@ -61,7 +63,9 @@ export function stackContainerStyle({ format, anchor, offsetX, offsetY, width, h
     default:
       return {
         ...base,
-        bottom: clampFrac(safe.bottom - offsetY, 0.02, 0.9) * height,
+        // Floor at the safe band — the documented invariant is that no
+        // spec offset can push content under platform UI.
+        bottom: clampFrac(safe.bottom - offsetY, safe.bottom, 0.9) * height,
         justifyContent: 'flex-end',
       };
   }

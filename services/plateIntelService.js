@@ -53,9 +53,16 @@ async function extractFrames(platePath, times, outDir) {
   if (!FFMPEG) throw new Error('ffmpeg-static unavailable');
   const frames = [];
   for (const t of times) {
-    const out = path.join(outDir, `scan_${String(t).replace('.', '_')}.png`);
-    await execFileP(FFMPEG, ['-y', '-v', 'quiet', '-ss', String(t), '-i', platePath, '-frames:v', '1', out]);
-    frames.push({ atSec: t, path: out });
+    // Per-frame failures (seek past a slightly-short stream, decode
+    // hiccup) drop that sample only — the surviving samples still hint.
+    try {
+      const out = path.join(outDir, `scan_${String(t).replace('.', '_')}.png`);
+      await execFileP(FFMPEG, ['-y', '-v', 'quiet', '-ss', String(t), '-i', platePath, '-frames:v', '1', out]);
+      const stat = await fsp.stat(out).catch(() => null);
+      if (stat && stat.size > 100) frames.push({ atSec: t, path: out });
+    } catch (e) {
+      console.warn(`🔎 plateIntel: frame @${t}s failed (${e.message}) — skipping sample`);
+    }
   }
   return frames;
 }
@@ -124,17 +131,26 @@ async function analyzePlate(platePath, { durationSec = 8, isImage = false } = {}
   if (mode === 'off') return null;
   const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'platescan_'));
   try {
+    // All sample times clamped inside the known duration (probe fallback
+    // can overstate it; seeking past EOF would just drop samples).
+    const maxT = Math.max(0.2, durationSec - 0.3);
     const times = isImage
       ? [0]
-      : [0.8, durationSec * 0.4, durationSec * 0.7].map((t) => Number(Math.min(t, Math.max(0.2, durationSec - 0.3)).toFixed(2)));
+      : [...new Set([0.8, durationSec * 0.4, durationSec * 0.7].map((t) => Number(Math.min(t, maxT).toFixed(2))))];
     const frames = isImage
       ? [{ atSec: 0, path: platePath }]
       : await extractFrames(platePath, times, tmpDir);
+    if (!frames.length) return null;
 
     const hints = { samples: [] };
     for (const f of frames) {
-      hints.samples.push({ atSec: f.atSec, bands: await analyzeFrameBands(f.path) });
+      try {
+        hints.samples.push({ atSec: f.atSec, bands: await analyzeFrameBands(f.path) });
+      } catch (e) {
+        console.warn(`🔎 plateIntel: band analysis @${f.atSec}s failed (${e.message})`);
+      }
     }
+    if (!hints.samples.length) return null;
 
     if (mode === 'gemini') {
       try {

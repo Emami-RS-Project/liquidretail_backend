@@ -22,6 +22,13 @@ export function useBrandFonts(fonts) {
       seen.add(k);
       return true;
     });
+    let released = false;
+    const release = () => {
+      if (!released) {
+        released = true;
+        continueRender(handle);
+      }
+    };
     Promise.all(
       unique.map((f) =>
         loadFont({
@@ -35,12 +42,13 @@ export function useBrandFonts(fonts) {
         })
       )
     )
-      .then(() => {
-        if (!cancelled) continueRender(handle);
-      })
+      .then(release)
       .catch((e) => cancelRender(e));
     return () => {
       cancelled = true;
+      // Player unmounts (format switch) must not leak the delayRender
+      // handle; release() is idempotent so a late resolve is harmless.
+      release();
     };
   }, [fonts, handle]);
 }

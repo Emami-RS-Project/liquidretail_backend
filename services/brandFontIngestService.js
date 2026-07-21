@@ -112,11 +112,19 @@ function normalizeFormat(hint, url) {
 }
 
 // font-weight → number. Keywords map to their numeric equivalents;
-// variable-font ranges ("100 900") take the LOWER bound.
+// variable-font ranges ("100 900") clamp 400 into the range — the file
+// serves every weight, so labeling it by the lower bound (100) would make
+// the resolver register a hairline face for body text.
 function parseWeight(raw) {
   const v = String(raw || '').trim().toLowerCase();
   if (!v || v === 'normal') return 400;
   if (v === 'bold') return 700;
+  const range = v.match(/(\d{2,4})\s+(\d{2,4})/);
+  if (range) {
+    const lo = parseInt(range[1], 10);
+    const hi = parseInt(range[2], 10);
+    return Math.min(Math.max(400, lo), hi);
+  }
   const m = v.match(/\d{2,4}/);
   return m ? parseInt(m[0], 10) : 400;
 }
@@ -464,7 +472,10 @@ async function ingestBrandFonts(brand) {
       const uploaded = await cloudinaryService.uploadBufferToCloudinary(buf, {
         folder: 'liquidretail/brand_fonts',
         resourceType: 'raw',
-        publicId: `${brandId}-${familySlug(face.family)}-${face.weight}${styleSuffix}.${face.format}`
+        publicId: `${brandId}-${familySlug(face.family)}-${face.weight}${styleSuffix}.${face.format}`,
+        // Re-ingest must refresh the mirror — the helper defaults to
+        // overwrite:false, which silently returns the OLD asset forever.
+        overwrite: true
       });
       ingested.push({ ...entryBase, url: uploaded.secure_url, needsLicense: false });
     } catch (err) {

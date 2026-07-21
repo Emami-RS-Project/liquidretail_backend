@@ -885,7 +885,18 @@ async function renderWithRemotionAndSave({ ad, brand, format }) {
 
   const meta = await buildMetaForAd(ad, brand);
   const { spec, source } = resolveSpecForBrand(brand, format);
-  const tokens = await buildBrandTokens(brand, { specFontOverrides: spec.tokenOverrides?.fonts || {} });
+  // Same LayoutInputArtifact tier buildMetaForAd uses — brands without
+  // explicit color/font fields still inherit the creative director's
+  // brand block (input.brand.primary_color / font_family / …).
+  let layoutInputBrand = null;
+  try {
+    const LayoutInputArtifact = require('../models/LayoutInputArtifact');
+    const li = ad.mediaId
+      ? await LayoutInputArtifact.findOne({ mediaId: ad.mediaId }).sort({ createdAt: -1 }).select('input.brand').lean()
+      : null;
+    layoutInputBrand = li?.input?.brand || null;
+  } catch {}
+  const tokens = await buildBrandTokens(brand, { layoutInputBrand, specFontOverrides: spec.tokenOverrides?.fonts || {} });
   console.log(`🎨 brandScript[ad=${ad._id}]: engine=remotion format=${format} spec=${source} fonts=${['heading', 'body', 'quote'].map(r => `${r}:${tokens.fonts[r].family}(${tokens.fonts[r].source})`).join(' ')}`);
 
   const result = await renderTitles({

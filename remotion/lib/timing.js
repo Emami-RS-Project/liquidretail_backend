@@ -10,14 +10,26 @@ const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
  * Compute the animation state of a slot at `frame`.
  * timing: { enterAtSec, exitAtSec|null, enterDurationSec, exitDurationSec }
  * transition: { type, direction, spring }
+ * timeScale compresses spec-authored times onto shorter real plates
+ * (specs are authored for a nominal 8s clip; a 6s Cloudinary segment gets
+ * timeScale 0.75 so the choreography — including the CTA — still lands).
+ * Entrances are additionally clamped inside the clip so no slot can be
+ * scheduled past the last frame; durations stay absolute so motion feel
+ * doesn't change with plate length.
  * Returns { opacity, transform, clipPath } (CSS-ready).
  */
-export function slotEnvelope({ frame, fps, timing, transition, durationInFrames }) {
-  const enterStart = Math.round(timing.enterAtSec * fps);
+export function slotEnvelope({ frame, fps, timing, transition, durationInFrames, timeScale = 1 }) {
   const enterDur = Math.max(1, Math.round(timing.enterDurationSec * fps));
+  const enterStart = Math.max(
+    0,
+    Math.min(Math.round(timing.enterAtSec * timeScale * fps), durationInFrames - enterDur - 1)
+  );
   const exitStart = timing.exitAtSec == null
     ? null
-    : Math.min(Math.round(timing.exitAtSec * fps), durationInFrames - 1);
+    : Math.min(
+        Math.max(Math.round(timing.exitAtSec * timeScale * fps), enterStart + enterDur + 1),
+        durationInFrames - 1
+      );
   const exitDur = Math.max(1, Math.round(timing.exitDurationSec * fps));
 
   // Entrance progress 0→1
@@ -87,11 +99,22 @@ export function slotEnvelope({ frame, fps, timing, transition, durationInFrames 
 }
 
 /** Progress 0→1 of a slot's own visible window — drives accent animations. */
-export function slotProgress({ frame, fps, timing, durationInFrames }) {
-  const start = Math.round(timing.enterAtSec * fps);
-  const end = timing.exitAtSec == null ? durationInFrames : Math.round(timing.exitAtSec * fps);
+export function slotProgress({ frame, fps, timing, durationInFrames, timeScale = 1 }) {
+  const start = Math.max(0, Math.min(Math.round(timing.enterAtSec * timeScale * fps), durationInFrames - 2));
+  const end = timing.exitAtSec == null ? durationInFrames : Math.round(timing.exitAtSec * timeScale * fps);
   return interpolate(frame, [start, Math.max(start + 1, end)], [0, 1], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   });
+}
+
+/**
+ * Compression factor mapping spec-authored seconds onto the real clip.
+ * Only compresses (short plate); longer plates keep the authored pacing
+ * and hold-to-end slots simply hold longer.
+ */
+export function specTimeScale(spec, durationInFrames, fps) {
+  const extent = Math.max(1, ...(spec?.phases || []).map((p) => p.endSec || 0));
+  const clipSec = durationInFrames / fps;
+  return clipSec < extent ? clipSec / extent : 1;
 }

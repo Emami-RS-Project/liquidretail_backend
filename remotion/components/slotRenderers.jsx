@@ -4,6 +4,7 @@
 // slot's visible-window progress (drives accent reveals).
 
 import React from 'react';
+import { Img } from 'remotion';
 import {
   tokenColor,
   tokenFont,
@@ -153,6 +154,9 @@ export const RatingSlot = ({ slot, content, tokens, dims, format }) => {
   const size = baseSize('rating', format, t.sizeScale);
   const { rating, reviewsText } = content;
   const font = tokenFont(tokens, 'body');
+  // Secondary color follows the slot's (possibly contrast-flipped) token:
+  // when the group flips to on-light colors, the divider + count flip too.
+  const secondaryToken = t.colorToken === 'textOnLight' ? 'textSecondaryOnLight' : 'textSecondary';
   return (
     <div style={{ ...scrimStyle(t, tokens, dims), display: 'inline-flex', alignItems: 'center', gap: Math.round(dims.width * 0.016) }}>
       <span
@@ -170,17 +174,21 @@ export const RatingSlot = ({ slot, content, tokens, dims, format }) => {
       <span style={{ color: tokenColor(tokens, t.colorToken), fontSize: size, fontWeight: 700, fontFamily: fontFamilyCss(font), textShadow: TEXT_SHADOWS.soft }}>
         {rating.toFixed(1)}/5
       </span>
-      <span
-        style={{
-          width: 2,
-          alignSelf: 'stretch',
-          margin: `${Math.round(size * 0.2)}px 0`,
-          backgroundColor: hexToRgba(tokenColor(tokens, 'textSecondary'), 0.6),
-        }}
-      />
-      <span style={{ color: tokenColor(tokens, 'textSecondary'), fontSize: Math.round(size * 0.82), fontWeight: 500, fontFamily: fontFamilyCss(font), textShadow: TEXT_SHADOWS.soft }}>
-        {reviewsText}
-      </span>
+      {reviewsText ? (
+        <>
+          <span
+            style={{
+              width: 2,
+              alignSelf: 'stretch',
+              margin: `${Math.round(size * 0.2)}px 0`,
+              backgroundColor: hexToRgba(tokenColor(tokens, secondaryToken), 0.6),
+            }}
+          />
+          <span style={{ color: tokenColor(tokens, secondaryToken), fontSize: Math.round(size * 0.82), fontWeight: 500, fontFamily: fontFamilyCss(font), textShadow: TEXT_SHADOWS.soft }}>
+            {reviewsText}
+          </span>
+        </>
+      ) : null}
     </div>
   );
 };
@@ -236,10 +244,13 @@ export const BrandPillSlot = ({ slot, content, tokens, dims, format, meta }) => 
   // carries one (logoMode 'text' opts back into the pill). Drop-shadow
   // only — no box, matching the no-scrim standard.
   if (t.logoMode !== 'text' && meta?.brandLogoUrl) {
+    // Remotion <Img> blocks the frame capture until the logo is decoded —
+    // a native <img> can race the screenshot on the first frames.
     return (
-      <img
+      <Img
         src={meta.brandLogoUrl}
         alt={content || 'brand logo'}
+        pauseWhenLoading
         style={{
           height: Math.round(size * 2.4),
           maxWidth: Math.round(dims.width * 0.4),
@@ -260,13 +271,16 @@ export const BrandPillSlot = ({ slot, content, tokens, dims, format, meta }) => 
   );
 };
 
-export const CtaSlot = ({ slot, content, tokens, dims, format, frame, fps, progress }) => {
+export const CtaSlot = ({ slot, content, tokens, dims, format, frame, fps, timeScale = 1 }) => {
   const t = slot.treatment;
   const size = baseSize('cta', format, t.sizeScale);
   const font = tokenFont(tokens, 'body');
-  // Gentle attention pulse once fully entered (canvas canonical: from 3s).
-  const settled = progress > 0.25;
-  const pulse = settled ? 1 + 0.018 * Math.sin(((frame / fps) - slot.timing.enterAtSec) * Math.PI * 1.1) : 1;
+  // Gentle attention pulse anchored to the (time-scaled) moment the button
+  // finishes entering — sin starts at 0 so there is no scale snap, and the
+  // onset doesn't drift with plate length.
+  const enterEnd = slot.timing.enterAtSec * timeScale + slot.timing.enterDurationSec + 0.4;
+  const tSec = frame / fps;
+  const pulse = tSec > enterEnd ? 1 + 0.018 * Math.sin((tSec - enterEnd) * Math.PI * 1.1) : 1;
   return (
     <div style={{ fontFamily: fontFamilyCss(font), transform: `scale(${pulse})` }}>
       <Pill
@@ -289,7 +303,7 @@ export const PromoSlot = ({ slot, content, tokens, dims, format }) => {
   const font = tokenFont(tokens, 'body');
   return (
     <div style={{ fontFamily: fontFamilyCss(font) }}>
-      <Pill bg={hexToRgba(tokenColor(tokens, 'accent'), 0.97)} text={tokenColor(tokens, 'badgeText')} dims={dims} size={size} tracking={t.trackingPx || 1}>
+      <Pill bg={hexToRgba(tokenColor(tokens, 'promoBg'), 0.97)} text={tokenColor(tokens, 'promoText')} dims={dims} size={size} tracking={t.trackingPx || 1}>
         {applyCasing(content, t.casing)}
       </Pill>
     </div>
@@ -339,7 +353,9 @@ export const PriceSlot = ({ slot, content, tokens, dims, format }) => {
   const size = baseSize('price', format, t.sizeScale);
   const font = tokenFont(tokens, t.fontRole === 'body' ? 'heading' : t.fontRole);
   const raw = String(content);
-  const text = raw.startsWith('$') || /[€£]/.test(raw) ? raw : `$${raw}`;
+  // Only prefix a bare number — anything already carrying a currency
+  // marker anywhere ('From $48', '£29', '48 USD') passes through.
+  const text = /[$€£¥]|usd|eur|gbp/i.test(raw) ? raw : `$${raw}`;
   return (
     <div style={{ ...scrimStyle(t, tokens, dims), display: 'inline-block' }}>
       <span style={{ fontFamily: fontFamilyCss(font), fontWeight: Math.max(t.weight, 700), fontSize: size, color: tokenColor(tokens, t.colorToken), textShadow: TEXT_SHADOWS.soft }}>

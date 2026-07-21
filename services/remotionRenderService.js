@@ -126,6 +126,8 @@ const MIME = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
+  '.svg': 'image/svg+xml', // brand logos are frequently SVG; Chrome refuses octet-stream SVGs
+  '.gif': 'image/gif',
   '.woff2': 'font/woff2',
   '.woff': 'font/woff',
   '.ttf': 'font/ttf',
@@ -222,16 +224,44 @@ function enqueue(taskFn) {
   return run;
 }
 
+// Fast lane for stills-only previews (the operator refinement loop):
+// a still takes ~1-3s but would otherwise wait behind a multi-minute
+// production render in the main queue — past the frontend proxy timeout.
+// Chrome handles a second concurrent page fine; stills at preview scale
+// add little memory.
+let stillsQueueTail = Promise.resolve();
+
+function enqueueStill(taskFn) {
+  const run = stillsQueueTail.then(taskFn, taskFn);
+  stillsQueueTail = run.catch(() => {});
+  return run;
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 async function downloadToFile(url, filePath) {
   const res = await axios.get(url, { responseType: 'stream', timeout: 60_000 });
   await new Promise((resolve, reject) => {
     const w = fs.createWriteStream(filePath);
+    // axios's timeout only covers up to response headers — a stream that
+    // stalls mid-body would otherwise hang the render queue forever.
+    let watchdog = null;
+    const arm = () => {
+      clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        res.data.destroy(new Error(`download stalled (no data for 45s): ${url}`));
+      }, 45_000);
+    };
+    arm();
+    res.data.on('data', arm);
+    const done = (fn) => (arg) => {
+      clearTimeout(watchdog);
+      fn(arg);
+    };
+    res.data.on('error', done(reject));
+    w.on('error', done(reject));
+    w.on('finish', done(resolve));
     res.data.pipe(w);
-    res.data.on('error', reject);
-    w.on('error', reject);
-    w.on('finish', resolve);
   });
   return filePath;
 }
@@ -418,7 +448,8 @@ async function renderPreview({ meta, spec, tokens, format, plateImagePath = null
   const compositionId = COMPOSITION_BY_FORMAT[format];
   if (!compositionId) throw new Error(`renderPreview: unknown format '${format}'`);
 
-  return enqueue(async () => {
+  const lane = includeVideo ? enqueue : enqueueStill;
+  return lane(async () => {
     const timings = {};
     let t = Date.now();
     const [serveUrl, browserExecutable, { base }] = await Promise.all([
