@@ -882,6 +882,21 @@ router.get('/:id/title-spec', async (req, res) => {
       .filter((f) => f.endsWith('.json'))
       .map((f) => f.replace(/\.json$/, ''));
     const tokens = await buildBrandTokens(brand, {});
+
+    // Identity for preview chrome (Meta-style placement overlays): the
+    // connected IG account's real handle when one exists, else a slug of
+    // the brand name.
+    let igHandle = null;
+    try {
+      const cred = await IntegrationCredential.findOne({ brandId: brand._id, type: 'instagram', status: 'active' })
+        .select('igUsername').lean();
+      igHandle = cred?.igUsername || null;
+    } catch { /* optional */ }
+    const brandInfo = {
+      name: brand.name,
+      handle: igHandle || String(brand.name || 'brand').toLowerCase().replace(/[^a-z0-9._]+/g, ''),
+      logoUrl: brand.logoUrl || null,
+    };
     // Local font-file paths are server internals; url here is the
     // browser-loadable origin (gstatic/Cloudinary) for the frontend
     // @remotion/player live preview.
@@ -891,6 +906,7 @@ router.get('/:id/title-spec', async (req, res) => {
       titleStyleSpec: brand.titleStyleSpec || null,
       titleStylePreset: brand.titleStylePreset || null,
       titlingEngine: brand.videoSettings?.titlingEngine || process.env.TITLING_ENGINE || 'canvas',
+      brand: brandInfo,
       resolved,
       presets,
       tokens: { colors: tokens.colors, fonts },
