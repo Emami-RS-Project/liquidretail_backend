@@ -35,7 +35,7 @@ const {
   buildReferenceImages,
   buildVideoSegmentUrl
 } = require('../services/atlasVideoService');
-const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('../services/veoPromptBuilder');
+const { buildVeoPrompt, aspectRatioForPlatformFormat, promptProfileFor } = require('../services/veoPromptBuilder');
 
 (async () => {
   const args = process.argv.slice(2);
@@ -106,6 +106,7 @@ const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('../services/ve
     modelOverride,
     fallback: fallback || null,
     paramShape: caps.paramShape,
+    promptProfile: promptProfileFor(caps),
     brandOverride: brand?.videoSettings || null,
     productOverride: product?.videoSettings || null,
     referenceCount,

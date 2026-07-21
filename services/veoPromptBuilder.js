@@ -14,8 +14,15 @@
 // zoom-out reveal). The GPT storyboard (veoStoryboardService) is
 // retired on the Atlas path: camera is fully specified below and audio
 // uses a fixed default.
-// The prompt-size cap is per-model (caps.promptByteCap) — 20,000 for
-// the Gemini Omni default, 4,096 for the legacy Grok/Veo entries.
+// Two labeled default-prompt profiles (PROMPT_PROFILES) keep each
+// model family's static directives independently tunable:
+//   • gemini-omni — verbose; optimized for google/gemini-omni-flash/*
+//     (20,000-byte cap)
+//   • grok — compact re-authoring of the same rules; optimized for
+//     xai/grok-imagine-video* (4,096-byte cap); also serves veo/generic
+// promptProfileFor(caps) selects the profile from caps.paramShape.
+// The prompt-size cap is per-model (caps.promptByteCap).
+
 
 // Aspect-ratio resolution lives in services/platformFormats.js — the
 // canonical capability table for every platformFormat. Re-exported here
@@ -27,6 +34,40 @@ const {
 const PLATFORM_FORMAT_ASPECT = Object.fromEntries(
   Object.entries(PLATFORM_FORMATS).map(([k, v]) => [k, v.aspectRatio])
 );
+
+// Per-model-family default-prompt profiles. Static Ken Burns directives
+// are authored once per profile so Omni (20k headroom) and Grok (4,096)
+// can be tuned independently; shared dynamic lines (operator lead,
+// duration-scaled Timeline/Output, PRODUCT FIDELITY, compositing,
+// seedHasText) stay in buildVeoPrompt.
+const PROMPT_PROFILES = {
+  'gemini-omni': {
+    label: 'Gemini Omni default prompt',
+    optimizedFor: [
+      'google/gemini-omni-flash/image-to-video-developer',
+      'google/gemini-omni-flash/reference-to-video-developer'
+    ],
+    promptByteBudget: 20000
+  },
+  'grok': {
+    label: 'Grok default prompt',
+    optimizedFor: [
+      'xai/grok-imagine-video-v1.5/image-to-video',
+      'xai/grok-imagine-video/reference-to-video'
+    ],
+    promptByteBudget: 4096
+  }
+};
+
+// paramShape starting with 'gemini-omni' → gemini-omni; 'grok' → grok;
+// anything else (veo/generic) → grok (compact variant; shared 4,096 cap).
+function promptProfileFor(caps) {
+  const shape = String(caps?.paramShape || '');
+  if (shape.startsWith('gemini-omni')) return 'gemini-omni';
+  if (shape.startsWith('grok')) return 'grok';
+  return 'grok';
+}
+
 
 function archetypeDescription(arch) {
   const map = {
@@ -131,6 +172,86 @@ function buildOverlayIntent({ concept }) {
   return `COMPOSITING CONTEXT: Text overlays composited downstream. ${archetypeNegativeSpaceGuidance(concept?.archetype)}`;
 }
 
+// ── GEMINI OMNI default prompt — optimized for google/gemini-omni-flash/* (20,000-byte cap) ──
+// CURRENT verbose phrasing verbatim — authored against the Omni default's 20k headroom.
+const OMNI_DIRECTIVES = {
+  role:
+    `Role: Professional product commercial editor. Animate the supplied product photos with virtual camera movement only — ` +
+    `do NOT generate, recreate, or alter imagery. The supplied images are the source of truth.`,
+  objective:
+    // Duration-agnostic (the Timeline/Output lines carry the requested
+    // length) — the original "8-second" phrasing predates variable
+    // durations and would contradict a 4s/15s render.
+    `Objective: Create a premium product commercial using subtle Ken Burns camera moves. ` +
+    `Must feel luxury while keeping 100% fidelity to the original product.`,
+  sourceImages: `Source images: Use only the supplied images as provided.`,
+  productPreservation:
+    `Product preservation (highest priority): Treat each image as a locked photograph. The product must stay identical. ` +
+    `Do NOT recreate, redraw, regenerate, enhance, sharpen with generative fill, or use AI on any part. ` +
+    `Do NOT change colors, stitching, textures, materials, logos, shape, or proportions, or alter lighting, shadows, or reflections. ` +
+    `Do NOT add or remove any part or detail. The only motion is the virtual camera.`,
+  transitions: `Transitions: Smooth crossfades only, ~0.25s. No wipes, flashes, or animated transitions.`,
+  cameraStyle:
+    `Camera style: Luxury, slow, elegant, stable. Ease in/out. ` +
+    `No shake, handheld, parallax, simulated 3D, orbit, or object movement. The product stays completely static.`,
+  background: `Background: Preserve exactly. Do NOT replace, extend, blur, or hallucinate missing areas.`,
+  visualStyle:
+    `Visual style: Minimal, clean, photorealistic, high-end ecommerce. ` +
+    `Crisp focus, natural lighting only. No color grading, bloom, or lens flares.`,
+  audio: `AUDIO: natural ambience matching the scene; no music, no dialogue, no voiceover.`,
+  noText:
+    `CRITICAL: Do NOT render any text, typography, logos, badges, watermarks, or captions that are not already part of the supplied photographs. ` +
+    `Text and logos physically present on the product in the source images are fine to show — do not generate any new text or graphics. ` +
+    `All ad copy is composited downstream. Any generated text in the video causes rejection.`,
+  physicalAccuracy:
+    `PHYSICAL ACCURACY: Any person visible must remain anatomically correct — 5-fingered hands, symmetric matching eyes, ` +
+    `natural skin texture, real body proportions. No extra digits, warped features, or impossible angles. ` +
+    `If the photographs show a person, preserve their face, hair, skin tone, and identity throughout — no morphing mid-shot.`,
+  doNot:
+    `Do NOT: regenerate/morph/warp/bend the product, hallucinate geometry, invent textures, change branding/logos/stitching/colors, ` +
+    `create fake shadows/reflections/depth, animate the product or any of its parts, use generative fill, or create new backgrounds. ` +
+    `No fantasy motion — no sparkles, particles, lens flares, floating props, morphing, or dissolves.`
+};
+
+// ── GROK default prompt — optimized for xai/grok-imagine-video-v1.5/image-to-video (4,096-byte cap) ──
+// Compact re-authoring of the SAME directives (same rules, tighter sentences —
+// no meaning changes, no new creative direction). Sized so a typical full
+// prompt lands well under 4,096 bytes without relying on DROP_PRIORITY.
+const GROK_DIRECTIVES = {
+  role:
+    `Role: Product commercial editor. Animate supplied photos with virtual camera only — ` +
+    `do NOT generate, recreate, or alter imagery. Supplied images are source of truth.`,
+  objective:
+    `Objective: Premium Ken Burns product commercial. Luxury feel, 100% fidelity to the original product.`,
+  sourceImages: `Source images: Use only the supplied images as provided.`,
+  productPreservation:
+    `Product preservation (highest priority): Each image is a locked photograph; product stays identical. ` +
+    `Do NOT recreate, redraw, regenerate, enhance, generative-fill, or AI-alter any part. ` +
+    `Do NOT change colors, stitching, textures, materials, logos, shape, proportions, lighting, shadows, or reflections. ` +
+    `Do NOT add or remove detail. Only motion is the virtual camera.`,
+  transitions: `Transitions: Smooth crossfades ~0.25s only. No wipes, flashes, or animated transitions.`,
+  cameraStyle:
+    `Camera style: Luxury, slow, elegant, stable. Ease in/out. ` +
+    `No shake, handheld, parallax, 3D, orbit, or object movement. Product stays static.`,
+  background: `Background: Preserve exactly. Do NOT replace, extend, blur, or hallucinate areas.`,
+  visualStyle:
+    `Visual style: Minimal, clean, photorealistic, high-end ecommerce. ` +
+    `Crisp focus, natural light only. No grading, bloom, or flares.`,
+  audio: `AUDIO: natural ambience matching the scene; no music, no dialogue, no voiceover.`,
+  noText:
+    `CRITICAL: Do NOT render text, typography, logos, badges, watermarks, or captions not already in the supplied photographs. ` +
+    `On-product text/logos in source images may show — generate no new text or graphics. ` +
+    `Ad copy is composited downstream. Generated text causes rejection.`,
+  physicalAccuracy:
+    `PHYSICAL ACCURACY: Persons must stay anatomically correct — 5-fingered hands, symmetric eyes, ` +
+    `natural skin, real proportions. No extra digits, warped features, or impossible angles. ` +
+    `Preserve face, hair, skin tone, identity — no mid-shot morphing.`,
+  doNot:
+    `Do NOT: regenerate/morph/warp/bend the product, hallucinate geometry, invent textures, change branding/logos/stitching/colors, ` +
+    `fake shadows/reflections/depth, animate the product or parts, use generative fill, or create new backgrounds. ` +
+    `No fantasy motion — no sparkles, particles, flares, floating props, morphing, or dissolves.`
+};
+
 // Main export. Builds the camera-only "Ken Burns" video prompt for the
 // AI model. All text choreography is handled by the chrome compositor
 // downstream — the prompt MUST NOT contain any "render this text"
@@ -146,6 +267,8 @@ function buildOverlayIntent({ concept }) {
 // the Ken Burns spec fully defines camera + timeline, and audio uses a
 // fixed default. caps is the resolved model's MODEL_CAPS entry;
 // caps.promptByteCap drives the size cap (4096 when absent).
+// Static directive phrasing comes from OMNI_DIRECTIVES or GROK_DIRECTIVES
+// via promptProfileFor(caps); shared dynamic lines stay below.
 function buildVeoPrompt({
   concept,
   brand,          // eslint-disable-line no-unused-vars — kept for call-site stability
@@ -162,6 +285,7 @@ function buildVeoPrompt({
   durationSec = 8         // per-ad render length (wizard format-selection stage)
 }) {
   const lines = [];
+  const d = promptProfileFor(caps) === 'gemini-omni' ? OMNI_DIRECTIVES : GROK_DIRECTIVES;
 
   // Operator refinement (regeneration only). Leads the prompt so the
   // video model sees the requested change before the fixed spec below.
@@ -173,22 +297,11 @@ function buildVeoPrompt({
     );
   }
 
-  // ── Fixed Ken Burns product-commercial spec (operator-authored) ────
-  lines.push(
-    `Role: Professional product commercial editor. Animate the supplied product photos with virtual camera movement only — ` +
-    `do NOT generate, recreate, or alter imagery. The supplied images are the source of truth.`
-  );
-  lines.push(
-    `Objective: Create an 8-second premium product commercial using subtle Ken Burns camera moves. ` +
-    `Must feel luxury while keeping 100% fidelity to the original product.`
-  );
-  lines.push(`Source images: Use only the supplied images as provided.`);
-  lines.push(
-    `Product preservation (highest priority): Treat each image as a locked photograph. The product must stay identical. ` +
-    `Do NOT recreate, redraw, regenerate, enhance, sharpen with generative fill, or use AI on any part. ` +
-    `Do NOT change colors, stitching, textures, materials, logos, shape, or proportions, or alter lighting, shadows, or reflections. ` +
-    `Do NOT add or remove any part or detail. The only motion is the virtual camera.`
-  );
+  // ── Fixed Ken Burns product-commercial spec (per-profile directives) ─
+  lines.push(d.role);
+  lines.push(d.objective);
+  lines.push(d.sourceImages);
+  lines.push(d.productPreservation);
 
   if (product?.title) {
     lines.push(`Product: ${product.title}.`);
@@ -211,30 +324,20 @@ function buildVeoPrompt({
     `Scene 2 (${t1}–${t2}s): slow zoom toward the logo or most distinctive product detail (~8–10%), centered. No rotation or distortion. ` +
     `Scene 3 (${t2}–${dur.toFixed(1)}s): begin slightly cropped, slow zoom out ~10–12% to reveal the full product. Maintain center framing.`
   );
-  lines.push(`Transitions: Smooth crossfades only, ~0.25s. No wipes, flashes, or animated transitions.`);
-  lines.push(
-    `Camera style: Luxury, slow, elegant, stable. Ease in/out. ` +
-    `No shake, handheld, parallax, simulated 3D, orbit, or object movement. The product stays completely static.`
-  );
-  lines.push(`Background: Preserve exactly. Do NOT replace, extend, blur, or hallucinate missing areas.`);
-  lines.push(
-    `Visual style: Minimal, clean, photorealistic, high-end ecommerce. ` +
-    `Crisp focus, natural lighting only. No color grading, bloom, or lens flares.`
-  );
+  lines.push(d.transitions);
+  lines.push(d.cameraStyle);
+  lines.push(d.background);
+  lines.push(d.visualStyle);
 
   // Fixed audio default — some models (Gemini Omni) generate native
   // audio, so the directive is load-bearing even for a camera-only clip.
-  lines.push(`AUDIO: natural ambience matching the scene; no music, no dialogue, no voiceover.`);
+  lines.push(d.audio);
 
   // NO TEXT — the brand-script overlay composites downstream. Text and
   // logos physically present in the photographs are fine to show (Scene
   // 2 zooms toward the logo); GENERATING text/graphics is what's banned.
   lines.push(buildOverlayIntent({ concept }));
-  lines.push(
-    `CRITICAL: Do NOT render any text, typography, logos, badges, watermarks, or captions that are not already part of the supplied photographs. ` +
-    `Text and logos physically present on the product in the source images are fine to show — do not generate any new text or graphics. ` +
-    `All ad copy is composited downstream. Any generated text in the video causes rejection.`
-  );
+  lines.push(d.noText);
 
   if (seedHasText) {
     lines.push(
@@ -244,11 +347,7 @@ function buildVeoPrompt({
     );
   }
 
-  lines.push(
-    `PHYSICAL ACCURACY: Any person visible must remain anatomically correct — 5-fingered hands, symmetric matching eyes, ` +
-    `natural skin texture, real body proportions. No extra digits, warped features, or impossible angles. ` +
-    `If the photographs show a person, preserve their face, hair, skin tone, and identity throughout — no morphing mid-shot.`
-  );
+  lines.push(d.physicalAccuracy);
 
   // Reference stack: position 0 is the seed (main image); subsequent
   // positions are the product hero + alternate views in stored order
@@ -269,11 +368,7 @@ function buildVeoPrompt({
     );
   }
 
-  lines.push(
-    `Do NOT: regenerate/morph/warp/bend the product, hallucinate geometry, invent textures, change branding/logos/stitching/colors, ` +
-    `create fake shadows/reflections/depth, animate the product or any of its parts, use generative fill, or create new backgrounds. ` +
-    `No fantasy motion — no sparkles, particles, lens flares, floating props, morphing, or dissolves.`
-  );
+  lines.push(d.doNot);
 
   lines.push(
     `Output: ${Number(durationSec || 8).toFixed(1)}s duration. Camera movement only. Product unchanged. Luxury ecommerce aesthetic. ` +
@@ -286,6 +381,7 @@ function buildVeoPrompt({
   // / timeline) are never dropped — they're the load-bearing part.
   return enforceByteCap(lines, caps);
 }
+
 
 const DEFAULT_BYTE_CAP = 4096;   // legacy Grok/Veo cap — used when caps is absent
 const BYTE_CAP_MARGIN  = 96;     // safety margin under the hard cap
@@ -328,5 +424,8 @@ module.exports = {
   archetypeDescription,
   archetypeNegativeSpaceGuidance,
   aspectRatioForPlatformFormat,
-  PLATFORM_FORMAT_ASPECT
+  PLATFORM_FORMAT_ASPECT,
+  promptProfileFor,
+  PROMPT_PROFILES
 };
+

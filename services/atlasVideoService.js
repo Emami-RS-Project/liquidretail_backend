@@ -32,7 +32,8 @@ const LayoutInputArtifact       = require('../models/LayoutInputArtifact');
 const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact');
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
 const { recordFlatCost } = require('./costTracker');
-const { buildVeoPrompt, aspectRatioForPlatformFormat } = require('./veoPromptBuilder');
+const { buildVeoPrompt, aspectRatioForPlatformFormat, promptProfileFor } = require('./veoPromptBuilder');
+
 const { buildLayoutInput }   = require('./layoutInputService');
 
 // Maps the concept's creative_style enum to an AI template id for
@@ -829,8 +830,10 @@ async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, v
 
   console.log(
     `🎬 atlasVideo.submit: model=${model} aspect=${aspectRatio} refs=${imageUrls.length} ` +
-    `paramShape=${caps.paramShape} promptChars=${prompt.length} promptBytes=${Buffer.byteLength(prompt, 'utf8')}`
+    `paramShape=${caps.paramShape} promptChars=${prompt.length} promptBytes=${Buffer.byteLength(prompt, 'utf8')} promptProfile=${promptProfileFor(caps)}`
   );
+
+
 
   // Bounded rate-limit retry — same isRateLimit detection + RATE_LIMIT_BACKOFF_MS
   // schedule as pollPrediction. Under VEO_CONCURRENCY > 1 the provider 429s

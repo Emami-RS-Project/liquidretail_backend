@@ -48,6 +48,12 @@ retained as automatic fallbacks. Migrated 2026-07-21.
   `resolveDurationSec` clamps to the model's range and snaps to the
   Omni duration enum (4|6|8|10, nearest); the Ken Burns prompt's Output
   line and 3-scene timeline scale to the same value.
+  Default prompts are per-model-family (`veoPromptBuilder.PROMPT_PROFILES`,
+  selected by `promptProfileFor(caps)`, logged on every submit):
+  `gemini-omni` (verbose; optimized for google/gemini-omni-flash/*, 20k
+  cap) and `grok` (compact re-authoring of the same rules; optimized for
+  xai/grok-imagine-video*, 4,096-byte cap; also serves veo/generic).
+  Tune each family's directives independently in its labeled block.
 
 ## 2) Model map (live-verified 2026-07-21)
 
