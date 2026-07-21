@@ -150,7 +150,7 @@
     </fieldset>
     <fieldset>
       <legend>AI modify (whole spec)</legend>
-      <div class="row"><input id="aiRequest" placeholder='e.g. "move the quote to the bottom and make the CTA slide in at 5s"' style="flex:1"></div>
+      <div class="row"><input id="aiRequest" placeholder='e.g. "move the quote to the bottom and make the CTA slide in at 5s" — Enter applies' style="flex:1"></div>
       <div class="row"><button id="aiBtn">Modify with AI</button><span id="aiStatus"></span></div>
     </fieldset>
     <fieldset>
@@ -497,6 +497,7 @@
     $(id).addEventListener('input', () => { writeControlsToSlot(); debouncedRender(); });
   }
   $('slotSel').addEventListener('change', syncControlsFromSlot);
+  $('aiRequest').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('aiBtn').click(); });
   $('showBands').addEventListener('change', drawFrames);
   $('metaOverlay').addEventListener('change', drawFrames);
   $('adId').addEventListener('change', debouncedRender);
