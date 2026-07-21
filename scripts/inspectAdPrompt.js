@@ -20,7 +20,7 @@ const Ad = require('../models/Ad');
   await mongoose.connect(process.env.MONGODB_URI);
 
   const ad = await Ad.findById(adId)
-    .select('_id kind platformFormat aspectRatio campaignId productId mediaId veoPrompt veoStoryboard veoVideoUrl renderUrl createdAt updatedAt')
+    .select('_id kind platformFormat aspectRatio campaignId productId mediaId veoModel veoPrompt veoStoryboard veoVideoUrl renderUrl createdAt updatedAt')
     .lean();
   if (!ad) { console.error(`Ad ${adId} not found`); await mongoose.disconnect(); process.exit(1); }
 
@@ -35,6 +35,7 @@ const Ad = require('../models/Ad');
     mediaId: ad.mediaId,
     createdAt: ad.createdAt,
     updatedAt: ad.updatedAt,
+    veoModel: ad.veoModel || null,
     veoVideoUrl: ad.veoVideoUrl,
     renderUrl: ad.renderUrl
   }, null, 2));
@@ -44,7 +45,13 @@ const Ad = require('../models/Ad');
 
   console.log('\n=== Prompt ===');
   if (ad.veoPrompt) {
-    console.log(`chars=${ad.veoPrompt.length}  bytes=${Buffer.byteLength(ad.veoPrompt, 'utf8')}`);
+    // Cap varies per model (MODEL_CAPS.promptByteCap) — veoModel is null
+    // on ads rendered before the audit field existed; the generic 4096
+    // fallback applies there.
+    const { capsFor } = require('../services/atlasVideoService');
+    const cap = capsFor(ad.veoModel).promptByteCap || 4096;
+    const bytes = Buffer.byteLength(ad.veoPrompt, 'utf8');
+    console.log(`chars=${ad.veoPrompt.length}  bytes=${bytes}  cap=${cap} (model=${ad.veoModel || 'unknown/legacy'})  ${bytes <= cap ? 'OK' : 'OVER CAP'}`);
     console.log('---');
     console.log(ad.veoPrompt);
     console.log('---');
