@@ -392,7 +392,7 @@ async function renderTitles({ videoUrl, meta, spec, tokens, format, brandName = 
  * { videoDataUrl, sizeBytes, timings } to preserve the existing preview
  * contract, and optionally still frames.
  */
-async function renderPreview({ meta, spec, tokens, format, plateImagePath = null, plateColor = '#3D3D3D', scale = 0.5, durationSec = 8, stillTimesSec = null }) {
+async function renderPreview({ meta, spec, tokens, format, plateImagePath = null, plateColor = '#3D3D3D', scale = 0.5, durationSec = 8, stillTimesSec = null, includeVideo = true }) {
   const compositionId = COMPOSITION_BY_FORMAT[format];
   if (!compositionId) throw new Error(`renderPreview: unknown format '${format}'`);
 
@@ -466,6 +466,11 @@ async function renderPreview({ meta, spec, tokens, format, plateImagePath = null
         }
         timings.stillsMs = Date.now() - t;
       }
+
+      // Stills-only mode: the fast refinement loop (title-still endpoint /
+      // playground) skips the video encode entirely — a warm still is
+      // ~1-3s vs ~40s for the full preview clip.
+      if (!includeVideo) return result;
 
       t = Date.now();
       const outPath = path.join(jobDir, 'preview.mp4');

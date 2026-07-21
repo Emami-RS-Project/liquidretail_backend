@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Title Playground</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: #0e1117; color: #e6e8ee; }
+  header { padding: 10px 16px; background: #161b26; border-bottom: 1px solid #232a3a; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  header b { margin-right: 8px; }
+  input, select, button, textarea { font: inherit; background: #0e1117; color: #e6e8ee; border: 1px solid #2b3347; border-radius: 6px; padding: 6px 8px; }
+  input:focus, textarea:focus { outline: 1px solid #4a90d9; }
+  button { background: #1e2836; cursor: pointer; }
+  button:hover { background: #263349; }
+  button.primary { background: #2563eb; border-color: #2563eb; }
+  main { display: grid; grid-template-columns: 380px 1fr; gap: 0; height: calc(100vh - 58px); }
+  #left { border-right: 1px solid #232a3a; overflow-y: auto; padding: 14px; }
+  #right { overflow-y: auto; padding: 14px; }
+  .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  .row label { min-width: 92px; color: #9aa4b8; font-size: 12px; }
+  .row input[type=range] { flex: 1; }
+  .row .val { min-width: 46px; text-align: right; font-variant-numeric: tabular-nums; color: #cfd6e4; }
+  fieldset { border: 1px solid #232a3a; border-radius: 8px; margin: 0 0 14px; padding: 10px 12px; }
+  legend { color: #9aa4b8; font-size: 12px; padding: 0 6px; }
+  #frames { display: flex; gap: 12px; flex-wrap: wrap; }
+  #frames figure { margin: 0; }
+  #frames img { max-height: 62vh; border-radius: 8px; border: 1px solid #232a3a; display: block; }
+  #frames figcaption { text-align: center; color: #9aa4b8; font-size: 12px; margin-top: 4px; }
+  #status { color: #9aa4b8; font-size: 12px; min-height: 18px; margin: 6px 0; }
+  #specText { width: 100%; height: 260px; font: 12px/1.4 ui-monospace, monospace; white-space: pre; }
+  .err { color: #f87171; }
+  .ok { color: #4ade80; }
+  small.hint { color: #6b7488; display: block; margin-top: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <b>🎬 Title Playground</b>
+  <input id="token" placeholder="Bearer token" size="24" type="password">
+  <input id="advertiser" placeholder="X-Advertiser-Id (optional)" size="20">
+  <input id="brandId" placeholder="Brand ID" size="22">
+  <select id="format"><option>vertical</option><option>feed</option><option>landscape</option></select>
+  <select id="scale"><option value="0.35">fast (0.35×)</option><option value="0.5" selected>medium (0.5×)</option><option value="0.75">sharp (0.75×)</option></select>
+  <input id="frameTimes" value="1.5, 4.5" size="10" title="frame times in seconds (max 4)">
+  <button id="loadBtn" class="primary">Load brand</button>
+  <button id="renderBtn">Render</button>
+  <button id="saveBtn">Save spec</button>
+</header>
+<main>
+  <div id="left">
+    <div id="status"></div>
+    <fieldset>
+      <legend>Quick controls</legend>
+      <div class="row"><label>Slot</label><select id="slotSel" style="flex:1"></select>
+        <label style="min-width:auto"><input type="checkbox" id="slotVisible"> visible</label></div>
+      <div class="row"><label>Anchor</label><select id="anchor"><option>top</option><option>upperThird</option><option>center</option><option>lowerThird</option><option>bottom</option></select>
+        <label style="min-width:auto">Align</label><select id="align"><option>left</option><option>center</option><option>right</option></select></div>
+      <div class="row"><label>Size ×</label><input type="range" id="sizeScale" min="0.5" max="2" step="0.05"><span class="val" id="sizeScaleV"></span></div>
+      <div class="row"><label>Offset X</label><input type="range" id="offsetX" min="-0.25" max="0.25" step="0.005"><span class="val" id="offsetXV"></span></div>
+      <div class="row"><label>Offset Y</label><input type="range" id="offsetY" min="-0.25" max="0.25" step="0.005"><span class="val" id="offsetYV"></span></div>
+      <div class="row"><label>Max width</label><input type="range" id="maxWidthPct" min="0.2" max="1" step="0.01"><span class="val" id="maxWidthPctV"></span></div>
+      <div class="row"><label>Tracking</label><input type="range" id="trackingPx" min="0" max="8" step="0.5"><span class="val" id="trackingPxV"></span></div>
+      <div class="row"><label>Weight</label><input type="range" id="weight" min="100" max="900" step="100"><span class="val" id="weightV"></span></div>
+      <div class="row"><label>Shadow</label><select id="shadow"><option>layered</option><option>soft</option><option>none</option></select>
+        <label style="min-width:auto">Casing</label><select id="casing"><option>none</option><option>upper</option><option>title</option></select></div>
+      <div class="row"><label>Transition</label><select id="trType"><option>fade</option><option>slide</option><option>pop</option><option>wipe</option><option>none</option></select>
+        <select id="trDir"><option>up</option><option>down</option><option>left</option><option>right</option></select></div>
+      <div class="row"><label>Enter at (s)</label><input type="number" id="enterAtSec" min="0" max="14" step="0.1" style="width:80px">
+        <label style="min-width:auto">for (s)</label><input type="number" id="enterDurationSec" min="0" max="2" step="0.05" style="width:80px"></div>
+      <small class="hint">Changes re-render automatically (debounced).</small>
+    </fieldset>
+    <fieldset>
+      <legend>AI modify (whole spec)</legend>
+      <div class="row"><input id="aiRequest" placeholder='e.g. "move the quote to the bottom and make the CTA slide in at 5s"' style="flex:1"></div>
+      <div class="row"><button id="aiBtn">Modify with AI</button><span id="aiStatus"></span></div>
+    </fieldset>
+    <fieldset>
+      <legend>Spec JSON (editable)</legend>
+      <textarea id="specText" spellcheck="false"></textarea>
+    </fieldset>
+  </div>
+  <div id="right">
+    <div id="frames"></div>
+  </div>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const state = { spec: null, specDoc: null, rendering: false, pendingRender: false };
+  const SLIDERS = ['sizeScale', 'offsetX', 'offsetY', 'maxWidthPct', 'trackingPx', 'weight'];
+
+  const api = async (method, path, body) => {
+    const headers = { 'Authorization': 'Bearer ' + $('token').value.trim() };
+    if ($('advertiser').value.trim()) headers['X-Advertiser-Id'] = $('advertiser').value.trim();
+    if (body) headers['Content-Type'] = 'application/json';
+    const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.status);
+    return data;
+  };
+  const status = (msg, cls) => { $('status').innerHTML = '<span class="' + (cls || '') + '">' + msg + '</span>'; };
+
+  const currentSlot = () => state.spec?.slots?.find((s) => s.key === $('slotSel').value);
+
+  function syncControlsFromSlot() {
+    const s = currentSlot();
+    if (!s) return;
+    $('slotVisible').checked = s.visible !== false;
+    $('anchor').value = s.position.anchor; $('align').value = s.position.align;
+    $('sizeScale').value = s.treatment.sizeScale; $('offsetX').value = s.position.offsetX;
+    $('offsetY').value = s.position.offsetY; $('maxWidthPct').value = s.position.maxWidthPct;
+    $('trackingPx').value = s.treatment.trackingPx; $('weight').value = s.treatment.weight;
+    $('shadow').value = s.treatment.shadow; $('casing').value = s.treatment.casing;
+    $('trType').value = s.transition.type; $('trDir').value = s.transition.direction;
+    $('enterAtSec').value = s.timing.enterAtSec; $('enterDurationSec').value = s.timing.enterDurationSec;
+    SLIDERS.forEach((k) => { $(k + 'V').textContent = $(k).value; });
+  }
+
+  function writeControlsToSlot() {
+    const s = currentSlot();
+    if (!s) return;
+    s.visible = $('slotVisible').checked;
+    s.position.anchor = $('anchor').value; s.position.align = $('align').value;
+    s.position.offsetX = +$('offsetX').value; s.position.offsetY = +$('offsetY').value;
+    s.position.maxWidthPct = +$('maxWidthPct').value;
+    s.treatment.sizeScale = +$('sizeScale').value; s.treatment.trackingPx = +$('trackingPx').value;
+    s.treatment.weight = +$('weight').value; s.treatment.shadow = $('shadow').value;
+    s.treatment.casing = $('casing').value;
+    s.transition.type = $('trType').value; s.transition.direction = $('trDir').value;
+    s.timing.enterAtSec = +$('enterAtSec').value; s.timing.enterDurationSec = +$('enterDurationSec').value;
+    SLIDERS.forEach((k) => { $(k + 'V').textContent = $(k).value; });
+    $('specText').value = JSON.stringify(state.spec, null, 2);
+  }
+
+  function setSpec(spec) {
+    state.spec = spec;
+    $('specText').value = JSON.stringify(spec, null, 2);
+    const sel = $('slotSel');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (const s of spec.slots) { const o = document.createElement('option'); o.textContent = s.key; sel.appendChild(o); }
+    if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    syncControlsFromSlot();
+  }
+
+  async function render() {
+    if (!state.spec) return;
+    if (state.rendering) { state.pendingRender = true; return; }
+    state.rendering = true;
+    const t0 = Date.now();
+    status('rendering…');
+    try {
+      const frames = $('frameTimes').value.split(',').map(Number).filter((n) => !isNaN(n)).slice(0, 4);
+      const data = await api('POST', '/api/brand/' + $('brandId').value.trim() + '/title-still', {
+        format: $('format').value, spec: state.spec, frames, scale: +$('scale').value
+      });
+      $('frames').innerHTML = '';
+      for (const f of data.frames) {
+        const fig = document.createElement('figure');
+        const img = document.createElement('img'); img.src = f.dataUrl;
+        const cap = document.createElement('figcaption'); cap.textContent = (f.index != null ? 't=' + (f.index / 24).toFixed(1) + 's' : '');
+        fig.append(img, cap); $('frames').appendChild(fig);
+      }
+      status('rendered in ' + (Date.now() - t0) + 'ms · plate: ' + data.plateSource, 'ok');
+    } catch (e) {
+      status('render failed: ' + e.message, 'err');
+    } finally {
+      state.rendering = false;
+      if (state.pendingRender) { state.pendingRender = false; render(); }
+    }
+  }
+
+  let debounceTimer = null;
+  const debouncedRender = () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(render, 500); };
+
+  $('loadBtn').onclick = async () => {
+    try {
+      status('loading…');
+      const data = await api('GET', '/api/brand/' + $('brandId').value.trim() + '/title-spec');
+      state.specDoc = data.titleStyleSpec || {};
+      const fmt = $('format').value;
+      setSpec(data.resolved[fmt].spec);
+      status('loaded (' + data.resolved[fmt].source + ') · fonts: ' +
+        Object.values(data.tokens.fonts).map((f) => f.family).join(', '), 'ok');
+      render();
+    } catch (e) { status('load failed: ' + e.message, 'err'); }
+  };
+  $('format').onchange = () => { if (state.spec) $('loadBtn').click(); };
+  $('renderBtn').onclick = render;
+  $('saveBtn').onclick = async () => {
+    try {
+      writeControlsToSlot();
+      const doc = { ...(state.specDoc || {}), [$('format').value]: state.spec };
+      await api('PATCH', '/api/brand/' + $('brandId').value.trim(), { titleStyleSpec: doc });
+      state.specDoc = doc;
+      status('saved ✔ — this format now renders with your spec', 'ok');
+    } catch (e) { status('save failed: ' + e.message, 'err'); }
+  };
+  $('aiBtn').onclick = async () => {
+    const reqText = $('aiRequest').value.trim();
+    if (!reqText) return;
+    try {
+      $('aiStatus').textContent = 'thinking…';
+      const kick = await api('POST', '/api/brand/' + $('brandId').value.trim() + '/title-spec/modify',
+        { request: reqText, format: $('format').value });
+      const poll = async () => {
+        const job = await api('GET', '/api/brand/' + $('brandId').value.trim() + '/title-spec/modify/' + kick.jobId);
+        if (job.status === 'pending') return setTimeout(poll, 1500);
+        if (job.status === 'failed') { $('aiStatus').textContent = '✗ ' + job.error; return; }
+        $('aiStatus').textContent = '✔ applied (attempt ' + job.attempts + ') — not saved yet';
+        setSpec(job.spec);
+        render();
+      };
+      poll();
+    } catch (e) { $('aiStatus').textContent = '✗ ' + e.message; }
+  };
+
+  // Control wiring: sliders/selects → slot → debounced re-render
+  for (const id of [...SLIDERS, 'anchor', 'align', 'shadow', 'casing', 'trType', 'trDir', 'enterAtSec', 'enterDurationSec', 'slotVisible']) {
+    $(id).addEventListener('input', () => { writeControlsToSlot(); debouncedRender(); });
+  }
+  $('slotSel').addEventListener('change', syncControlsFromSlot);
+  $('specText').addEventListener('change', () => {
+    try { setSpec(JSON.parse($('specText').value)); debouncedRender(); }
+    catch { status('spec JSON parse error (fix and blur again)', 'err'); }
+  });
+})();
+</script>
+</body>
+</html>

@@ -483,6 +483,119 @@ async function runPreviewRender(jobId, brand, opts) {
   }
 }
 
+// Representative sample meta for previews — every slot fed so operators
+// see the full composition. themeForPreview only matters to the canvas
+// engine (meta.theme); the Remotion engine styles via tokens/spec.
+function buildPreviewSampleMeta(brand, themeForPreview) {
+  return {
+    brandName:          brand.name,
+    badgeText:          'Customer Favorite',
+    productName:        'Signature Product',
+    productDescription: 'Crafted for daily wear. Made with premium materials that last.',
+    price:              '$48',
+    headline:           brand.tagline || 'Made better.',
+    cta:                'SHOP NOW',
+    ctaText:            'SHOP NOW',
+    quote:              'Highly rated for comfort, durability, and standout style.',
+    quoteSnippet:       'Highly rated for comfort and style',
+    reviewer:           'Verified customer',
+    deliveryLine:       'Ships free — arrives in 2-3 days',
+    promoText:          null,
+    benefits:           [],
+    badges:             [],
+    rating:             4.6,
+    reviewCount:        128,
+    reviewsText:        '128 reviews',
+    likes:              572,
+    endcardMode:        'product',
+    brandTagline:       brand.tagline || null,
+    brandWebsiteUrl:    brand.websiteUrl || null,
+    theme:              themeForPreview || {}
+  };
+}
+
+// Disk cache for preview plates so the fast still loop doesn't re-download
+// the brand's lifestyle image on every nudge. TTL'd; keyed by brand.
+const previewPlateCache = new Map(); // brandId → { path, source, at }
+const PREVIEW_PLATE_TTL_MS = 10 * 60 * 1000;
+async function getCachedPreviewPlate(brand, format) {
+  const key = String(brand._id);
+  const hit = previewPlateCache.get(key);
+  if (hit && Date.now() - hit.at < PREVIEW_PLATE_TTL_MS) return hit;
+  let entry = null;
+  const brandPick = await pickBrandPreviewMediaUrl(brand._id).catch(() => null);
+  if (brandPick?.url) {
+    try {
+      const p = await downloadUrlToTemp(brandPick.url);
+      entry = { path: p, source: `brand-media (${brandPick.shotType})`, at: Date.now() };
+    } catch {}
+  }
+  if (!entry) {
+    const sampleFile = await ensureSamplePlate(format).catch(() => null);
+    if (sampleFile) entry = { path: sampleFile, source: 'sample', at: Date.now() };
+  }
+  if (!entry) entry = { path: null, source: 'solid', at: Date.now() };
+  previewPlateCache.set(key, entry);
+  return entry;
+}
+
+// POST /api/brand/:id/title-still — the FAST refinement loop for the
+// Remotion engine. Synchronous: renders 1-4 still frames (no video
+// encode) from a spec — pass the spec being tweaked in the body, get
+// frames back in ~1-3s warm. Powers /title-playground.
+// Body: { format?, spec?, frames?: [seconds], scale? (0.2-1), meta? (overrides) }
+router.post('/:id/title-still', express.json({ limit: '1mb' }), async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+
+    const rawFormat = String(req.body?.format || 'vertical').toLowerCase();
+    if (!['vertical', 'feed', 'landscape'].includes(rawFormat)) {
+      return res.status(400).json({ error: `unknown format '${rawFormat}'` });
+    }
+    const { resolveSpecForBrand, buildBrandTokens } = require('../services/titleSpecService');
+    const { validateTitleSpec } = require('../services/titleSpecValidator');
+
+    let spec;
+    if (req.body?.spec != null) {
+      const check = validateTitleSpec(req.body.spec, { format: rawFormat });
+      if (!check.ok) return res.status(400).json({ error: `spec invalid: ${check.errors.slice(0, 5).join('; ')}`, errors: check.errors });
+      spec = check.normalized;
+    } else {
+      spec = resolveSpecForBrand(brand, rawFormat).spec;
+    }
+
+    const frames = (Array.isArray(req.body?.frames) ? req.body.frames : [1.5])
+      .map(Number).filter((s) => Number.isFinite(s) && s >= 0 && s <= 14).slice(0, 4);
+    if (!frames.length) return res.status(400).json({ error: 'frames must contain 1-4 timestamps in seconds' });
+    const scale = Math.min(1, Math.max(0.2, Number(req.body?.scale) || 0.5));
+
+    const meta = { ...buildPreviewSampleMeta(brand, null), ...(req.body?.meta && typeof req.body.meta === 'object' ? req.body.meta : {}) };
+    const tokens = await buildBrandTokens(brand, { specFontOverrides: spec.tokenOverrides?.fonts || {} });
+    const plate = await getCachedPreviewPlate(brand, rawFormat);
+
+    const { renderPreview } = require('../services/remotionRenderService');
+    const result = await renderPreview({
+      meta,
+      spec,
+      tokens,
+      format:         rawFormat,
+      plateImagePath: plate.path,
+      plateColor:     brand.primaryColor || '#3D3D3D',
+      scale,
+      durationSec:    8,
+      stillTimesSec:  frames,
+      includeVideo:   false
+    });
+
+    res.json({ ok: true, format: rawFormat, plateSource: plate.source, frames: result.frames, tookMs: Date.now() - t0 });
+  } catch (err) {
+    console.error('title-still failed:', err.message);
+    res.status(err.status || 500).json({ error: err.message || 'title-still failed', tookMs: Date.now() - t0 });
+  }
+});
+
 // POST /api/brand/:id/preview-script
 // Kicks off an async render, returns 202 + jobId immediately. Poll
 // GET /:id/preview-script/:jobId for status transitions.
@@ -568,26 +681,7 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
 
     const totalFrames = 192; // 8s @ 24fps — matches canonical timing convention.
 
-    const meta = {
-      brandName:          brand.name,
-      badgeText:          'Customer Favorite',
-      productName:        'Signature Product',
-      productDescription: 'Crafted for daily wear. Made with premium materials that last.',
-      price:              '$48',
-      headline:           brand.tagline || 'Made better.',
-      cta:                'SHOP NOW',
-      ctaText:            'SHOP NOW',
-      quote:              'Highly rated for comfort, durability, and standout style.',
-      reviewer:           'Verified customer',
-      deliveryLine:       'Ships free — arrives in 2-3 days',
-      benefits:           [],
-      badges:             [],
-      rating:             4.6,
-      reviewCount:        128,
-      reviewsText:        '128 reviews',
-      likes:              572,
-      theme:              themeForPreview || {}
-    };
+    const meta = buildPreviewSampleMeta(brand, themeForPreview);
 
     const crypto = require('crypto');
     const jobId = crypto.randomBytes(6).toString('hex');
@@ -699,8 +793,10 @@ router.get('/:id/title-spec', async (req, res) => {
       .filter((f) => f.endsWith('.json'))
       .map((f) => f.replace(/\.json$/, ''));
     const tokens = await buildBrandTokens(brand, {});
-    // Local font-file paths are server internals — expose family/source only.
-    const fonts = Object.fromEntries(Object.entries(tokens.fonts).map(([r, f]) => [r, { family: f.family, weight: f.weight, source: f.source }]));
+    // Local font-file paths are server internals; url here is the
+    // browser-loadable origin (gstatic/Cloudinary) for the frontend
+    // @remotion/player live preview.
+    const fonts = Object.fromEntries(Object.entries(tokens.fonts).map(([r, f]) => [r, { family: f.family, weight: f.weight, source: f.source, url: f.remoteUrl || null, fallback: f.fallback }]));
 
     res.json({
       titleStyleSpec: brand.titleStyleSpec || null,

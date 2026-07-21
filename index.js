@@ -249,6 +249,13 @@ app.post('/api/products/:id/match-amazon', requireAuth, express.json(), async (r
 
 app.get('/api/health', (req, res) => res.status(200).send('API is running ✅'));
 
+// Title playground — operator refinement tool for the Remotion titling
+// engine (fast still-frame loop against POST /api/brand/:id/title-still).
+// The page itself is static and holds no data; it calls the API with the
+// operator's own Bearer token, so serving it unauthenticated is safe.
+app.get('/title-playground', (req, res) =>
+  res.sendFile(require('path').join(__dirname, 'public', 'titlePlayground.html')));
+
 // ── MongoDB ──────────────────────────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser:    true,

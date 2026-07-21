@@ -99,7 +99,9 @@ async function resolveGoogleFamily(family, weight = 400) {
     const woff2Path = path.join(FONT_CACHE_DIR, slugify(family, effectiveWeight, 'woff2'));
     const stat = await fsp.stat(woff2Path).catch(() => null);
     if (!stat || stat.size < 1024) await downloadTo(url, woff2Path);
-    const entry = { family, weight: effectiveWeight, localPath: woff2Path, fallback: fallbackFor(family), source: 'google' };
+    // remoteUrl: browser-loadable origin (gstatic serves CORS *) — the
+    // frontend @remotion/player preview loads fonts from here directly.
+    const entry = { family, weight: effectiveWeight, localPath: woff2Path, remoteUrl: url, fallback: fallbackFor(family), source: 'google' };
     memoryCache.set(cacheKey, entry);
     return entry;
   } catch (e) {
@@ -137,6 +139,7 @@ async function resolveCustomFont(brand, custom) {
       weight: custom.weight || 400,
       style: custom.style || 'normal',
       localPath,
+      remoteUrl: custom.url, // Cloudinary raw mirror — browser-loadable
       fallback: fallbackFor(custom.family),
       source: 'custom',
     };
@@ -204,8 +207,8 @@ async function resolveBrandFonts(brand, { overrides = {}, layoutInputBrand = nul
     // requested weight when a family only ships one cut) — FontFace must be
     // registered with the file's weight so the browser matches + synthesizes.
     out[role] = entry
-      ? { family: entry.family, weight: entry.weight, style: entry.style || 'normal', url: entry.localPath, fallback: entry.fallback, source: entry.source }
-      : { family: def.family, weight: def.weight, style: 'normal', url: null, fallback: def.fallback, source: 'default' };
+      ? { family: entry.family, weight: entry.weight, style: entry.style || 'normal', url: entry.localPath, remoteUrl: entry.remoteUrl || null, fallback: entry.fallback, source: entry.source }
+      : { family: def.family, weight: def.weight, style: 'normal', url: null, remoteUrl: null, fallback: def.fallback, source: 'default' };
   }
   return out;
 }
