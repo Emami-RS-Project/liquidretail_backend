@@ -60,10 +60,13 @@ async function downloadUrlToTemp(url, extHint = '.jpg') {
   const res     = await axios.get(url, { responseType: 'stream', timeout: 20_000, maxRedirects: 5 });
   await new Promise((resolve, reject) => {
     const out = fs.createWriteStream(file);
+    // A mid-body failure rejects before the caller ever learns the path —
+    // unlink the partial file here or it leaks in tmpdir forever.
+    const fail = (err) => fs.promises.unlink(file).catch(() => {}).then(() => reject(err));
     res.data.pipe(out);
     out.on('finish', resolve);
-    out.on('error', reject);
-    res.data.on('error', reject);
+    out.on('error', fail);
+    res.data.on('error', fail);
   });
   return file;
 }

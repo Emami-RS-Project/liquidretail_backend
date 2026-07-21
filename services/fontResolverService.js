@@ -100,7 +100,8 @@ function pickLatinFace(cssText) {
 async function resolveGoogleFamily(family, weight = 400) {
   const cacheKey = `google|${family}|${weight}`;
   if (memoryCache.has(cacheKey)) return memoryCache.get(cacheKey);
-  await ensureCacheDir();
+  // Inside the failure boundary below via first use — an unwritable cache
+  // dir must degrade to the default-font path, never throw upward.
 
   const fetchCss2 = async (withWeight) => {
     const fam = encodeURIComponent(family).replace(/%20/g, '+');
@@ -110,6 +111,7 @@ async function resolveGoogleFamily(family, weight = 400) {
   };
 
   try {
+    await ensureCacheDir();
     let face;
     let effectiveWeight = weight;
     try {
@@ -167,10 +169,10 @@ function matchCustomFont(brand, family, { weight = 400, style = 'normal' } = {})
 async function resolveCustomFont(brand, custom) {
   const cacheKey = `custom|${custom.url}`;
   if (memoryCache.has(cacheKey)) return memoryCache.get(cacheKey);
-  await ensureCacheDir();
   const ext = custom.format === 'ttf' || custom.format === 'otf' ? custom.format : 'woff2';
   const localPath = path.join(FONT_CACHE_DIR, slugify(`${brand._id || 'brand'}-${custom.family}`, custom.weight || 400, ext));
   try {
+    await ensureCacheDir();
     const stat = await fsp.stat(localPath).catch(() => null);
     if (!stat || stat.size < 1024) await downloadTo(custom.url, localPath);
     const entry = {
