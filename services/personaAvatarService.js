@@ -12,10 +12,9 @@
 // shouldn't depict. Soft brand-neutral palette so personas across
 // different brands all read as a cohesive set.
 
-const OpenAI = require('openai');
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const atlasImage = require('./atlasImageService');
 
 // Build a tight portrait prompt from the persona attributes the
 // operator filled in. We deliberately drop pain points from the
@@ -61,11 +60,11 @@ async function generateAvatarForPersona(persona, brandContext = {}) {
 
   const prompt = buildPersonaPrompt(persona, brandContext);
 
-  const res = await openai.images.generate({
-    model:  'gpt-image-1',
+  // Atlas gateway (direct gpt-image-1 fallback inside).
+  const res = await atlasImage.generateImage({
     prompt,
-    size:   '1024x1024',
-    n:      1
+    size: '1024x1024',
+    meta: { stage: 'persona_avatar', service: 'personaAvatarService' }
   });
 
   const b64 = res?.data?.[0]?.b64_json;

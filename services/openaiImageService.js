@@ -1,3 +1,7 @@
+// ATLAS MIGRATION EXCEPTION (2026-07-21): stays on direct OpenAI.
+// This service does MASK INPAINTING (images.edit with a mask PNG) —
+// no Atlas edit model accepts masks (gpt-image-1.5/edit and
+// nano-banana-2/edit schemas verified live). See docs/ATLAS.md.
 const OpenAI = require('openai');
 const { toFile } = require('openai');
 const axios = require('axios');

@@ -12,10 +12,6 @@
 // prove viable the next step is a BrandCanvasVariant model that promotes
 // user-approved extractions into the template registry.
 
-const OpenAI = require('openai');
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-// Chat goes through the Atlas gateway; the OpenAI client below remains
-// ONLY for images.generate/edit until atlasImageService lands (M3).
 const { chatCompletion } = require('./atlasLlmService');
 
 const Media                = require('../models/Media');
@@ -138,12 +134,13 @@ async function generateReferenceImage(ctx, variant, aspectRatio, quality) {
   const prompt = buildGenerationPrompt(ctx, variant, aspectRatio);
   const size = RATIO_TO_SIZE[aspectRatio];
 
-  const res = await openai.images.generate({
-    model:  'gpt-image-1',
+  // Atlas gateway (direct gpt-image-1 fallback inside).
+  const atlasImage = require('./atlasImageService');
+  const res = await atlasImage.generateImage({
     prompt,
     size,
     quality,
-    n: 1
+    meta: { stage: 'ai_layout_image', service: 'aiLayoutStudioService' }
   });
 
   const b64 = res.data?.[0]?.b64_json;

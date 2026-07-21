@@ -1,3 +1,9 @@
+// ATLAS MIGRATION EXCEPTION (2026-07-21): stays on direct OpenAI.
+// whisper-1 verbose_json returns per-segment timestamps that nerService
+// depends on; Atlas serves ASR models (bytedance/seed-asr-2.0 with
+// show_utterances, xai/stt-v1 with diarize) but their timestamp output
+// shape is unverified. Revisit via seed-asr-2.0 when the legacy
+// inventory pipeline this feeds is next touched. See docs/ATLAS.md.
 const OpenAI = require('openai');
 const { toFile } = require('openai');
 

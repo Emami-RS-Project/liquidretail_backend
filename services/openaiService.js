@@ -1,5 +1,3 @@
-const OpenAI = require('openai');
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // Chat goes through the Atlas gateway; the OpenAI client below remains
 // ONLY for images.generate/edit until atlasImageService lands (M3).
 const { chatCompletion } = require('./atlasLlmService');
@@ -65,13 +63,16 @@ Return ONLY the JSON object. No markdown fences, no prose before or after.`
   // ── 2. DALL-E marketing image (best-effort, failures don't abort) ──
   productData.marketing_images = [];
   try {
-    const dalleRes = await openai.images.generate({
-      model: 'dall-e-3',
+    // Atlas gateway (direct dall-e-3 fallback inside). b64 result is kept
+    // as a data URL — legacy consumers treated these URLs as opaque.
+    const atlasImage = require('./atlasImageService');
+    const dalleRes = await atlasImage.generateImage({
       prompt: `Professional e-commerce marketing photo of a ${productData.product_title}`,
-      n: 1,
-      size: '1024x1024'
+      size: '1024x1024',
+      fallbackModel: 'dall-e-3',
+      meta: { stage: 'inventory_marketing_image', service: 'openaiService' }
     });
-    productData.marketing_images = dalleRes.data.map(img => img.url);
+    productData.marketing_images = dalleRes.url ? [dalleRes.url] : dalleRes.data.map(img => `data:image/png;base64,${img.b64_json}`);
   } catch (err) {
     console.warn(`⚠️  DALL-E marketing image failed (${err.status || ''} ${err.code || ''}): ${err.message || err} — saving product without marketing image`);
   }

@@ -19,14 +19,14 @@
 // CatalogProduct.videoSettings). A per-brand PROVIDER override
 // (videoSettings.provider, vertex-vs-atlas) is the natural future
 // extension of that same settings block.
-//   VIDEO_PROVIDER=vertex  → aiVideoReferenceService (default)
-//   VIDEO_PROVIDER=atlas   → atlasVideoService
+//   VIDEO_PROVIDER=atlas   → atlasVideoService (default — Atlas migration)
+//   VIDEO_PROVIDER=vertex  → aiVideoReferenceService (deprecated direct-Veo path, kept as fallback)
 
 const aiVideoReferenceService = require('./aiVideoReferenceService');
 const atlasVideoService       = require('./atlasVideoService');
 
 function activeProvider() {
-  return String(process.env.VIDEO_PROVIDER || 'vertex').toLowerCase();
+  return String(process.env.VIDEO_PROVIDER || 'atlas').toLowerCase();
 }
 
 // Pre-flight context hook. On Atlas this resolves the per-ad model +
