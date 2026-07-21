@@ -46,10 +46,13 @@ export function fontFamilyCss(font) {
   return `"${font.family}", ${font.fallback}`;
 }
 
-// Shadow recipes (treatment.shadow)
+// Shadow recipes (treatment.shadow). With the no-scrim standard these are
+// the ONLY thing separating type from arbitrary footage — layered starts
+// with a tight contour pass (reads on light plates) before the cinematic
+// falloff; soft carries a contour too, just lighter.
 export const TEXT_SHADOWS = {
-  layered: '0 1px 2px rgba(0,0,0,0.5), 0 3px 8px rgba(0,0,0,0.38), 0 12px 32px rgba(0,0,0,0.3)',
-  soft: '0 2px 8px rgba(0,0,0,0.35)',
+  layered: '0 0 2px rgba(0,0,0,0.6), 0 2px 4px rgba(0,0,0,0.55), 0 6px 16px rgba(0,0,0,0.4), 0 20px 48px rgba(0,0,0,0.35)',
+  soft: '0 0 1px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.45), 0 4px 12px rgba(0,0,0,0.35)',
   none: 'none',
 };
 

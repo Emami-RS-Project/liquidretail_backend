@@ -103,7 +103,8 @@
           "position": {
             "anchor": "upperThird",
             "align": "left",
-            "maxWidthPct": 0.9
+            "maxWidthPct": 0.9,
+            "offsetY": 0.055
           },
           "timing": {
             "enterAtSec": 0.2,

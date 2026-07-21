@@ -32,8 +32,8 @@
           "ctaBg": "#000000",
           "ctaText": "#FFFFFF",
           "scrim": "#FFFFFF",
-          "textPrimary": "#111111",
-          "textSecondary": "#6B6B6B",
+          "textPrimary": "#FFFFFF",
+          "textSecondary": "#E6E6E6",
           "stars": "#111111",
           "badgeBg": "#111111",
           "badgeText": "#FFFFFF"
@@ -338,8 +338,8 @@
           "ctaBg": "#000000",
           "ctaText": "#FFFFFF",
           "scrim": "#FFFFFF",
-          "textPrimary": "#111111",
-          "textSecondary": "#6B6B6B",
+          "textPrimary": "#FFFFFF",
+          "textSecondary": "#E6E6E6",
           "stars": "#111111",
           "badgeBg": "#111111",
           "badgeText": "#FFFFFF"
@@ -610,8 +610,8 @@
           "ctaBg": "#000000",
           "ctaText": "#FFFFFF",
           "scrim": "#FFFFFF",
-          "textPrimary": "#111111",
-          "textSecondary": "#6B6B6B",
+          "textPrimary": "#FFFFFF",
+          "textSecondary": "#E6E6E6",
           "stars": "#111111",
           "badgeBg": "#111111",
           "badgeText": "#FFFFFF"

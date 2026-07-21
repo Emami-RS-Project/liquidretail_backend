@@ -4,3 +4,4 @@ uploads/
 *.log
 .cache/
 scripts/out/
+services/brandScripts/assets/webfonts/
