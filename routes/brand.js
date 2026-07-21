@@ -524,6 +524,7 @@ const previewPlateCache = new Map(); // brandId|format (stand-in) or ad:adId (re
 const PREVIEW_PLATE_TTL_MS = 10 * 60 * 1000;
 async function getCachedPreviewPlate(brand, format) {
   const key = `${brand._id}|${format}`;
+  sweepPreviewPlateCache();
   const hit = previewPlateCache.get(key);
   if (hit && Date.now() - hit.at < PREVIEW_PLATE_TTL_MS) return hit;
   let entry = null;
@@ -548,20 +549,47 @@ async function getCachedPreviewPlate(brand, format) {
   return entry;
 }
 
+// Drop expired entries and unlink their temp files. Keyed-replacement
+// alone can't do this: an ad plate whose veoVideoUrl changed lands under
+// a NEW key, and idle brand/ad entries would otherwise pin full mp4s in
+// tmpdir for the process lifetime. A 60s grace past the TTL keeps a
+// just-fetched entry's file alive through any in-flight render copy.
+function sweepPreviewPlateCache() {
+  const now = Date.now();
+  for (const [k, v] of previewPlateCache) {
+    if (!v || v.promise || now - v.at < PREVIEW_PLATE_TTL_MS + 60_000) continue;
+    previewPlateCache.delete(k);
+    if (v.temp && v.path) require('fs').promises.unlink(v.path).catch(() => {});
+  }
+}
+
 // Ad-footage plates: stills render over the ad's REAL base video, so what
 // the operator refines against is exactly what the visibility scan judges.
-// Throws on download failure — the caller falls back to the brand plate.
+// Keyed by adId + veoVideoUrl — a regenerated base video must never serve
+// the previous cut's frames/scan. Concurrent misses share one in-flight
+// download (promise sentinel) so multi-tab refinement can't orphan losing
+// temp files. Rejects on download failure — caller falls back to the
+// brand plate.
 async function getCachedAdPlate(ad) {
-  const key = `ad:${ad._id}`;
+  const key = `ad:${ad._id}|${ad.veoVideoUrl}`;
+  sweepPreviewPlateCache();
   const hit = previewPlateCache.get(key);
+  if (hit?.promise) return hit.promise;
   if (hit && Date.now() - hit.at < PREVIEW_PLATE_TTL_MS) return hit;
-  const p = await downloadUrlToTemp(ad.veoVideoUrl, '.mp4');
-  const entry = { path: p, source: 'ad-video', at: Date.now(), temp: true, video: true };
-  if (hit?.temp && hit.path && hit.path !== entry.path) {
-    require('fs').promises.unlink(hit.path).catch(() => {});
-  }
-  previewPlateCache.set(key, entry);
-  return entry;
+  // Replacing an expired entry: unlink its file NOW — overwriting the Map
+  // slot with the promise sentinel would otherwise drop the only reference.
+  if (hit?.temp && hit.path) require('fs').promises.unlink(hit.path).catch(() => {});
+  const promise = (async () => {
+    const p = await downloadUrlToTemp(ad.veoVideoUrl, '.mp4');
+    const entry = { path: p, source: 'ad-video', at: Date.now(), temp: true, video: true };
+    previewPlateCache.set(key, entry);
+    return entry;
+  })().catch((e) => {
+    previewPlateCache.delete(key);
+    throw e;
+  });
+  previewPlateCache.set(key, { promise, at: Date.now() });
+  return promise;
 }
 
 // POST /api/brand/:id/title-still — the FAST refinement loop for the
