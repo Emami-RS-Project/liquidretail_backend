@@ -240,14 +240,21 @@ const brandSchema = new mongoose.Schema({
   isDemo:    { type: Boolean, default: false, index: true },
   apifyDemo: {
     igHandle:      { type: String, default: null },  // '@' stripped, lowercase
-    shopifyUrl:    { type: String, default: null },  // e.g. 'https://store.example.com'
+    // Catalog/store URL for ingestion. Named 'shopifyUrl' for historical
+    // reasons but reused as the generic target URL for the
+    // 'generic-sitemap' method too (non-Shopify sites — it's a plain
+    // string with no Shopify-specific validation). e.g. 'https://store.example.com'
+    shopifyUrl:    { type: String, default: null },
     lastSyncedAt:  { type: Date,   default: null },
     // Catalog ingest method: 'shopify-direct' (free, documented public
-    // endpoints — default when shopifyUrl is set) | 'apify' (paid actor).
-    // IG posts ride Apify in both modes. Typed subdoc — a value missing
-    // from this schema is silently dropped by strict mode, so keep this
-    // field list in sync with salesDemosService.normalizeMethod.
-    method:        { type: String, enum: ['shopify-direct', 'apify'], default: null },
+    // Shopify endpoints — default when shopifyUrl is set) | 'apify' (paid
+    // actor) | 'generic-sitemap' (client-agnostic XML-sitemap + schema.org
+    // JSON-LD scraper for non-Shopify server-rendered stores; uses
+    // shopifyUrl as the target). IG posts ride Apify in all modes. Typed
+    // subdoc — a value missing from this schema is silently dropped by
+    // strict mode, so keep this field list in sync with
+    // salesDemosService.normalizeMethod.
+    method:        { type: String, enum: ['shopify-direct', 'apify', 'generic-sitemap'], default: null },
     // Cooperative cancellation flag. /abort sets true; the ingest
     // service resets it to false at the start of every sync and
     // checks it between records, bailing early when flipped mid-run.

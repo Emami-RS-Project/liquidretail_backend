@@ -46,12 +46,15 @@ function normalizeIgHandle(raw) {
 
 // Catalog ingest method for demo brands. 'shopify-direct' (default when
 // a shopifyUrl is present) hits the public products.json path; 'apify'
-// keeps the legacy Apify shopify-scraper. Invalid values → null so
-// callers can ignore them without clobbering the stored method.
+// keeps the legacy Apify shopify-scraper; 'generic-sitemap' runs the
+// client-agnostic XML-sitemap + JSON-LD scraper for non-Shopify
+// server-rendered stores (reuses shopifyUrl as the target URL). Invalid
+// values → null so callers can ignore them without clobbering the stored
+// method. Keep this allowlist in sync with the Brand.apifyDemo.method enum.
 function normalizeMethod(raw) {
   if (!raw) return null;
   const m = String(raw).trim().toLowerCase();
-  return (m === 'shopify-direct' || m === 'apify') ? m : null;
+  return (m === 'shopify-direct' || m === 'apify' || m === 'generic-sitemap') ? m : null;
 }
 
 // Normalize a Shopify store URL to a canonical form. Accepts bare
