@@ -1377,8 +1377,11 @@ function projectAd(ad, full = false, extras = {}) {
     height:             ad.height,
     bytes:              ad.bytes,
     durationMs:         ad.durationMs,
+    // ctaText is the Meta CTA-button-type source (metaAdsPushService reads
+    // this raw field directly) — never conflate with the on-video overlay
+    // text. The overlay override is copy.cta_text, already exposed above.
     copy:               ad.copy || {},
-    ctaText:            (ad.copy && ad.copy.cta_text) || ad.ctaText,
+    ctaText:            ad.ctaText,
     ctaUrl:             ad.ctaUrl,
     ctaUrlParams:       ad.ctaUrlParams,
     status:             ad.status,
