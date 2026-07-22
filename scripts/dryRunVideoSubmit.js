@@ -71,7 +71,7 @@ const { buildVeoPrompt, aspectRatioForPlatformFormat, promptProfileFor } = requi
   });
 
   const referenceCount = resolveReferenceImageCount({ brand, product });
-  const imageUrls = buildReferenceImages({ media, product, catalogMedias, aspectRatio, caps, referenceCount });
+  const imageUrls = buildReferenceImages({ media, product, catalogMedias, aspectRatio, caps, referenceCount, brand });
   const hasProductAnchor = imageUrls.length >= 2;
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
 

@@ -323,7 +323,7 @@ async function warmup() {
  * contract: returns { finalPath, tempDir, timings } — the caller uploads
  * finalPath and removes tempDir.
  */
-async function renderTitles({ videoUrl, meta, spec, tokens, format, brandName = null, adId = null }) {
+async function renderTitles({ videoUrl, meta, spec, tokens, format, brandName = null, adId = null, placementMode = null, brand = null }) {
   if (!videoUrl) throw new Error('renderTitles: videoUrl required');
   if (!spec) throw new Error('renderTitles: spec required');
   const compositionId = COMPOSITION_BY_FORMAT[format];
@@ -359,12 +359,19 @@ async function renderTitles({ videoUrl, meta, spec, tokens, format, brandName = 
       const fps = probe.fps;
       const durationInFrames = Math.max(1, Math.round(probe.durationSec * fps));
 
-      // Plate intelligence: contrast + keep-out hints from the actual
-      // footage (TITLE_PLATE_SCAN=basic|gemini|off). Never fatal.
+      // Placement: 'canonical' skips plate scan (static titles); 'content'
+      // runs analyzePlate (TITLE_PLATE_SCAN depth). Kill switch TITLE_PLATE_SCAN=off
+      // forces canonical via resolveTitlePlacementMode.
+      const { analyzePlate, resolveTitlePlacementMode } = require('./plateIntelService');
+      const placement = resolveTitlePlacementMode({ placementMode, brand });
+      timings.placementMode = placement;
       t = Date.now();
-      const { analyzePlate } = require('./plateIntelService');
-      const plateHints = await analyzePlate(platePath, { durationSec: probe.durationSec });
+      let plateHints = null;
+      if (placement === 'content') {
+        plateHints = await analyzePlate(platePath, { durationSec: probe.durationSec });
+      }
       timings.plateScanMs = Date.now() - t;
+      console.log(`🎬 remotion[ad=${adId || '?'}]: placement=${placement} format=${format}`);
 
       // Brand logo: served to the render browser from the asset server
       // (the browser has no external egress).
@@ -446,7 +453,7 @@ async function renderTitles({ videoUrl, meta, spec, tokens, format, brandName = 
  * plateHints, fps, durationSec } to preserve the existing preview contract,
  * and optionally still frames.
  */
-async function renderPreview({ meta, spec, tokens, format, plateImagePath = null, plateVideoPath = null, plateColor = '#3D3D3D', scale = 0.5, durationSec = 8, stillTimesSec = null, includeVideo = true }) {
+async function renderPreview({ meta, spec, tokens, format, plateImagePath = null, plateVideoPath = null, plateColor = '#3D3D3D', scale = 0.5, durationSec = 8, stillTimesSec = null, includeVideo = true, placementMode = null, brand = null }) {
   const compositionId = COMPOSITION_BY_FORMAT[format];
   if (!compositionId) throw new Error(`renderPreview: unknown format '${format}'`);
 
@@ -469,25 +476,31 @@ async function renderPreview({ meta, spec, tokens, format, plateImagePath = null
       let fps = 24;
       let plate = { color: plateColor };
       let plateHints = null;
-      const { analyzePlate } = require('./plateIntelService');
+      const { analyzePlate, resolveTitlePlacementMode } = require('./plateIntelService');
+      const placement = resolveTitlePlacementMode({ placementMode, brand });
+      timings.placementMode = placement;
       if (plateVideoPath) {
         // Real footage: renderStill + OffthreadVideo composites titles onto
         // the exact source frame at each timestamp, fps/duration follow the
-        // probe (so specTimeScale previews true pacing), and the visibility
-        // scan sees the same plate production would — mirrors renderTitles.
+        // probe (so specTimeScale previews true pacing). Content mode runs
+        // the visibility scan on the same plate production would.
         const target = path.join(jobDir, 'plate.mp4');
         await fsp.copyFile(plateVideoPath, target);
         const probe = await probePlate(target);
         fps = probe.fps;
         durationSec = probe.durationSec;
         plate = { videoUrl: `${base}/jobs/${jobId}/plate.mp4` };
-        plateHints = await analyzePlate(target, { durationSec: probe.durationSec });
+        if (placement === 'content') {
+          plateHints = await analyzePlate(target, { durationSec: probe.durationSec });
+        }
       } else if (plateImagePath) {
         const ext = path.extname(plateImagePath) || '.jpg';
         const target = path.join(jobDir, `plate${ext}`);
         await fsp.copyFile(plateImagePath, target);
         plate = { imageUrl: `${base}/jobs/${jobId}/plate${ext}` };
-        plateHints = await analyzePlate(plateImagePath, { isImage: true });
+        if (placement === 'content') {
+          plateHints = await analyzePlate(plateImagePath, { isImage: true });
+        }
       }
       const durationInFrames = Math.max(1, Math.round(durationSec * fps));
 
@@ -528,9 +541,9 @@ async function renderPreview({ meta, spec, tokens, format, plateImagePath = null
         timeoutInMilliseconds: RENDER_TIMEOUT_MS,
       });
 
-      // plateHints/fps/durationSec ride along so callers (title-still) can
-      // hand the visibility-scan data to the operator UI.
-      const result = { timings, plateHints, fps, durationSec };
+      // plateHints/fps/durationSec/placementMode ride along so callers
+      // (title-still) can hand scan data + mode to the operator UI.
+      const result = { timings, plateHints, fps, durationSec, placementMode: placement };
 
       if (stillTimesSec && stillTimesSec.length) {
         t = Date.now();

@@ -822,7 +822,7 @@ async function resolveBrandRenderer(brand, ad) {
 // Which title compositor renders this ad. Chain (most specific wins):
 //   custom styleScript for the ad's format → 'canvas' (forced — bespoke
 //   scripts only exist in the canvas sandbox, logged)
-//   → Brand.videoSettings.titlingEngine → TITLING_ENGINE env → 'canvas'
+//   → Brand.videoSettings.titlingEngine → TITLING_ENGINE env → 'remotion'
 // Unknown values warn and fall through (same defensive idiom as
 // atlasVideoService.resolveVideoModel).
 function resolveTitlingEngine(brand, ad) {
@@ -840,7 +840,7 @@ function resolveTitlingEngine(brand, ad) {
     if (val === 'canvas' || val === 'remotion') return { engine: val, source, format };
     console.warn(`⚠️  resolveTitlingEngine: unknown engine '${val}' from ${source} — falling through`);
   }
-  return { engine: 'canvas', source: 'default', format };
+  return { engine: 'remotion', source: 'default', format };
 }
 
 // Shared tail of both engines: upload the rendered mp4, stamp
@@ -897,7 +897,9 @@ async function renderWithRemotionAndSave({ ad, brand, format }) {
     layoutInputBrand = li?.input?.brand || null;
   } catch {}
   const tokens = await buildBrandTokens(brand, { layoutInputBrand, specFontOverrides: spec.tokenOverrides?.fonts || {} });
-  console.log(`🎨 brandScript[ad=${ad._id}]: engine=remotion format=${format} spec=${source} fonts=${['heading', 'body', 'quote'].map(r => `${r}:${tokens.fonts[r].family}(${tokens.fonts[r].source})`).join(' ')}`);
+  const { resolveTitlePlacementMode } = require('./plateIntelService');
+  const placement = resolveTitlePlacementMode({ brand });
+  console.log(`🎨 brandScript[ad=${ad._id}]: engine=remotion format=${format} spec=${source} placement=${placement} fonts=${['heading', 'body', 'quote'].map(r => `${r}:${tokens.fonts[r].family}(${tokens.fonts[r].source})`).join(' ')}`);
 
   const result = await renderTitles({
     videoUrl:  ad.veoVideoUrl,
@@ -906,7 +908,9 @@ async function renderWithRemotionAndSave({ ad, brand, format }) {
     tokens,
     format,
     brandName: brand?.name,
-    adId:      String(ad._id)
+    adId:      String(ad._id),
+    brand,
+    placementMode: placement,
   });
   return uploadRenderAndStamp({ ad, finalPath: result.finalPath, tempDir: result.tempDir, timings: result.timings });
 }

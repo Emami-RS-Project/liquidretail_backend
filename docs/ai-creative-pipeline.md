@@ -134,6 +134,30 @@ frontend/client/
   rs-component-variants.css      ← CSS for rs-<role>-<variant> classes
 ```
 
+## Transparent product images / website background
+
+**Problem.** Product images scraped from client sites often have transparent backgrounds. AI video/image models receive those seeds after Cloudinary transforms; alpha is treated as black, so ads render as product-on-black instead of product-on-brand-surface.
+
+**Capture.** `Brand.websiteBackground` (hex like `#FFFFFF`, nullable) is filled during homepage enrichment in `brandEnrichmentService` via a static-HTML/CSS heuristic (`extractWebsiteBackground`: body/html inline style, then `body{...}` / `html{...}` rules in `<style>` tags). It is **never** inferred from meta `theme-color` (brand accent, not page surface) and never GPT-guessed. Respects `curatedFields`. Logged with source like other enrichment fields. (FLAG: static heuristic — headless browser not coupled here.)
+
+**Helper.** `utils/websiteBackground.js` → `websiteBackgroundHex(brand)` returns normalized `RRGGBB` (no `#`) for Cloudinary `b_rgb:`, defaulting to `FFFFFF` when absent/invalid. Also re-exported from `brandEnrichmentService`.
+
+**Transforms that apply `b_rgb` (flatten-then-resize).** Image-source seed crops only:
+
+| Function | File | Notes |
+|---|---|---|
+| `deriveAspectCroppedImageUrl` | `services/aiVideoReferenceService.js` | Veo image-seed track |
+| `cropImageUrlForAspect` (image branch) | `services/atlasVideoService.js` | Atlas reference stack via `buildReferenceImages` |
+
+Video-source branches unchanged (no alpha).
+
+**Known NOT-yet-covered surfaces (follow-ups):**
+
+- HTML template `panel_bg` / `body` for static image ads
+- Remotion plate fallback `#3D3D3D`
+- Legacy `videoCompositeService` `b_lpad,b_black` chain
+- `layoutInputService` `c_crop` URLs
+
 ## Validation gates by phase
 
 Phase 0 establishes baseline. Subsequent phases each have a measurable gate before merging the next:

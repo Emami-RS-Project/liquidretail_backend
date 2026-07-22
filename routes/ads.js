@@ -1178,6 +1178,11 @@ router.post('/:id/regenerate', express.json(), async (req, res) => {
   }
 });
 
+// PATCH /api/ads/:id — status and/or per-ad copy overrides.
+// Body may contain status and/or copy; at least one required.
+// copy keys: headline, cta_text, quote, productName, productPrice
+// (string ≤300 trimmed, empty→null, or null). Unknown keys → 400.
+// Dotted paths so omitted copy keys are left untouched.
 router.patch('/:id', express.json(), async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
@@ -1188,13 +1193,51 @@ router.patch('/:id', express.json(), async (req, res) => {
       if (e.status === 404) return res.status(404).json({ error: e.message });
       throw e;
     }
-    const { status } = req.body || {};
-    if (!AD_STATUSES.includes(status)) {
-      return res.status(400).json({ error: `status must be one of: ${AD_STATUSES.join(', ')}` });
+    const body = req.body || {};
+    const hasStatus = Object.prototype.hasOwnProperty.call(body, 'status');
+    const hasCopy = Object.prototype.hasOwnProperty.call(body, 'copy');
+    if (!hasStatus && !hasCopy) {
+      return res.status(400).json({ error: 'body must include status and/or copy' });
     }
+
+    const update = { updatedAt: new Date() };
+
+    if (hasStatus) {
+      const { status } = body;
+      if (!AD_STATUSES.includes(status)) {
+        return res.status(400).json({ error: `status must be one of: ${AD_STATUSES.join(', ')}` });
+      }
+      update.status = status;
+    }
+
+    if (hasCopy) {
+      const COPY_KEYS = new Set(['headline', 'cta_text', 'quote', 'productName', 'productPrice']);
+      const copy = body.copy;
+      if (typeof copy !== 'object' || copy === null || Array.isArray(copy)) {
+        return res.status(400).json({ error: 'copy must be an object' });
+      }
+      for (const key of Object.keys(copy)) {
+        if (!COPY_KEYS.has(key)) {
+          return res.status(400).json({ error: `copy: unknown key '${key}' — allowed: ${[...COPY_KEYS].join(', ')}` });
+        }
+        const v = copy[key];
+        if (v === null) {
+          update[`copy.${key}`] = null;
+        } else if (typeof v === 'string') {
+          const trimmed = v.trim();
+          if (trimmed.length > 300) {
+            return res.status(400).json({ error: `copy.${key} must be ≤300 characters` });
+          }
+          update[`copy.${key}`] = trimmed.length === 0 ? null : trimmed;
+        } else {
+          return res.status(400).json({ error: `copy.${key} must be a string or null` });
+        }
+      }
+    }
+
     const ad = await Ad.findOneAndUpdate(
       { _id: req.params.id, brandId },
-      { status, updatedAt: new Date() },
+      { $set: update },
       { new: true }
     ).lean();
     if (!ad) return res.status(404).json({ error: 'ad not found' });
@@ -1335,7 +1378,7 @@ function projectAd(ad, full = false, extras = {}) {
     bytes:              ad.bytes,
     durationMs:         ad.durationMs,
     copy:               ad.copy || {},
-    ctaText:            ad.ctaText,
+    ctaText:            (ad.copy && ad.copy.cta_text) || ad.ctaText,
     ctaUrl:             ad.ctaUrl,
     ctaUrlParams:       ad.ctaUrlParams,
     status:             ad.status,

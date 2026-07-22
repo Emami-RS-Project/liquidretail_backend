@@ -246,6 +246,7 @@ router.patch('/:id', express.json(), async (req, res) => {
 
     const editable = ['name', 'websiteUrl', 'tagline', 'summary', 'logoUrl',
                       'primaryColor', 'secondaryColor', 'accentColor', 'fontColor',
+                      'websiteBackground',
                       'fontFamily', 'tone', 'hashtags', 'tags', 'demographics',
                       'brandSafety', 'styleOverrides', 'styleScript',
                       'styleScriptVertical', 'styleScriptLandscape', 'styleTheme',
@@ -255,6 +256,7 @@ router.patch('/:id', express.json(), async (req, res) => {
     // unknown slugs here (nicer UX than the render-time warn-and-fall-
     // through in resolveVideoModel). Shape: { model, modelByCanvas,
     // referenceImageCount, titlingEngine } — see models/Brand.js.
+    // Validate the INCOMING object before the shallow-merge write below.
     if (Object.prototype.hasOwnProperty.call(req.body || {}, 'videoSettings') && req.body.videoSettings != null) {
       const err = validateVideoSettings(req.body.videoSettings);
       if (err) return res.status(400).json({ error: err });
@@ -274,6 +276,21 @@ router.patch('/:id', express.json(), async (req, res) => {
       if (!loadPresetFile(req.body.titleStylePreset)) {
         return res.status(400).json({ error: `unknown titleStylePreset '${req.body.titleStylePreset}'` });
       }
+    }
+
+    // websiteBackground: normalize to '#RRGGBB' when non-empty; invalid → 400.
+    // Empty/null still clears via the isEmpty path below.
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'websiteBackground')
+        && req.body.websiteBackground != null
+        && req.body.websiteBackground !== '') {
+      const { normalizeWebsiteBackgroundHex } = require('../utils/websiteBackground');
+      const normalized = normalizeWebsiteBackgroundHex(req.body.websiteBackground);
+      if (!normalized) {
+        return res.status(400).json({
+          error: 'websiteBackground must be a valid hex color (#RGB or #RRGGBB)',
+        });
+      }
+      req.body.websiteBackground = normalized;
     }
 
     // Entry log for style-related mutations so we can trace why a
@@ -306,7 +323,23 @@ router.patch('/:id', express.json(), async (req, res) => {
       if (Object.prototype.hasOwnProperty.call(req.body || {}, k)) {
         const v = req.body[k];
         const isEmpty = v == null || v === '' || (Array.isArray(v) && v.length === 0);
-        brand[k] = isEmpty ? (Array.isArray(v) ? [] : null) : v;
+        if (isEmpty) {
+          brand[k] = Array.isArray(v) ? [] : null;
+        } else if (
+          // SHALLOW MERGE for videoSettings: multiple UI cards
+          // (VideoModelCard, TitleStudioCard) each PATCH with their own
+          // possibly-stale copy; replace semantics silently drops keys
+          // saved by the other card. Explicit nulls in v still overwrite;
+          // whole-field null/empty still clears via the isEmpty path.
+          k === 'videoSettings'
+          && v && typeof v === 'object' && !Array.isArray(v)
+          && brand.videoSettings && typeof brand.videoSettings === 'object'
+          && !Array.isArray(brand.videoSettings)
+        ) {
+          brand.videoSettings = { ...(brand.videoSettings || {}), ...v };
+        } else {
+          brand[k] = v;
+        }
         if (MIXED_FIELDS.has(k)) brand.markModified(k);
         // Clearing a field is a request to RE-enrich it, not lock the
         // empty value as curated. Setting a value is curation.
@@ -382,6 +415,301 @@ router.post('/:id/render-script', express.json(), async (req, res) => {
   }
 });
 
+// In-memory async job store for batch re-title. Same Netlify ~26s proxy
+// cap that forces preview-script async: live re-title takes tens of
+// seconds per ad, so POST returns 202+jobId and the client polls GET
+// /:id/retitle-videos/:jobId. dryRun stays synchronous (selection only).
+// Auto-cleaned 5 min after done/failed so the map doesn't grow.
+const retitleJobs = new Map();
+const RETITLE_JOB_TTL_MS = 5 * 60 * 1000;
+// Cost/RAM guard — remotion renders are ~1.5-3GB peak and Cloudinary
+// uploads are billable. When adIds is omitted, clamp eligible set to
+// this cap (oldest-first) and report truncated+totalMatched.
+const MAX_RETITLE_BATCH = 500;
+
+function reapRetitleJob(jobId) {
+  setTimeout(() => retitleJobs.delete(jobId), RETITLE_JOB_TTL_MS);
+}
+
+// Concurrency-capped pool runner. Writes progress into retitleJobs so
+// the poller sees {done,total} and accumulating results/errors. Per-ad
+// failures never abort the batch; only a thrown outer error → failed.
+async function runRetitleJob(jobId, brand, eligible, concurrency, seedErrors) {
+  const Ad = require('../models/Ad');
+  const { renderBrandScriptAndSave } = require('../services/brandScriptExecutor');
+  const results = [];
+  const errors = seedErrors ? seedErrors.slice() : [];
+  let cursor = 0;
+  let done = 0;
+  const total = eligible.length;
+
+  const prev0 = retitleJobs.get(jobId) || {};
+  retitleJobs.set(jobId, {
+    ...prev0,
+    status:   'running',
+    progress: { done: 0, total },
+    results,
+    errors: errors.length ? errors : undefined,
+  });
+
+  try {
+    async function worker() {
+      while (cursor < eligible.length) {
+        const i = cursor++;
+        const adDoc = eligible[i];
+        const id = String(adDoc._id);
+        console.log(`🎬 retitle-videos[brand=${brand._id}]: (${i + 1}/${eligible.length}) ad=${id} starting`);
+        try {
+          // Re-load as a Mongoose doc so updateOne in the save path works
+          // cleanly, and renderBrandScriptAndSave can read fields.
+          const ad = await Ad.findById(adDoc._id);
+          if (!ad) {
+            results.push({ id, ok: false, error: 'ad disappeared' });
+          } else {
+            const result = await renderBrandScriptAndSave({ ad, brand });
+            if (result?.skipped) {
+              results.push({ id, ok: true, skipped: true, renderUrl: ad.renderUrl || null });
+              console.log(`🎬 retitle-videos[brand=${brand._id}]: ad=${id} skipped (${result.reason || 'no-chrome'})`);
+            } else {
+              results.push({ id, ok: true, renderUrl: result.renderUrl || null });
+              console.log(`🎬 retitle-videos[brand=${brand._id}]: ad=${id} ok`);
+            }
+          }
+        } catch (err) {
+          results.push({ id, ok: false, error: err.message || String(err) });
+          console.warn(`🎬 retitle-videos[brand=${brand._id}]: ad=${id} failed (${err.message})`);
+        }
+        done += 1;
+        const prev = retitleJobs.get(jobId) || {};
+        retitleJobs.set(jobId, {
+          ...prev,
+          status:   'running',
+          progress: { done, total },
+          results:  results.slice(),
+          errors:   errors.length ? errors : undefined,
+        });
+      }
+    }
+
+    const poolSize = Math.min(concurrency, Math.max(1, eligible.length));
+    // Empty eligible: still mark done (count=0) without spinning workers.
+    if (eligible.length > 0) {
+      await Promise.all(Array.from({ length: poolSize }, () => worker()));
+    }
+
+    const prev = retitleJobs.get(jobId) || {};
+    retitleJobs.set(jobId, {
+      ...prev,
+      status:      'done',
+      progress:    { done: total, total },
+      results,
+      errors:      errors.length ? errors : undefined,
+      completedAt: Date.now(),
+    });
+    reapRetitleJob(jobId);
+    console.log(`🎬 retitle-videos[${jobId}]: DONE brand=${brand._id} ${done}/${total}`);
+  } catch (err) {
+    console.error(`🎬 retitle-videos[${jobId}]: FAILED — ${err.message}`);
+    const prev = retitleJobs.get(jobId) || {};
+    retitleJobs.set(jobId, {
+      ...prev,
+      status:      'failed',
+      error:       err.message || 'retitle-videos failed',
+      progress:    { done, total },
+      results,
+      errors:      errors.length ? errors : undefined,
+      completedAt: Date.now(),
+    });
+    reapRetitleJob(jobId);
+  }
+}
+
+// POST /api/brand/:id/retitle-videos
+// Batch re-title: run the brand's titling path over each video ad's
+// veoVideoUrl (untitled base) and stamp Ad.renderUrl. Same tenant +
+// ownership pattern as render-script. One failure never aborts the batch.
+// Body: { adIds?: string[], dryRun?: boolean=false, concurrency?: number=2 (1..4) }
+// dryRun → sync response. Live → 202 + jobId; poll GET /:id/retitle-videos/:jobId.
+router.post('/:id/retitle-videos', express.json(), async (req, res) => {
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id }));
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+
+    const body = req.body || {};
+    const dryRun = body.dryRun === true;
+    let concurrency = Number(body.concurrency);
+    if (!Number.isFinite(concurrency)) concurrency = 2;
+    concurrency = Math.min(4, Math.max(1, Math.floor(concurrency)));
+
+    const Ad = require('../models/Ad');
+    const Media = require('../models/Media');
+    const mongoose = require('mongoose');
+
+    // Eligible set: this brand's video ads with a retained base plate.
+    const baseFilter = {
+      brandId: brand._id,
+      kind: 'video',
+      veoVideoUrl: { $nin: [null, ''] },
+    };
+
+    const errors = [];
+    let ads;
+    if (body.adIds != null) {
+      if (!Array.isArray(body.adIds)) {
+        return res.status(400).json({ error: 'adIds must be an array of strings' });
+      }
+      const requested = body.adIds.map((id) => String(id));
+      const validIds = requested.filter((id) => mongoose.isValidObjectId(id));
+      for (const id of requested) {
+        if (!mongoose.isValidObjectId(id)) {
+          errors.push({ id, error: 'invalid id' });
+        }
+      }
+      ads = validIds.length
+        ? await Ad.find({ ...baseFilter, _id: { $in: validIds } }).lean()
+        : [];
+      const found = new Set(ads.map((a) => String(a._id)));
+      for (const id of validIds) {
+        if (found.has(id)) continue;
+        // Unknown, wrong kind, no plate, or foreign brand — verify ownership
+        // so we can report accurately.
+        const foreign = await Ad.findById(id).select('_id brandId kind veoVideoUrl mediaId').lean();
+        if (!foreign) {
+          errors.push({ id, error: 'ad not found' });
+          continue;
+        }
+        if (String(foreign.brandId) !== String(brand._id)) {
+          // ad→media→brand ownership check for cross-brand ids
+          const media = foreign.mediaId
+            ? await Media.findById(foreign.mediaId).select('brandId').lean()
+            : null;
+          if (!media || String(media.brandId) !== String(brand._id)) {
+            errors.push({ id, error: 'ad does not belong to this brand' });
+            continue;
+          }
+        }
+        if (foreign.kind !== 'video') {
+          errors.push({ id, error: 'ad is not kind=video' });
+          continue;
+        }
+        if (!foreign.veoVideoUrl) {
+          errors.push({ id, error: 'ad has no veoVideoUrl' });
+          continue;
+        }
+        errors.push({ id, error: 'ad not eligible' });
+      }
+    } else {
+      // Oldest-first for stable truncate order when the batch is capped.
+      ads = await Ad.find(baseFilter).sort({ createdAt: 1, _id: 1 }).lean();
+    }
+
+    // Ownership belt-and-suspenders: ad → media → brand must match.
+    let eligible = [];
+    for (const ad of ads) {
+      const media = await Media.findById(ad.mediaId).select('brandId').lean();
+      if (!media || String(media.brandId) !== String(brand._id)) {
+        errors.push({ id: String(ad._id), error: 'ad does not belong to this brand' });
+        continue;
+      }
+      eligible.push(ad);
+    }
+
+    // When adIds is omitted, clamp to MAX_RETITLE_BATCH (cost/RAM guard).
+    // Oldest-first is already the query order above; re-sort for safety
+    // if ownership filtering reordered nothing but the set was large.
+    let truncated = false;
+    let totalMatched = eligible.length;
+    if (body.adIds == null && eligible.length > MAX_RETITLE_BATCH) {
+      eligible = eligible
+        .slice()
+        .sort((a, b) => {
+          const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+          const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+          if (ta !== tb) return ta - tb;
+          return String(a._id).localeCompare(String(b._id));
+        })
+        .slice(0, MAX_RETITLE_BATCH);
+      truncated = true;
+    }
+
+    if (dryRun) {
+      return res.json({
+        count: eligible.length,
+        ads: eligible.map((a) => ({
+          id: String(a._id),
+          createdAt: a.createdAt || null,
+          renderUrl: a.renderUrl || null,
+          veoVideoUrl: a.veoVideoUrl || null,
+        })),
+        errors: errors.length ? errors : undefined,
+        ...(truncated ? { truncated: true, totalMatched } : {}),
+      });
+    }
+
+    // Live path is async — re-title is tens of seconds per ad and
+    // Netlify's proxy caps responses at ~26s (same reason as preview-script).
+    const crypto = require('crypto');
+    const jobId = crypto.randomBytes(6).toString('hex');
+    retitleJobs.set(jobId, {
+      status:    'pending',
+      startedAt: Date.now(),
+      brand:     String(brand._id),
+      count:     eligible.length,
+      progress:  { done: 0, total: eligible.length },
+      results:   [],
+      errors:    errors.length ? errors : undefined,
+    });
+    console.log(`🎬 retitle-videos[${jobId}]: brand=${brand._id} count=${eligible.length} concurrency=${concurrency}${truncated ? ` truncated from ${totalMatched}` : ''}`);
+
+    // Fire-and-forget. Runner flips the job to done/failed; per-ad errors
+    // land in results, never crash the process.
+    runRetitleJob(jobId, brand, eligible, concurrency, errors);
+
+    res.status(202).json({
+      ok: true,
+      jobId,
+      status: 'pending',
+      count: eligible.length,
+      ...(truncated ? { truncated: true, totalMatched } : {}),
+    });
+  } catch (err) {
+    console.error('retitle-videos failed:', err);
+    res.status(err.status || 500).json({ error: err.message || 'retitle-videos failed' });
+  }
+});
+
+// GET /api/brand/:id/retitle-videos/:jobId — poll target for the async
+// batch kicked off by POST. Returns:
+//   { status: 'pending'|'running'|'done'|'failed',
+//     count?, progress?: {done,total}, results?, errors?, error?, elapsedMs }
+// 404 when the brand is not tenant-owned, the job doesn't exist, was
+// reaped after 5 min, or brand mismatch.
+router.get('/:id/retitle-videos/:jobId', async (req, res) => {
+  try {
+    // Tenant-scoped first so a leaked jobId cannot be polled cross-tenant.
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).select('_id').lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+
+    const job = retitleJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'retitle job not found or expired' });
+    // Cross-brand safety: reject reads for the wrong brand id.
+    if (job.brand && String(job.brand) !== String(brand._id)) {
+      return res.status(404).json({ error: 'retitle job not found' });
+    }
+    res.json({
+      status:    job.status,
+      count:     job.count,
+      progress:  job.progress,
+      results:   job.results,
+      errors:    job.errors,
+      error:     job.error,
+      elapsedMs: Date.now() - (job.startedAt || Date.now()),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'retitle job poll failed' });
+  }
+});
+
 // In-memory async job store for preview renders. Netlify's proxy caps
 // responses at ~26s; render + encode routinely runs 15-40s (varies with
 // script complexity and Render CPU pressure). So the POST kicks off a
@@ -399,7 +727,7 @@ function reapPreviewJob(jobId) {
 // previewJobs.set so the poller sees each state transition. Any thrown
 // error is captured into { status: 'failed', error }.
 async function runPreviewRender(jobId, brand, opts) {
-  const { styleScript, useCanonical, canonicalFormat, meta, dims, totalFrames, engine, spec, tokens } = opts;
+  const { styleScript, useCanonical, canonicalFormat, meta, dims, totalFrames, engine, spec, tokens, placementMode } = opts;
   let brandPlateTempPath = null;
   try {
     // Plate resolution — brand image first, then picsum sample.
@@ -436,7 +764,9 @@ async function runPreviewRender(jobId, brand, opts) {
         plateImagePath,
         plateColor:     brand.primaryColor || '#3D3D3D',
         scale:          0.5,
-        durationSec:    totalFrames / 24
+        durationSec:    totalFrames / 24,
+        placementMode,
+        brand,
       });
     } else {
       const { previewBrandScriptAsVideo } = require('../services/brandScriptExecutor');
@@ -596,7 +926,8 @@ async function getCachedAdPlate(ad) {
 // Remotion engine. Synchronous: renders 1-4 still frames (no video
 // encode) from a spec — pass the spec being tweaked in the body, get
 // frames back in ~1-3s warm. Powers /title-playground.
-// Body: { format?, spec?, frames?: [seconds], scale? (0.2-1), meta? (overrides) }
+// Body: { format?, spec?, frames?: [seconds], scale? (0.2-1), meta? (overrides),
+//         placementMode?: 'canonical'|'content', adId? }
 router.post('/:id/title-still', express.json({ limit: '1mb' }), async (req, res) => {
   const t0 = Date.now();
   try {
@@ -606,6 +937,14 @@ router.post('/:id/title-still', express.json({ limit: '1mb' }), async (req, res)
     const rawFormat = String(req.body?.format || 'vertical').toLowerCase();
     if (!['vertical', 'feed', 'landscape'].includes(rawFormat)) {
       return res.status(400).json({ error: `unknown format '${rawFormat}'` });
+    }
+
+    let requestPlacement = null;
+    if (req.body?.placementMode != null && String(req.body.placementMode).trim() !== '') {
+      requestPlacement = String(req.body.placementMode).trim();
+      if (!['canonical', 'content'].includes(requestPlacement)) {
+        return res.status(400).json({ error: "placementMode must be 'canonical' or 'content'" });
+      }
     }
 
     // Optional ad-footage mode: stills render over this ad's actual base
@@ -686,7 +1025,9 @@ router.post('/:id/title-still', express.json({ limit: '1mb' }), async (req, res)
       scale,
       durationSec:    8,
       stillTimesSec:  frames,
-      includeVideo:   false
+      includeVideo:   false,
+      placementMode:  requestPlacement,
+      brand,
     });
 
     res.json({
@@ -697,6 +1038,7 @@ router.post('/:id/title-still', express.json({ limit: '1mb' }), async (req, res)
       fps:              result.fps ?? null,
       plateDurationSec: result.durationSec ?? null,
       plateHints:       result.plateHints ?? null,
+      placementMode:    result.placementMode ?? null,
       scanSampleTimes:  (result.plateHints?.samples || []).map((s) => s.atSec),
       tookMs:           Date.now() - t0
     });
@@ -750,6 +1092,14 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
     let engine = bodyScript
       ? 'canvas'
       : bodyEngine || resolveTitlingEngine(brand, fakeAd).engine;
+
+    let requestPlacement = null;
+    if (req.body?.placementMode != null && String(req.body.placementMode).trim() !== '') {
+      requestPlacement = String(req.body.placementMode).trim();
+      if (!['canonical', 'content'].includes(requestPlacement)) {
+        return res.status(400).json({ error: "placementMode must be 'canonical' or 'content'" });
+      }
+    }
 
     let styleScript = null;
     let themeForPreview = null;
@@ -810,7 +1160,7 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
     // finishes; errors are captured into the job entry, never crash.
     runPreviewRender(jobId, brand, {
       styleScript, useCanonical, canonicalFormat: format, meta, dims, totalFrames,
-      engine, spec: previewSpec, tokens: previewTokens
+      engine, spec: previewSpec, tokens: previewTokens, placementMode: requestPlacement,
     });
 
     res.status(202).json({ ok: true, jobId, status: 'pending', format, engine });
@@ -930,10 +1280,13 @@ router.get('/:id/title-spec', async (req, res) => {
     // @remotion/player live preview.
     const fonts = Object.fromEntries(Object.entries(tokens.fonts).map(([r, f]) => [r, { family: f.family, weight: f.weight, source: f.source, url: f.remoteUrl || null, fallback: f.fallback }]));
 
+    const { resolveTitlePlacementMode } = require('../services/plateIntelService');
     res.json({
       titleStyleSpec: brand.titleStyleSpec || null,
       titleStylePreset: brand.titleStylePreset || null,
-      titlingEngine: brand.videoSettings?.titlingEngine || process.env.TITLING_ENGINE || 'canvas',
+      // keep in sync with resolveTitlingEngine default
+      titlingEngine: brand.videoSettings?.titlingEngine || process.env.TITLING_ENGINE || 'remotion',
+      titlePlacementMode: resolveTitlePlacementMode({ brand }),
       brand: brandInfo,
       resolved,
       presets,
@@ -1689,6 +2042,7 @@ router.get('/:id/style', async (req, res) => {
     // actual render, so the visible plate matches the render plate.
     const previewPickPromise = pickBrandPreviewMediaUrl(brand._id).catch(() => null);
     const previewPick = await previewPickPromise;
+    const { resolveTitlePlacementMode } = require('../services/plateIntelService');
 
     res.json({
       overrides:        brand.styleOverrides || null,
@@ -1703,7 +2057,9 @@ router.get('/:id/style', async (req, res) => {
       titleStyleSpec:   brand.titleStyleSpec || null,
       titleStylePreset: brand.titleStylePreset || null,
       customFonts:      brand.customFonts || [],
-      titlingEngine:    brand.videoSettings?.titlingEngine || process.env.TITLING_ENGINE || 'canvas'
+      // keep in sync with resolveTitlingEngine default
+      titlingEngine:    brand.videoSettings?.titlingEngine || process.env.TITLING_ENGINE || 'remotion',
+      titlePlacementMode: resolveTitlePlacementMode({ brand }),
     });
   } catch (err) {
     res.status(500).json({ error: err.message || 'style lookup failed' });
@@ -1916,6 +2272,7 @@ function serializeBrand(b) {
     secondaryColor: b.secondaryColor || null,
     accentColor:  b.accentColor || null,
     fontColor:    b.fontColor || null,
+    websiteBackground: b.websiteBackground || null,
     fontFamily:   b.fontFamily || null,
     fontSource:   b.fontSource || null,
     tone:         b.tone || [],

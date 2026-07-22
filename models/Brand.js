@@ -49,6 +49,12 @@ const brandSchema = new mongoose.Schema({
   primaryColor:   String,
   secondaryColor: String,
   accentColor:    String,
+  // Page/surface background captured from the brand's own website
+  // (hex like '#FFFFFF'). Used to flatten transparent product imagery
+  // onto a real brand surface before AI seed transforms (Cloudinary
+  // b_rgb). Nullable — absent brands default to white at transform time.
+  // NEVER inferred from meta theme-color (that is brand accent, not surface).
+  websiteBackground: String,
   // Brand's canonical text/font color — what they use for body and
   // headline copy on their own site. Captured from Brandfetch's
   // `text`-type color when present; GPT-suggested otherwise.
@@ -213,15 +219,17 @@ const brandSchema = new mongoose.Schema({
   //   { model:               '<atlasVideoService.MODEL_CAPS slug>' | null,
   //     modelByCanvas:       { '<platformFormat or aspectRatio>': '<slug>' } | null,
   //     referenceImageCount: 1–7 | null,    // default 3 (primary + 2 alts)
-  //     titlingEngine:       'canvas' | 'remotion' | null }
+  //     titlingEngine:       'canvas' | 'remotion' | null,
+  //     titlePlacementMode:  'canonical' | 'content' | null }
   // Resolution chain (most specific wins): CatalogProduct.videoSettings
   // → Brand.videoSettings → ATLAS_VIDEO_MODEL env → built-in default.
   // Slugs are validated against MODEL_CAPS on PATCH and again at render
   // time (unknown slugs warn + fall through). titlingEngine picks the
   // title compositor per brand (chain: custom styleScript forces canvas →
-  // brand titlingEngine → TITLING_ENGINE env → 'canvas'); validated in
-  // atlasVideoService.validateVideoSettings. Mixed field — route
-  // handlers must markModified('videoSettings') on writes.
+  // brand titlingEngine → TITLING_ENGINE env → 'remotion'); validated in
+  // atlasVideoService.validateVideoSettings. titlePlacementMode: request >
+  // brand > 'canonical' (TITLE_PLATE_SCAN=off forces canonical). Mixed
+  // field — route handlers must markModified('videoSettings') on writes.
   videoSettings: { type: mongoose.Schema.Types.Mixed, default: null },
 
   // Sales demo brand. Owned by the "Sales Demos" Advertiser and
