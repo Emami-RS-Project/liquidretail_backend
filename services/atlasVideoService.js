@@ -414,11 +414,23 @@ function buildVideoSegmentUrl(originalUrl, aspectRatio, durationSec = 8) {
   return originalUrl.replace('/video/upload/', `/video/upload/${chain}/`);
 }
 
-function cropImageUrlForAspect(originalUrl, aspectRatio) {
+// FLAG: image branch applies b_rgb:<websiteBackground> BEFORE c_fill so
+// transparent product PNGs flatten onto the brand surface, then resize
+// (flatten-then-resize). b_rgb is a no-op without an opaque output format —
+// Cloudinary only bakes background when flattening to non-alpha or padding;
+// f_jpg forces that flatten so b_rgb actually applies (URL extension can
+// stay as-is; f_jpg wins). brandOrHex is Brand-like or raw color; defaults
+// white. Video-source branch is unchanged (no alpha).
+function cropImageUrlForAspect(originalUrl, aspectRatio, brandOrHex = null) {
   if (!originalUrl) return null;
   if (originalUrl.includes('/image/upload/')) {
     const { w, h } = imageDimsForAspect(aspectRatio);
-    return originalUrl.replace('/image/upload/', `/image/upload/c_fill,w_${w},h_${h},g_auto,q_auto:good/`);
+    const { websiteBackgroundHex } = require('../utils/websiteBackground');
+    const bg = websiteBackgroundHex(brandOrHex);
+    return originalUrl.replace(
+      '/image/upload/',
+      `/image/upload/b_rgb:${bg},c_fill,w_${w},h_${h},g_auto,f_jpg,q_auto:good/`
+    );
   }
   // Video source → extract a representative still at target aspect.
   // Uses VIDEO_START_OFFSET (2s in) rather than so_0 to skip typical
@@ -554,10 +566,13 @@ function validateVideoSettings(vs) {
   if (vs.titlingEngine != null && vs.titlingEngine !== '' && !['canvas', 'remotion'].includes(vs.titlingEngine)) {
     return "videoSettings.titlingEngine must be 'canvas' or 'remotion'";
   }
+  if (vs.titlePlacementMode != null && vs.titlePlacementMode !== '' && !['canonical', 'content'].includes(vs.titlePlacementMode)) {
+    return "videoSettings.titlePlacementMode must be 'canonical' or 'content'";
+  }
   return null;
 }
 
-function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio, caps = null, referenceCount = null }) {
+function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio, caps = null, referenceCount = null, brand = null }) {
   const requested = Number.isFinite(referenceCount) && referenceCount >= 1
     ? Math.min(referenceCount, MAX_REFERENCE_IMAGE_COUNT)
     : DEFAULT_REFERENCE_IMAGE_COUNT;
@@ -568,7 +583,8 @@ function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio,
   const push = (sourceUrl) => {
     if (!sourceUrl || seen.has(sourceUrl)) return;
     seen.add(sourceUrl);
-    const cropped = cropImageUrlForAspect(sourceUrl, aspectRatio);
+    // Pass brand so image-source seeds flatten onto websiteBackground.
+    const cropped = cropImageUrlForAspect(sourceUrl, aspectRatio, brand);
     if (cropped) urls.push(cropped);
   };
 
@@ -1077,7 +1093,7 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   // is actually transmitted.
   const referenceCount = resolveReferenceImageCount({ brand, product });
   const imageUrls = buildReferenceImages({
-    media, product, catalogMedias, aspectRatio, caps, referenceCount
+    media, product, catalogMedias, aspectRatio, caps, referenceCount, brand
   });
   if (!imageUrls.length) throw new Error(`atlasVideo[ad=${ad._id}]: no reference images available`);
 

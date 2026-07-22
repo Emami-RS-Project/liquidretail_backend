@@ -373,7 +373,7 @@ router.get('/:id/ads-detail', async (req, res) => {
         : false,
       posterUrl:      a.posterUrl || null,
       headline:       a.copy?.headline || null,
-      ctaText:        a.ctaText || null,
+      ctaText:        (a.copy && a.copy.cta_text) || a.ctaText || null,
       generatedAt:    a.generatedAt ? new Date(a.generatedAt).toISOString() : null,
       metaSyncStatus: a.metaSyncStatus || null,
       metaAdId:       a.metaAdId || null,

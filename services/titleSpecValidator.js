@@ -44,9 +44,9 @@
 //       spring: { damping, stiffness, mass } | null   // pop/slide physics
 //     },
 //     treatment: {
-//       scrim: 'frosted'|'solid'|'card'|'none',
+//       scrim: 'frosted'|'solid'|'card'|'none',   // default 'none' (no-scrim standard)
 //       scrimOpacity: 0.7,          // 0..1
-//       shadow: 'layered'|'soft'|'none',
+//       shadow: 'layered'|'soft'|'none',          // default 'layered'
 //       casing: 'upper'|'title'|'none',
 //       fontRole: 'heading'|'body'|'quote',
 //       weight: 700,                // 100..900
@@ -309,8 +309,8 @@ function validateTitleSpec(spec, { format = 'feed' } = {}) {
 
       // treatment
       const tm = isPlainObject(s.treatment) ? s.treatment : {};
-      const scrim = tm.scrim ?? 'solid';
-      const shadow = tm.shadow ?? 'soft';
+      const scrim = tm.scrim ?? 'none';
+      const shadow = tm.shadow ?? 'layered';
       const casing = tm.casing ?? 'none';
       const fontRole = tm.fontRole ?? 'body';
       if (!SCRIMS.includes(scrim)) { err(`${where}.treatment.scrim must be one of ${SCRIMS.join('|')}`); continue; }

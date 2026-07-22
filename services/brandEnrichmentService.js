@@ -20,6 +20,10 @@ const axios = require('axios');
 const Brand = require('../models/Brand');
 const { lookupBrand: brandfetchLookup } = require('./brandfetchService');
 const { lookupBrandReviews } = require('./providers/geminiSearchProvider');
+const {
+  websiteBackgroundHex,
+  normalizeWebsiteBackgroundHex
+} = require('../utils/websiteBackground');
 
 const { chatCompletion } = require('./atlasLlmService');
 const MAX_HTML_CHARS = 25000;
@@ -164,6 +168,13 @@ async function runEnrichment(brand, brandId, run = null) {
   // Tier 2 helpers — run on whatever HTML we got (may be empty).
   const scrapedLogoUrl     = extractAppleTouchIcon(html, brand.websiteUrl);
   const scrapedFontFamily  = extractGoogleFontsFamily(html);
+  // FLAG: static-HTML/CSS heuristic for page surface color (NOT theme-color).
+  // headlessScrapeService is product-ingest + SHOPIFY_HEADLESS_RENDER-gated —
+  // too heavy to couple into every brand enrichment just for body bg.
+  // Heuristic: body/html inline style → body{...} rules inside <style> tags.
+  // Linked stylesheets are NOT fetched here (not "already fetched"); returns null
+  // rather than guessing a dark color from meta theme-color.
+  const scrapedWebsiteBackground = extractWebsiteBackground(html);
 
   const rawTextContent = extractTextFromHtml(html).slice(0, MAX_HTML_CHARS);
   // JS-rendered SPAs (Next.js, Shopify Hydrogen, etc.) leave almost
@@ -322,6 +333,15 @@ async function runEnrichment(brand, brandId, run = null) {
     [brand.fontColor, 'existing']
   );
   setIf('fontColor', fontColorVal, fontColorSrc);
+
+  // Surface background for transparent product flatten (Cloudinary b_rgb).
+  // Scraped only — never theme-color, never GPT guess (dark accents would
+  // reintroduce product-on-black). Respects curatedFields via setIf.
+  let [websiteBgVal, websiteBgSrc] = pick(
+    [scrapedWebsiteBackground, 'scraped'],
+    [normalizeWebsiteBackgroundHex(brand.websiteBackground), 'existing']
+  );
+  setIf('websiteBackground', websiteBgVal, websiteBgSrc);
 
   let [taglineVal, taglineSrc] = pick(
     [enrichment.tagline, 'gpt'],
@@ -496,6 +516,74 @@ function extractGoogleFontsFamily(html) {
   return decodeURIComponent(m[1]).replace(/\+/g, ' ');
 }
 
+// Extract a CSS color value from an inline style string (background-color
+// preferred, then background if it's a solid color not a url()/gradient).
+function extractStyleBackgroundColor(styleStr) {
+  if (!styleStr || typeof styleStr !== 'string') return null;
+  const bc = styleStr.match(/background-color\s*:\s*([^;]+)/i);
+  if (bc) {
+    const hex = normalizeWebsiteBackgroundHex(bc[1].trim());
+    if (hex) return hex;
+  }
+  const bg = styleStr.match(/(?:^|;)\s*background\s*:\s*([^;]+)/i);
+  if (bg) {
+    const val = bg[1].trim();
+    // Gradients / images are not solid surfaces.
+    if (/url\s*\(|gradient\s*\(/i.test(val)) return null;
+    // Take the first token that looks like a color.
+    const tokens = val.split(/\s+/);
+    for (const tok of tokens) {
+      const hex = normalizeWebsiteBackgroundHex(tok);
+      if (hex) return hex;
+    }
+    // rgb(...) may be split across commas — try whole value
+    const hexWhole = normalizeWebsiteBackgroundHex(val);
+    if (hexWhole) return hexWhole;
+  }
+  return null;
+}
+
+// FLAG: static-HTML heuristic for brand.websiteBackground (page surface).
+// Order: <body style> → <html style> → body{...} / html{...} in <style> tags.
+// Does NOT use meta theme-color. Does NOT launch headless Chrome.
+// Returns normalized '#RRGGBB' or null.
+function extractWebsiteBackground(html) {
+  if (!html || typeof html !== 'string') return null;
+
+  const openTagStyle = (tagName) => {
+    const re = new RegExp(`<${tagName}\\b([^>]*)>`, 'i');
+    const m = html.match(re);
+    if (!m) return null;
+    const styleM = m[1].match(/\bstyle\s*=\s*["']([^"']+)["']/i);
+    return styleM ? extractStyleBackgroundColor(styleM[1]) : null;
+  };
+
+  const fromBody = openTagStyle('body');
+  if (fromBody) return fromBody;
+  const fromHtml = openTagStyle('html');
+  if (fromHtml) return fromHtml;
+
+  // Inline <style> blocks only (linked CSS not already fetched on this path).
+  const styleBlockRe = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+  let sm;
+  while ((sm = styleBlockRe.exec(html)) !== null) {
+    const css = sm[1]
+      // strip CSS comments
+      .replace(/\/\*[\s\S]*?\*\//g, ' ');
+    // Prefer body rules, then html rules. Match simple selectors only.
+    const rules = [
+      ...css.matchAll(/(?:^|[{},;])\s*body\s*\{([^}]+)\}/gi),
+      ...css.matchAll(/(?:^|[{},;])\s*html\s*\{([^}]+)\}/gi)
+    ];
+    for (const rm of rules) {
+      const hex = extractStyleBackgroundColor(rm[1]);
+      if (hex) return hex;
+    }
+  }
+
+  return null;
+}
+
 // Last-resort logo fallback: Google's favicon proxy. Returns a 128px PNG
 // regardless of whether the site has a real favicon, so it always
 // resolves but caps at low resolution.
@@ -571,4 +659,11 @@ function dedupe(arr) {
   return out;
 }
 
-module.exports = { enrichBrandFromUrl };
+module.exports = {
+  enrichBrandFromUrl,
+  // Re-exported so callers can `require('./brandEnrichmentService').websiteBackgroundHex`
+  // without knowing the util path; transform services import the util directly.
+  websiteBackgroundHex,
+  normalizeWebsiteBackgroundHex,
+  extractWebsiteBackground
+};

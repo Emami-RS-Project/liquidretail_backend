@@ -1,12 +1,13 @@
 // Per-format safe zones (fractions of W/H) and anchor geometry.
 //
-// vertical (9:16 Reels/Shorts/Stories): top band covers the platform's
-// caption/handle chrome (≈204px of 1920 + margin — same constant the canvas
-// DR-v1 canonical used); bottom band keeps clear of the action rail /
-// caption block. feed (4:5/1:1) and landscape (16:9) mirror the canvas
-// canonicals' padding.
+// vertical (9:16 Reels/Shorts/Stories): Meta Reels community-consensus clear
+// zones — top 14%, bottom 35% (sides 7.5%). Official Meta guidance is
+// qualitative + the Ads Manager on-canvas guardrail; the disclaimer/legal
+// text rule is bottom 40%. Bottom-anchored stacks end at ~65% height
+// (1 - 0.35) — intended. feed (4:5/1:1) and landscape (16:9) mirror the
+// canvas canonicals' padding.
 export const SAFE_ZONES = {
-  vertical: { top: 0.121, bottom: 0.16, left: 0.075, right: 0.075 },
+  vertical: { top: 0.14, bottom: 0.35, left: 0.075, right: 0.075 },
   feed: { top: 0.06, bottom: 0.06, left: 0.065, right: 0.06 },
   landscape: { top: 0.1, bottom: 0.1, left: 0.075, right: 0.075 },
 };
@@ -14,6 +15,8 @@ export const SAFE_ZONES = {
 // Vertical placement of each anchor's stack container, as a fraction of H
 // for the container's top edge. 'bottom' is handled with flex-end instead
 // (its top value is where the bottom-anchored zone begins).
+// lowerThird 0.54 remains above the vertical bottom safe band (0.35 →
+// content ends by 0.65); ANCHOR_TOP + stackContainerStyle clamps still hold.
 export const ANCHOR_TOP = {
   top: null, // = safe.top
   upperThird: 0.135, // canvas top_scrim_editorial contentTop

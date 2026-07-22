@@ -76,14 +76,24 @@ function deriveFirstFrameUrl(videoUrl, aspectRatio) {
 }
 
 // Track 2: aspect-cropped image from a Cloudinary image URL.
-function deriveAspectCroppedImageUrl(imageUrl, aspectRatio) {
+// FLAG: b_rgb only bakes the background when Cloudinary flattens to a
+// non-alpha output (or pads). f_jpg forces that flatten so b_rgb actually
+// applies; URL extension can stay as-is (f_jpg wins). Order is
+// flatten-then-resize (b_rgb before c_fill) to avoid edge halos / baked-in
+// black. brandOrHex: Brand-like object or raw color; defaults to white.
+function deriveAspectCroppedImageUrl(imageUrl, aspectRatio, brandOrHex = null) {
   if (!imageUrl?.includes('/image/upload/')) return imageUrl;
+  const { websiteBackgroundHex } = require('../utils/websiteBackground');
+  const bg = websiteBackgroundHex(brandOrHex);
   const arParam =
     aspectRatio === '9:16' ? 'ar_9:16' :
     aspectRatio === '16:9' ? 'ar_16:9' :
     aspectRatio === '4:5'  ? 'ar_4:5'  :
                              'ar_1:1';
-  return imageUrl.replace('/image/upload/', `/image/upload/c_fill,${arParam},w_1024,q_auto:good/`);
+  return imageUrl.replace(
+    '/image/upload/',
+    `/image/upload/b_rgb:${bg},c_fill,${arParam},w_1024,f_jpg,q_auto:good/`
+  );
 }
 
 // Fetches a URL and returns { base64, mimeType, bytes }. Validates that
@@ -266,18 +276,20 @@ async function generateForAd({ ad, operatorPrompt = null }) {
   const veoAspect = veoAspectForCanvas(aspectRatio);
   const track     = media.fileType === 'video' ? 1 : 2;
 
-  const refUrl = track === 1
-    ? deriveFirstFrameUrl(media.fileUrl, veoAspect)
-    : deriveAspectCroppedImageUrl(media.fileUrl, veoAspect);
-
-  if (!refUrl) throw new Error(`Cannot derive reference image for ad ${ad._id} (fileType=${media.fileType})`);
-
+  // Brand needed before image-seed crop so transparent PNGs flatten onto
+  // websiteBackground (video-seed first-frame path has no alpha).
   const [brand, product, layoutInput] = await Promise.all([
     Brand.findById(media.brandId).lean(),
     ad.productId ? CatalogProduct.findById(ad.productId).lean() : null,
     LayoutInputArtifact.findOne({ mediaId: media._id, productId: ad.productId || null })
       .sort({ createdAt: -1 }).lean()
   ]);
+
+  const refUrl = track === 1
+    ? deriveFirstFrameUrl(media.fileUrl, veoAspect)
+    : deriveAspectCroppedImageUrl(media.fileUrl, veoAspect, brand);
+
+  if (!refUrl) throw new Error(`Cannot derive reference image for ad ${ad._id} (fileType=${media.fileType})`);
 
   let concept = null;
   if (ad.conceptId && ad.conceptArtifactId) {

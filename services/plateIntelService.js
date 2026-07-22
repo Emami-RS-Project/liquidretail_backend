@@ -41,12 +41,14 @@ const BAND_FOR_ANCHOR = {
   bottom: 'bottom',
 };
 
-// Vertical extents of each band (fractions of H) — aligned with the
-// composition's anchor geometry (safeZones.js).
+// Vertical extents of each band (fractions of H). Aligned with vertical
+// safe zones in remotion/lib/safeZones.js (top 0.14 / bottom 0.35 clear;
+// titles cannot render below 0.65 H). Top band starts at safe.top;
+// bottom band ends at the safe-zone floor (1 - 0.35 = 0.65).
 const BANDS = {
-  top: [0.06, 0.38],
+  top: [0.14, 0.40],
   middle: [0.38, 0.6],
-  bottom: [0.54, 0.92],
+  bottom: [0.40, 0.65],
 };
 
 async function extractFrames(platePath, times, outDir) {
@@ -128,8 +130,23 @@ async function semanticScan(frames, hints) {
 }
 
 /**
+ * Resolve title placement mode.
+ * Precedence: per-request placementMode > brand.videoSettings.titlePlacementMode > 'canonical'.
+ * TITLE_PLATE_SCAN='off' forces canonical globally (kill switch — no plate scan).
+ * In 'content' mode, scan depth still comes from TITLE_PLATE_SCAN ('basic'|'gemini').
+ */
+function resolveTitlePlacementMode({ placementMode = null, brand = null } = {}) {
+  if ((process.env.TITLE_PLATE_SCAN || 'basic').toLowerCase() === 'off') return 'canonical';
+  if (placementMode === 'canonical' || placementMode === 'content') return placementMode;
+  const brandMode = brand?.videoSettings?.titlePlacementMode;
+  if (brandMode === 'canonical' || brandMode === 'content') return brandMode;
+  return 'canonical';
+}
+
+/**
  * Analyze a plate (video file or single image) and return plateHints.
  * Never throws — titling must render even when analysis fails.
+ * Only called when placement mode is 'content'; scan depth via TITLE_PLATE_SCAN.
  */
 async function analyzePlate(platePath, { durationSec = 8, isImage = false } = {}) {
   const mode = (process.env.TITLE_PLATE_SCAN || 'basic').toLowerCase();
@@ -173,4 +190,4 @@ async function analyzePlate(platePath, { durationSec = 8, isImage = false } = {}
   }
 }
 
-module.exports = { analyzePlate, BAND_FOR_ANCHOR };
+module.exports = { analyzePlate, resolveTitlePlacementMode, BAND_FOR_ANCHOR };
