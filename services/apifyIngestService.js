@@ -48,9 +48,11 @@ async function syncBrandApify(brandId) {
 
   const cfg = brand.apifyDemo || {};
   // Catalog source method: 'shopify-direct' (default) hits the public
-  // products.json path; 'apify' keeps the legacy Apify shopify-scraper.
-  // IG stays on Apify regardless (hybrid).
-  const method = cfg.method === 'apify' ? 'apify' : 'shopify-direct';
+  // products.json path; 'apify' keeps the legacy Apify shopify-scraper;
+  // 'generic-sitemap' runs the client-agnostic XML-sitemap + schema.org
+  // JSON-LD scraper for non-Shopify server-rendered stores (uses
+  // cfg.shopifyUrl as the target). IG stays on Apify regardless (hybrid).
+  const method = ['apify', 'generic-sitemap'].includes(cfg.method) ? cfg.method : 'shopify-direct';
   const out = { ok: true, brandId: String(brand._id), ig: null, shopify: null, method, _run: run };
   const t0 = Date.now();
 
@@ -65,7 +67,27 @@ async function syncBrandApify(brandId) {
   if (cfg.shopifyUrl && !stillAborted) {
     run.stage('shopify catalog');
     try {
-      if (method === 'shopify-direct') {
+      if (method === 'generic-sitemap') {
+        // Kill-switch: on by default (the method is already per-brand
+        // opt-in); set GENERIC_CATALOG_ENABLED=false to hard-disable.
+        if (process.env.GENERIC_CATALOG_ENABLED === 'false') {
+          out.shopify = { ok: false, reason: 'generic-sitemap method is disabled (GENERIC_CATALOG_ENABLED=false)' };
+        } else {
+          const r = await require('./genericCatalogIngestService')
+            .syncBrandGenericCatalog(brand, run, { isBrandAborted });
+          out.shopify = {
+            added:   r.productsUpserted,
+            videos:  r.videosIngested || 0,
+            reviews: r.reviewsCaptured || 0,
+            errors:  (r.errors || []).length,
+            // Surface a resolver-level failure reason (e.g. "site does not
+            // expose XML sitemaps") so the Sales UI shows WHY nothing came
+            // back, instead of a silent empty catalog.
+            ...(r.ok === false ? { ok: false, reason: r.reason } : {})
+          };
+          if (r.cancelled) stillAborted = true;
+        }
+      } else if (method === 'shopify-direct') {
         const r = await require('./shopifyPublicIngestService')
           .syncBrandShopifyDirect(brand, run, { isBrandAborted });
         out.shopify = {
@@ -109,6 +131,11 @@ async function syncBrandApify(brandId) {
 // generic OperationRun cancel when a run handle is provided.
 async function isBrandAborted(brandId, run = null) {
   if (run) {
+    // Prefer the NON-throwing, non-closing cancel read: run.checkpoint()
+    // closes the handle on its first cancel observation, after which it
+    // resolves (not rejects) and this check would wrongly report "not
+    // aborted". isCancelRequested() keeps reporting the cancel reliably.
+    if (typeof run.isCancelRequested === 'function' && run.isCancelRequested()) return true;
     const cancelled = await run.checkpoint().then(() => false).catch(() => true);
     if (cancelled) return true;
   }
