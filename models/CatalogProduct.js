@@ -126,6 +126,14 @@ const catalogProductSchema = new mongoose.Schema({
   //     referenceImageCount: 1–7 | null }
   videoSettings: mongoose.Schema.Types.Mixed,
 
+  // Per-product titling override — same per-format shape as
+  // Brand.titleStyleSpec ({ vertical?, feed?, landscape? }, each a full
+  // validated spec incl. slots/positions/tokenOverrides.colors+fonts). Sits
+  // in the resolution cascade ABOVE the brand spec, BELOW a per-ad override
+  // (services/titleSpecService.resolveSpec). null = inherit brand. Clear it
+  // to revert to brand. Mixed → callers MUST markModified('titleStyleSpec').
+  titleStyleSpec: mongoose.Schema.Types.Mixed,
+
   // Provenance + raw payload for debugging / future field unlocks.
   // Limited to ~8KB so a chatty source doesn't bloat the doc.
   rawData:      mongoose.Schema.Types.Mixed,

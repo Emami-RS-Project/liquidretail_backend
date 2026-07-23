@@ -229,10 +229,19 @@ async function resolveBrandFonts(brand, { overrides = {}, layoutInputBrand = nul
   const theme = brand?.styleTheme || {};
   const scanned = brand?.fontFamily || layoutInputBrand?.font_family || null;
 
+  // One shared brand family used by EVERY role that has no explicit per-role
+  // font. Without this, `quote` skipped `scanned` and fell straight to serif
+  // Lora while heading/body used the brand's sans family — an unrequested
+  // serif+sans mix on every render. Now: explicit per-role font → shared
+  // brand family → the curated role default (Playfair/Inter/Lora, an
+  // intentional pairing used only when the brand has NO family at all, so
+  // the three still work together rather than mixing arbitrarily).
+  const sharedFamily = scanned || theme.bodyFontFamily || theme.headingFontFamily || null;
+
   const wanted = {
-    heading: overrides.heading?.family || theme.headingFontFamily || scanned || DEFAULT_ROLE_FONTS.heading.family,
-    body: overrides.body?.family || theme.bodyFontFamily || scanned || DEFAULT_ROLE_FONTS.body.family,
-    quote: overrides.quote?.family || theme.quoteFontFamily || DEFAULT_ROLE_FONTS.quote.family,
+    heading: overrides.heading?.family || theme.headingFontFamily || sharedFamily || DEFAULT_ROLE_FONTS.heading.family,
+    body: overrides.body?.family || theme.bodyFontFamily || sharedFamily || DEFAULT_ROLE_FONTS.body.family,
+    quote: overrides.quote?.family || theme.quoteFontFamily || sharedFamily || DEFAULT_ROLE_FONTS.quote.family,
   };
   const weights = {
     heading: overrides.heading?.weight || 700,
