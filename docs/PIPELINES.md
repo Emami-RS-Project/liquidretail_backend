@@ -1,6 +1,6 @@
 # LiquidRetail Backend — Background & Creative Pipelines
 
-This is the engineer reference for every background and creative pipeline in the LiquidRetail backend (Node/Express + Mongoose). For each pipeline: what triggers it, its stages, which models/APIs it calls (and rough cost), which env knobs tune it, how progress/cancel works, and what consumes its output. Facts are code-verified as of **2026-07-22**. Prefer this doc over tribal memory; when in doubt, open the cited files.
+This is the engineer reference for every background and creative pipeline in the LiquidRetail backend (Node/Express + Mongoose). For each pipeline: what triggers it, its stages, which models/APIs it calls (and rough cost), which env knobs tune it, how progress/cancel works, and what consumes its output. Facts are code-verified as of **2026-07-23** (deterministic-first video rework: backend PRs #11/#12/#13, frontend #10). Prefer this doc over tribal memory; when in doubt, open the cited files.
 
 > **Cost hot-spots (read first)**
 >
@@ -279,41 +279,150 @@ Both paths: kind `enrichment`, cancellable; partials kept. Idempotent via 30-day
 
 ---
 
-## 6. Video generation (Veo / Atlas)
+## 6. Video generation (Veo / Atlas) — deterministic-first
+
+> **Default path:** product campaigns queue **one deterministic video ad per product** (hero seed or operator-ordered catalog stack). The Creative Director no longer drives video by default — it serves **static image ads** and **opt-in video variants** only (backend PRs #11/#12/#13; wizard controls frontend PR #10).
 
 ### Trigger
 
-- Video ads selected in wizard expansion (`expandWizardJob`) when format flags allow (`AI_VEO_FEED` / `AI_VEO_REELS`).
-- Routed by `services/videoRouter.js` on `VIDEO_PROVIDER` (default **`atlas`**).
+- Wizard / API: `POST /api/ads/preview` (dry-run) or `POST /api/ads/generate` → `campaignAdsGenerationService.expandWizardJob` when resolved kinds include `video` and format flags allow (`AI_VEO_FEED` / `AI_VEO_REELS`).
+- Phase-3 body fields (also on preview): `directorVariants`, `seedMediaIds`, `videoPromptGuidance`, `videoPromptRaw` (`routes/ads.js` `parsePhase3WizardFields`).
+- Render: `selectAdsForRun` → `runRenderLoop` → `videoRouter` → `atlasVideoService.generateForAd` when `VIDEO_PROVIDER=atlas` (default).
+
+### Expansion routing (`expandWizardJob`)
+
+After kinds are resolved against the platform format and Veo env gates, three independent flags decide which expanders run (`services/campaignAdsGenerationService.js`):
+
+| Flag | Condition | What queues |
+|---|---|---|
+| **`deterministicVideo`** | `wantsVideo && productIds.length > 0` | **One** video `Ad` per product via `expandDeterministicVideo` |
+| **`conceptVideo`** | `wantsVideo && (productIds.length === 0 \|\| directorVariants === true)` | Director video variants (`runConceptDrivenExpansion` with `kinds` including `video`). Brand-only (no products) **always** uses director for video; product campaigns only when the wizard **director toggle** is on (default **off**) |
+| **`conceptImage`** | `wantsImage && (AI_CONCEPT_DRIVEN \|\| wantsVideo)` | Director image ads. The `\|\| wantsVideo` clause preserves mixed image+video runs when the concept flag is off so image is not silently dropped |
+
+**Legacy cartesian** (seeds × templates × ratios) is **image-only**: reachable only when the concept/deterministic branches do not run for that run, and **`video` is always stripped** so video never double-queues via cartesian.
+
+Results from deterministic + concept expanders are combined with **`mergeExpansionResults`** (deterministic `newAdIds` / `perProduct` first; `queuedCount` = max of snapshots, not sum). Dry-run returns `byMode: { deterministic, director }` for the wizard preview split.
+
+#### Deterministic video (`expandDeterministicVideo`)
+
+- **Exactly one ad per product** that has a resolvable seed — **no** `VEO_ADS_PER_PRODUCT_CAP` (that cap applies only to concept/legacy video).
+- **Seed selection**
+  - If the operator passes ordered catalog-product `seedMediaIds`: grouped by `metadata.catalogProductId`, order preserved; **position 0 = primary seed** (`mediaId` + `referenceMediaIds` stack).
+  - Else: feed-order **hero** (`imageRole: 'hero'` → earliest `createdAt` → lazy materialize from `product.imageUrl`); empty `referenceMediaIds` so render derives hero + alts.
+- **Ad shape:** `renderRoute: 'veo'`, `kind: 'video'`, `template: 'ai_brand_led'`, `conceptId` / `judgeRank` null, `variantKind: 'product_image'`, run-level `videoPromptGuidance` / `videoPromptRaw` stamped when provided.
+- **Identity digest:** namespaced **`det-video:v1`** via `computeDeterministicVideoDigest` (campaign, product, ordered ref key or mediaId, platformFormat, CTA fields, guidance/raw). Does not collide with V1 JSON or V2 concept digests.
+
+#### Concept / director path
+
+- Image concepts: still Director + Judge (`aiCreativeDirectorService` / `aiJudgeService`); template label maps from `concept.creative_style`.
+- Video concepts: only when `conceptVideo` is true; still capped at `VEO_ADS_PER_PRODUCT_CAP` (default **1**) per product in the concept expander.
+- **Director does not drive video titling or the camera prompt** (PR #11). Layout-input / title template for video is **canonical `ai_brand_led`** unless Title Studio overrides cascade (below). `concept.creative_style` is ignored for video titling.
+
+#### Run selection (`selectAdsForRun`)
+
+Tiered drain so the guaranteed baseline videos render before optional variants fill `MAX_CREATIVES_PER_RUN`:
+
+0. **Tier 0 — deterministic videos first:** `status: queued`, `conceptId: null`, `judgeRank: null`, `renderRoute: 'veo'`, FIFO `queuedAt`.
+1. **Tier 1 — judged concepts:** `judgeRank != null`, sort `judgeRank` ASC.
+2. **Tier 2 — legacy remainder:** other `judgeRank: null` (excluding already-taken det rows), `readinessScore` DESC.
+
+### Cascades (category tier)
+
+Category settings sit **between product and brand**, ordered **leaf → root**, via `categoryChainService.loadCategoryChainForProduct` (breadcrumbKey prefixes).
+
+| Resolver | File | Cascade (most-specific wins) |
+|---|---|---|
+| `resolveVideoModel` | `atlasVideoService.js` | product `videoSettings.model` / `modelByCanvas` → **category** same → brand same → `ATLAS_VIDEO_MODEL` → built-in Omni default |
+| `resolveTitleTemplate` | `atlasVideoService.js` | product `videoSettings.titleTemplate` → **category** → brand → **`ai_brand_led`** (canonical) |
+| `resolveSpec` | `titleSpecService.js` | ad `titleStyleSpec[format]` → product → **category** → brand → brand preset → Remotion `canonical` preset |
+| `resolvePromptGuidance` | `atlasVideoService.js` | ad `videoPromptGuidance` → product `videoSettings.promptGuidance` → **category** → brand → null (first non-empty; no concatenation) |
+
+**Writable overrides**
+
+| Level | How |
+|---|---|
+| Brand | `PATCH /api/brand/:id` — `videoSettings`, `titleStyleSpec` (shallow-merge `videoSettings`) |
+| Category | `PATCH /api/catalog/categories/:id` — `videoSettings`, `titleStyleSpec` only |
+| Product | `PATCH /api/catalog/:id` — `videoSettings` (and product title fields as elsewhere) |
+| Ad | `Ad.titleStyleSpec`, `Ad.videoPromptGuidance`, `Ad.videoPromptRaw` (run stamp or per-ad later) |
+
+`videoSettings` may include: `model`, `modelByCanvas`, `referenceImageCount`, `titleTemplate`, `promptGuidance`, `titlingEngine`, `titlePlacementMode` (validated by `validateVideoSettings`).
+
+### Per-run / per-level video prompt
+
+| Field | Semantics |
+|---|---|
+| **`videoPromptGuidance`** | Short operator note (≤1000 chars). Merged as **`operatorPrompt` prepend** inside `buildVeoPrompt` via the guidance cascade above. |
+| **`videoPromptRaw`** | Full prompt replacement (≤4000 chars body validation). **Bypasses** `buildVeoPrompt`; clamped with `enforceRawByteCap` to the model’s `promptByteCap`. |
+
+**`generateForAd` priority** (`atlasVideoService.js`):
+
+1. Explicit **`operatorPrompt`** argument (regenerate UI) — non-empty after trim → `buildVeoPrompt({ operatorPrompt })`.
+2. Else **`ad.videoPromptRaw`** — full replace + byte cap.
+3. Else guidance cascade → `buildVeoPrompt({ operatorPrompt: effectiveGuidance })`.
+
+**Wizard Advanced editor feed:** `GET /api/ads/veo-prompt-scaffold?campaignId=&productId?&platformFormat?&durationSec?` → `buildPromptScaffold` returns `{ prompt, model, aspectRatio, durationSec, byteCap }` (canonical prompt; `media=null`; placeholder product title when no product).
+
+### Reference stack + reframe
+
+`buildReferenceImages` (`atlasVideoService.js`):
+
+- When **`Ad.referenceMediaIds` is non-empty:** load Media in **exact pick order** as `orderedReferenceMedia` (position **0 = seed**); skip default seed+catalog assembly.
+- When empty: seed (`ad.mediaId`) first, then catalog-product medias (createdAt asc ≈ hero-first), then product URL fallbacks; count from `resolveReferenceImageCount` (product → brand → env → default **3**), capped by model `maxReferenceImages`.
+- Every ref is still **generatively reframed / outpainted** to the target aspect (`reframeReferenceForAspect` — frontend/backend PR #10 path): cached on `Media.metadata.reframes`, single-flight, kill-switch `REFRAME_ENABLED`; failure degrades to Cloudinary crop.
+
+### Titling composite
+
+- Downstream of base video: `brandScriptExecutor` + Remotion (default) or canvas override.
+- Title template for layoutInput derivation is **canonical `ai_brand_led`** unless cascaded `titleTemplate` override.
+- Placement mode / engine: see `docs/TITLING.md` (`titlePlacementMode`, `titleStyleSpec` cascade including category).
+- **Does not use overlay zones** — text is scripted, not zone-driven product overlay.
+
+### Wizard controls (frontend PR #10; backend contract)
+
+| Control | Backend field | Default / notes |
+|---|---|---|
+| Director toggle | `directorVariants` | **Off** — product runs get det video only; on → also queues concept video (capped) |
+| Ordered catalog seed picker | `seedMediaIds` | Order-significant; empty → hero default |
+| Guidance / raw Advanced editor | `videoPromptGuidance` / `videoPromptRaw` | Scaffold from `GET /api/ads/veo-prompt-scaffold` |
+| Preview counts | `POST /api/ads/preview` `dryRun` | Response includes `byMode: { deterministic, director }` |
 
 ### Stages / files
 
 | Piece | File | Role |
 |---|---|---|
-| Atlas video submit/poll | `services/atlasVideoService.js` | Provider jobs, chrome force, poll interval |
-| Storyboard text | `services/veoStoryboardService.js` | GPT-4.1 storyboard when `VEO_USE_GPT_STORYBOARD` |
-| Brand title/script composite | `services/brandScriptExecutor.js` | Titling / brand scripts over base video |
-| Direct Veo fallback (deprecated) | `services/aiVideoReferenceService.js` | `VIDEO_PROVIDER=vertex` path |
-
-**Does not use overlay zones** — text placement is scripted (titling engine / Remotion or canvas), not zone-driven product overlay.
+| Expansion + det digest + merge + selection | `services/campaignAdsGenerationService.js` | Routing, `expandDeterministicVideo`, `selectAdsForRun` |
+| Category chain | `services/categoryChainService.js` | Leaf→root Category docs for cascades |
+| Atlas submit/poll + refs + model/prompt resolve | `services/atlasVideoService.js` | `generateForAd`, `buildReferenceImages`, resolvers, scaffold |
+| Camera prompt builder | `services/veoPromptBuilder.js` | `buildVeoPrompt`, `enforceRawByteCap` |
+| Title style cascade | `services/titleSpecService.js` | `resolveSpec` (ad > product > category > brand) |
+| Brand title/script composite | `services/brandScriptExecutor.js` | Titling over base video |
+| Provider router | `services/videoRouter.js` | `VIDEO_PROVIDER` → atlas / vertex |
+| Storyboard text (Vertex / legacy) | `services/veoStoryboardService.js` | GPT storyboard when that path uses it; **Atlas path retired storyboard** (Ken Burns prompt is complete) |
+| Direct Veo fallback (deprecated) | `services/aiVideoReferenceService.js` | `VIDEO_PROVIDER=vertex` |
 
 ### Models & cost
 
-- Veo / Grok (via Atlas) video generation — rate-limited; **429s if concurrency > 1**.
-- GPT-4.1 for storyboard text (`VEO_STORYBOARD_MODEL_ID` override; default `gpt-4.1`).
+- Atlas image-to-video (default Gemini Omni; Grok / Veo slugs in `MODEL_CAPS`) — rate-limited; **429s if concurrency > 1**.
+- Per-ref generative reframe (nano-banana-2 class edit when enabled) — cached per media+aspect.
+- LayoutInput derivation (Gemini / existing builder) when artifact missing — non-fatal.
+- GPT storyboard only on non-Atlas paths that still call it.
 
 ### Env knobs
 
 | Var | Default | Role |
 |---|---|---|
 | `VIDEO_PROVIDER` | `atlas` | `atlas` \| `vertex` |
-| `AI_VEO_FEED` | `true` | Enable Veo for non-Reels formats |
-| `AI_VEO_REELS` | `true` | Enable Veo for 9:16 Reels |
+| `AI_VEO_FEED` | `true` | Enable video for non-Reels formats |
+| `AI_VEO_REELS` | `true` | Enable video for 9:16 Reels |
 | `VEO_CONCURRENCY` | **`1`** | **Keep at 1** — provider 429s above this |
-| `VEO_USE_GPT_STORYBOARD` | `true` | GPT storyboard before video |
+| `VEO_ADS_PER_PRODUCT_CAP` | `1` | Cap on **concept** video variants only (not deterministic) |
+| `VEO_USE_GPT_STORYBOARD` | `true` | Storyboard on paths that still use it (not Atlas Ken Burns) |
 | `ATLAS_VIDEO_FORCE_CHROME` | `true` | Force chrome handling on Atlas path |
-| `ATLAS_POLL_INTERVAL_MS` | `15000` | Prediction poll interval |
-| `ATLAS_VIDEO_MODEL` | (empty) | Optional model override |
+| `ATLAS_POLL_INTERVAL_MS` | `15000` (`defaults.env`; code fallback `5000`) | Prediction poll interval |
+| `ATLAS_VIDEO_MODEL` | (empty) | Optional model override in resolve chain |
+| `REFRAME_ENABLED` | `true` | Generative reframe of video reference images |
+| `REFRAME_OUTPAINT_MODEL` / `REFRAME_RESOLUTION` / `REFRAME_SKIP_THRESHOLD` | see `atlasVideoService.js` | Reframe tuning |
 
 Secret: `ATLAS_API_KEY`.
 
@@ -323,7 +432,7 @@ Secret: `ATLAS_API_KEY`.
 
 ### Consumers
 
-- Video `Ad` assets, Meta Reels / feed push, retitle batch (`POST /api/brand/:id/retitle-videos` — see `docs/TITLING.md`).
+- Video `Ad` assets, Meta Reels / feed push, retitle batch (`POST /api/brand/:id/retitle-videos` — see `docs/TITLING.md`), generation inspector (`veoPrompt`, `veoReferenceImages`, `referenceMediaIds`).
 
 ---
 
@@ -431,7 +540,7 @@ Versioned with the repo. Loaded in `index.js` / `worker.js` **after** the proces
 | Detect / overlay / readiness | `pipelines/detect.js`, `yoloService.js`, `overlayZoneService.js`, `adSuitabilityService.js`, `worker.js` |
 | Enrichment | `catalogProductEnrichmentService.js`, `productDetailsService.js` |
 | Static ads | `routes/ads.js`, `campaignAdsGenerationService.js`, `aiCanvasHtmlGeneratorService.js`, `renderService.js`, `aiImageReferenceService.js`, `overlayPlacementService.js`, `aiCanvasInputBuilder.js` |
-| Video | `atlasVideoService.js`, `veoStoryboardService.js`, `brandScriptExecutor.js`, `videoRouter.js` |
+| Video (deterministic-first + director opt-in) | `campaignAdsGenerationService.js` (expand/select), `atlasVideoService.js`, `veoPromptBuilder.js`, `categoryChainService.js`, `titleSpecService.js`, `brandScriptExecutor.js`, `videoRouter.js`, `routes/ads.js` (`/preview`, `/generate`, `/veo-prompt-scaffold`), `routes/catalog.js` (`PATCH .../categories/:id`) |
 | Progress | `progressService.js`, `models/OperationRun.js`, `routes/progress.js`, `routes/salesDemos.js` (`/activity`) |
 | Config | `config/defaults.env`, `index.js`, `worker.js` |
 
