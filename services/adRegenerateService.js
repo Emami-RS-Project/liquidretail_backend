@@ -214,6 +214,7 @@ async function runVideoFull(adId, prompt, progressRun = null, videoModel = null)
       veoPrompt:      veoResult.prompt || null,
       veoStoryboard:  veoResult.storyboard || storyboard || null,
       veoModel:       veoResult.model || null,
+      veoReferenceImages: veoResult.referenceImages || [],
       renderUrl:      veoResult.videoUrl,
       updatedAt:      new Date()
     }

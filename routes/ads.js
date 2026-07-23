@@ -535,6 +535,7 @@ async function renderOne(run, job, adId, index, renderToken) {
       const isVideoSeed = sourceMedia?.fileType === 'video';
       let veoVideoUrl, veoAspectRatio, veoPrompt = null, veoStoryboard = null, veoCloudinaryPublicId = null;
       let veoModel = null;   // stays null on the Cloudinary-segment path — no model ran
+      let veoReferenceImages = [];
 
       if (isVideoSeed) {
         const segmentUrl = buildVideoSegmentUrl(sourceMedia.fileUrl, ad.aspectRatio || '9:16', 8);
@@ -588,6 +589,7 @@ async function renderOne(run, job, adId, index, renderToken) {
         veoStoryboard         = veoResult.storyboard || veoStoryboard;
         veoCloudinaryPublicId = veoResult.cloudinaryPublicId || null;
         veoModel              = veoResult.model || null;
+        veoReferenceImages    = veoResult.referenceImages || [];
       }
 
       // Stamp the video URL + Ad state. Done BEFORE the brand-script
@@ -610,6 +612,7 @@ async function renderOne(run, job, adId, index, renderToken) {
             veoPrompt,
             veoStoryboard,
             veoModel,
+            veoReferenceImages,
             renderUrl:          veoVideoUrl,
             posterUrl:          fallbackPosterUrl || veoVideoUrl,
             cloudinaryPublicId: veoCloudinaryPublicId,
@@ -1295,6 +1298,156 @@ router.get('/:id', async (req, res) => {
     res.json({ ad: projectAd(ad, /* full */ true) });
   } catch (err) {
     res.status(500).json({ error: err.message || 'ad fetch failed' });
+  }
+});
+
+// GET /api/ads/:id/generation-inspector?brandId=...
+// Everything that went INTO a generated ad, for operator debugging:
+//   - video: the canonical prompt sent to the model, model/aspect,
+//     storyboard, the RAW pre-titling video vs the final titled render,
+//     and the seed image + any detected burned-in text (the usual cause
+//     of garbled on-screen text — the model smears baked-in glyphs).
+//   - titling: the exact resolved script elements (snapshot from the last
+//     render if present, else reconstructed from ad.copy + brand spec).
+//   - static: the GPT-4.1 layout prompt + spec and the gpt-image-2
+//     image-ref prompt; plus artifact ids for the full spec deep-link.
+router.get('/:id/generation-inspector', async (req, res) => {
+  try {
+    const brandId = req.query.brandId || req.headers['x-brand-id'];
+    if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
+
+    const ad = await Ad.findOne({ _id: req.params.id, brandId }).lean();
+    if (!ad) return res.status(404).json({ error: 'ad not found' });
+
+    const Media = require('../models/Media');
+    const Brand = require('../models/Brand');
+    const brand = await Brand.findById(brandId).lean();
+
+    const out = {
+      adId:        String(ad._id),
+      kind:        ad.kind,
+      template:    ad.template,
+      aspectRatio: ad.aspectRatio,
+      status:      ad.status,
+      productId:   ad.productId ? String(ad.productId) : null,
+      warnings:    []
+    };
+
+    // ── Seed media (the source the generation animated/composed) ──
+    let seed = null;
+    if (ad.mediaId) {
+      const m = await Media.findById(ad.mediaId)
+        .select('source fileType fileUrl text metadata.productTitle').lean();
+      if (m) {
+        const burnedInText = (Array.isArray(m.text) ? m.text : [])
+          .map(t => (typeof t === 'string' ? t : (t?.text || t?.value || null)))
+          .filter(Boolean);
+        seed = {
+          mediaId:     String(m._id),
+          source:      m.source,
+          fileType:    m.fileType,
+          url:         m.fileUrl,
+          burnedInText,
+          seedHasText: burnedInText.length > 0
+        };
+        if (seed.seedHasText) {
+          out.warnings.push({
+            code: 'seed-has-burned-in-text',
+            message: `Source image has ${burnedInText.length} detected burned-in text element(s). The video model can smear/garble baked-in text when animating (Ken Burns) — this is the usual source of garbled on-screen text, NOT the titling engine (titling is overlaid cleanly downstream).`
+          });
+        }
+      }
+    }
+    out.seed = seed;
+
+    // ── Video generation inputs ──
+    if (ad.kind === 'video' || ad.veoPrompt || ad.veoVideoUrl) {
+      // Reference-image stack the director actually fed the model
+      // (pos 0 = seed, then product hero + alts). Persisted on newer ads;
+      // reconstructed from seed + catalog product images for older ones.
+      let referenceImages = Array.isArray(ad.veoReferenceImages) ? ad.veoReferenceImages.filter(Boolean) : [];
+      let referenceImagesReconstructed = false;
+      if (!referenceImages.length) {
+        const recon = [];
+        if (seed?.url) recon.push(seed.url);
+        if (ad.productId) {
+          const CatalogProduct = require('../models/CatalogProduct');
+          const cp = await CatalogProduct.findById(ad.productId).select('imageUrl additionalImages').lean();
+          if (cp?.imageUrl) recon.push(cp.imageUrl);
+          for (const u of (Array.isArray(cp?.additionalImages) ? cp.additionalImages : [])) if (u) recon.push(u);
+        }
+        referenceImages = [...new Set(recon)];
+        referenceImagesReconstructed = referenceImages.length > 0;
+      }
+      out.video = {
+        model:       ad.veoModel || null,
+        aspectRatio: ad.veoAspectRatio || null,
+        prompt:      ad.veoPrompt || null,      // canonical prompt sent to the model
+        storyboard:  ad.veoStoryboard || null,
+        rawVideoUrl: ad.veoVideoUrl || null,    // BEFORE titling — compare vs finalUrl to locate garble
+        finalUrl:    ad.renderUrl || null,       // AFTER titling overlay
+        referenceImages,                         // the images the director chose (pos 0 = seed)
+        referenceImagesReconstructed
+      };
+      if (!ad.veoPrompt) {
+        out.warnings.push({ code: 'no-video-prompt', message: 'No stored video prompt — ad predates prompt persistence or was not a Veo render.' });
+      }
+    }
+
+    // ── Titling script elements (snapshot preferred, else reconstruct) ──
+    if (ad.titlingSnapshot) {
+      out.titling = { ...ad.titlingSnapshot, reconstructed: false };
+    } else if (brand) {
+      try {
+        const bse = require('../services/brandScriptExecutor');
+        const meta = await bse.buildMetaForAd(ad, brand);
+        const engine = bse.resolveTitlingEngine(brand, ad);
+        out.titling = { engine: engine?.engine || null, format: engine?.format || null, meta, reconstructed: true };
+        out.warnings.push({ code: 'titling-reconstructed', message: 'Titling shown is reconstructed from current ad copy + brand spec (this ad was rendered before per-render titling snapshots; values may differ from the historical render if brand settings changed since).' });
+      } catch (err) {
+        out.titling = { error: `could not reconstruct titling: ${err.message}` };
+      }
+    }
+
+    // ── Static image generation inputs ──
+    if (ad.kind === 'image' || ad.aiCanvasArtifactId) {
+      const image = {
+        aiCanvasArtifactId:    ad.aiCanvasArtifactId ? String(ad.aiCanvasArtifactId) : null,
+        layoutInputArtifactId: ad.layoutInputArtifactId ? String(ad.layoutInputArtifactId) : null
+      };
+      if (ad.aiCanvasArtifactId) {
+        const AiCanvasArtifact = require('../models/AiCanvasArtifact');
+        const c = await AiCanvasArtifact.findById(ad.aiCanvasArtifactId)
+          .select('promptSystem promptUser promptImages canvasSpec outputHtml colorPalette copyPicks').lean();
+        if (c) {
+          image.layoutPrompt = { system: c.promptSystem || null, user: c.promptUser || null, images: c.promptImages || [] };
+          image.canvasSpec   = c.canvasSpec || null;
+          image.outputHtml   = c.outputHtml || null;
+          image.colorPalette = c.colorPalette || null;
+          image.copyPicks    = c.copyPicks || null;
+        }
+      }
+      // NOTE: the gpt-image-2 image-ref prompt (AiFullRenderArtifact) is
+      // intentionally NOT joined here — it has no FK on the Ad and its
+      // uniqueness is an 8-field cache key (mediaId+template+aspectRatio+
+      // productId+variantKind+campaignContextHash+paletteSource+creativeStyle),
+      // so a partial-key lookup can surface the WRONG product's/palette's
+      // prompt. A wrong prompt in a diagnostic is worse than none. The full,
+      // correctly-joined image-ref + creative-direction detail is available
+      // via GET /api/ai-layouts/spec/by-artifact/:aiCanvasArtifactId (exposed
+      // above) — the frontend can deep-link to it.
+      out.image = image;
+    }
+
+    res.json({ inspector: out });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'generation inspector failed' });
   }
 });
 

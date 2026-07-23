@@ -1213,6 +1213,7 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
     track:              media.fileType === 'video' ? 1 : 2,
     prompt,
     storyboard,
+    referenceImages:    imageUrls,   // the exact stack sent to the model (pos 0 = seed, then product hero + alts) — for the generation inspector
     elapsedMs,
     model,
     modelFallback:      fallback,

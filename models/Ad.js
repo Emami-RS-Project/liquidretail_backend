@@ -238,6 +238,7 @@ const adSchema = new mongoose.Schema({
   // transcode, no 423 race.
   veoAspectRatio:     { type: String, default: null },
   veoPrompt:          { type: String, default: null },  // storyboard prompt sent to Veo — preserved for debugging + reproduction
+  veoReferenceImages: { type: [String], default: [] },  // exact reference-image stack sent to the model (pos 0 = seed, then product hero + alts) — for the generation inspector
   // GPT-composed structured storyboard. Null when VEO_USE_GPT_STORYBOARD
   // is off or the GPT call failed (Veo prompt then carries the legacy
   // hardcoded storyboard instead). Stored as Mixed so the shape can
@@ -251,6 +252,12 @@ const adSchema = new mongoose.Schema({
   chromeHtml:         { type: String, default: null },
   chromeVersion:      { type: String, default: null },
   renderUrl:          { type: String, default: null },
+  // Snapshot of the EXACT resolved titling used for the last render —
+  // { engine, format, spec?, meta, capturedAt }. buildMetaForAd is
+  // otherwise recomputed at view time from ad.copy + LayoutInputArtifact +
+  // Brand (which drift), so this gives the generation-inspector byte-exact
+  // historical titling. Written by brandScriptExecutor at render time.
+  titlingSnapshot:    { type: mongoose.Schema.Types.Mixed, default: null },
   posterUrl:          { type: String, default: null },
   // Sparse index — queued ads carry null, only rendered ads contribute.
   cloudinaryPublicId: { type: String, default: null, index: { sparse: true } },

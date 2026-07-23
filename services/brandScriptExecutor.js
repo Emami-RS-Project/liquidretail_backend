@@ -894,7 +894,7 @@ function resolveTitlingEngine(brand, ad) {
 // Shared tail of both engines: upload the rendered mp4, stamp
 // Ad.renderUrl, clean up. Retains tempDir on failure when
 // BRAND_SCRIPT_RETAIN_TMP is set for post-mortem.
-async function uploadRenderAndStamp({ ad, finalPath, tempDir, timings }) {
+async function uploadRenderAndStamp({ ad, finalPath, tempDir, timings, titlingSnapshot = null }) {
   const fs = require('fs');
   const { uploadBufferToCloudinary } = require('./cloudinaryService');
   const Ad = require('../models/Ad');
@@ -905,9 +905,12 @@ async function uploadRenderAndStamp({ ad, finalPath, tempDir, timings }) {
       resourceType: 'video',
       overwrite:    true
     });
+    const set = { renderUrl: uploaded.secure_url, updatedAt: new Date() };
+    // Persist the exact titling used for this render (generation-inspector).
+    if (titlingSnapshot) set.titlingSnapshot = titlingSnapshot;
     await Ad.updateOne(
       { _id: ad._id },
-      { $set: { renderUrl: uploaded.secure_url, updatedAt: new Date() } }
+      { $set: set }
     );
     await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     return { renderUrl: uploaded.secure_url, timings };
@@ -960,7 +963,17 @@ async function renderWithRemotionAndSave({ ad, brand, format }) {
     brand,
     placementMode: placement,
   });
-  return uploadRenderAndStamp({ ad, finalPath: result.finalPath, tempDir: result.tempDir, timings: result.timings });
+  return uploadRenderAndStamp({
+    ad, finalPath: result.finalPath, tempDir: result.tempDir, timings: result.timings,
+    titlingSnapshot: {
+      engine: 'remotion',
+      format,
+      spec: { source, id: spec?.id || null, version: spec?.version || null },
+      placement,
+      meta,
+      capturedAt: new Date()
+    }
+  });
 }
 
 // End-to-end: render the brand's chosen path over the ad's Grok video,
@@ -984,6 +997,13 @@ async function renderBrandScriptAndSave({ ad, brand }) {
     // upstream at Stage 2.5). Return a skip marker so the caller can
     // log the outcome without a try/catch.
     console.log(`🎨 brandScript[ad=${ad._id}]: no chrome configured for format=${renderer.format} — ad ships as raw video`);
+    // Ship is the raw video (no titling overlay) — clear any stale snapshot
+    // from a prior titled render so the inspector doesn't show titling that
+    // isn't actually on the current renderUrl.
+    try {
+      const Ad = require('../models/Ad');
+      await Ad.updateOne({ _id: ad._id }, { $unset: { titlingSnapshot: 1 } });
+    } catch { /* non-fatal */ }
     return { skipped: true, reason: 'no-chrome', format: renderer.format };
   }
   if (!ad?.veoVideoUrl) {
@@ -1002,8 +1022,17 @@ async function renderBrandScriptAndSave({ ad, brand }) {
     brandName:   brand.name
   });
 
-  // Upload + persist renderUrl (shared tail with the remotion path).
-  return uploadRenderAndStamp({ ad, finalPath: result.finalPath, tempDir: result.tempDir, timings: result.timings });
+  // Upload + persist renderUrl + the titling snapshot (shared tail).
+  return uploadRenderAndStamp({
+    ad, finalPath: result.finalPath, tempDir: result.tempDir, timings: result.timings,
+    titlingSnapshot: {
+      engine: 'canvas',
+      format: renderer.format,
+      source: renderer.canonicalSource || renderer.path || null,
+      meta,
+      capturedAt: new Date()
+    }
+  });
 }
 
 module.exports = { renderBrandScript, renderBrandScriptAndSave, buildMetaForAd, previewBrandScript, previewBrandScriptAsVideo, resolveBrandRenderer, resolveTitlingEngine, isVerticalFormat, isLandscapeFormat, classifyFormat };
