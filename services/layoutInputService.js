@@ -1183,7 +1183,7 @@ function templateIntent(template) {
 // lists, so this works identically for skincare, apparel, flowers,
 // gear, etc. Higher = better.
 //
-// Signals (all additive except for penalties):
+// Positive signals (all additive):
 //   Length in the 60-140 char goldilocks zone      +3
 //   Length in the 40-180 char acceptable zone      +1
 //   Contains a digit (specific claim)              +1
@@ -1199,6 +1199,20 @@ function templateIntent(template) {
 //   ALL CAPS (6+ chars)                            -2
 //   Contains a URL                                 -5
 //   Short + only positive tokens (generic praise)  -2
+//
+// Sentiment gate (post-signal check):
+//   Any negation of positive sentiment             → -Infinity (disqualify)
+//     (e.g. "not worth it", "would not recommend", "wasn't great")
+//   Any complaint / disappointment marker          → -Infinity
+//     (e.g. "terrible", "disappointed", "broke", "returned", "refund")
+//   Any bare negative-affect verb                  → -Infinity
+//     (e.g. "hate", "regret", "avoid")
+//   Explicit low star rating in the text           → -Infinity
+//     ("1 star", "2 stars", "1/5", "2/5")
+//
+// A quote must clear the sentiment gate to be selectable. Downstream
+// pickStrongestQuote also requires a positive final score (see the
+// SCORE_FLOOR there).
 const STRONG_POSITIVE = /\b(love[ds]?|loving|adore[ds]?|adoring|obsess(ed|ion)|amazing|incredible|unbelievable|phenomenal|extraordinary|exceptional|outstanding|perfect|flawless|immaculate|impeccable|pristine|best|greatest|finest|premier|favou?rite|stunning|gorgeous|beautiful|exquisite|elegant|superb|magnificent|splendid|marvel(l)?ous|worth|worthy|fantastic|fabulous|wonderful|delightful|delighted|brilliant|terrific|essential|staple|thrill(ed|ing)|ecstatic|impressed|impressive|premium|luxurious|game[- ]?chang(er|ing)|life[- ]?chang(er|ing)|life[- ]?sav(er|ing)|must[- ]?have|go[- ]?to)\b/gi;
 
 const MODERATE_POSITIVE = /\b(great|excellent|high[- ]?quality|top[- ]?notch|first[- ]?rate|solid|dependable|reliable|sturdy|durable|comfortable|cozy|effective|efficient|recommend(ed|ing|ation)?|happy|satisfied|pleased|smooth|reliable|noticeable|convenient|handy|well[- ]?made|thoughtful|beautifully|nicely)\b/gi;
@@ -1209,9 +1223,35 @@ const EXPERIENCE_VERB = /\b(bought|purchas(ed|ing)|got|use[ds]?|using|wore|weari
 
 const DURATION_REF = /\b(week|weeks|month|months|day|days|hour|hours|year|years|minute|minutes|second|seconds|since|for months|for years|for weeks|all day|every day)\b/i;
 
+// ── Sentiment gate ─────────────────────────────────────────────────
+// Any single hit here disqualifies the quote outright. False positives
+// are acceptable — losing a genuinely-positive quote that happens to
+// mention a friend's bad experience is better than shipping a negative
+// review on an ad. The intent is a strict positive-selection filter.
+
+// Explicitly-negated praise: "not worth it", "would not recommend",
+// "didn't love it", "wasn't great", "not the best fit", etc.
+// Matches negation particle immediately followed by (up to 3 tokens)
+// a strong/moderate positive lexeme or phrase marker. The positive
+// lexeme list here is broader than the scoring regexes above so mild
+// negations ("not the best", "not great") still trip the gate — a
+// review that leads with any negation of praise shouldn't headline an ad.
+const NEGATED_POSITIVE = /\b(not|no|never|hardly|barely|isn'?t|wasn'?t|aren'?t|weren'?t|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|couldn'?t|shouldn'?t|can'?t|cannot|nothing)\s+(\w+\s+){0,3}?(love[ds]?|worth|recommend|great|amazing|good|perfect|impressed|impressive|happy|satisfied|pleased|worth it|best|excellent|comfortable|nice|beautiful|quality|fit|impressed|wow|thrilled|delighted|enough)\b/i;
+
+// Complaint / product-defect / disappointment lexicon. Structural
+// (not brand-specific): mentions of returns, refunds, defects,
+// physical breakage, buyer's remorse, or emotional negatives.
+const NEGATIVE_SENTIMENT = /\b(terrible|awful|horrible|dreadful|abysmal|garbage|trash|junk|useless|worthless|disappoint(ed|ing|ment)?|frustrat(ed|ing)|annoy(ed|ing)|regret(ted)?|avoid|scam|ripoff|rip[- ]?off|misleading|deceptive|false|fake|counterfeit|cheap(ly)?[- ]?made|poor(ly)?[- ]?made|shoddy|flimsy|defect(ive)?|broken|broke|snapped|torn|tore|ripped|shattered|cracked|leak(ed|ing|s)?|melt(ed|ing)?|faded|peel(ed|ing)?|stain(ed)?|smell(ed|s|y)|stink(s|y|ing)?|reek(s|ed)|hate[ds]?|hating|loathe|despise|worst|refund(ed|ing)?|return(ed|ing)?[- ]?it|returning|sent[- ]?back|had to return|took it back|would not (buy|recommend|purchase)|wouldn'?t (buy|recommend|purchase)|don'?t (buy|waste|bother)|do not (buy|waste|bother)|save your (money|time)|beware|warning|stay away|not for me|not what i expected|nothing like (the picture|advertised)|false advertising|not as (described|advertised|shown|pictured)|two[- ]?star|one[- ]?star|1\/5|2\/5|one star|two stars?)\b/i;
+
 function scoreQuote(text) {
   const s = String(text || '').trim();
   if (!s) return -Infinity;
+
+  // Sentiment gate — disqualifies negative quotes outright. Runs before
+  // scoring so a well-structured 1-star review can't accumulate points.
+  if (NEGATED_POSITIVE.test(s)) return -Infinity;
+  if (NEGATIVE_SENTIMENT.test(s)) return -Infinity;
+
   const len = s.length;
   const words = s.split(/\s+/).filter(Boolean);
   const wordCount = words.length;
@@ -1251,8 +1291,19 @@ function scoreQuote(text) {
 }
 
 // Pick the highest-scoring quote from a candidate array. Returns
-// { text, author_name, source } shape or null when the array is empty
-// or nothing scores above the floor.
+// { text, author_name, source } shape or null when the array is empty,
+// nothing clears the sentiment gate, or the best-scoring quote scores
+// below SCORE_FLOOR.
+//
+// SCORE_FLOOR = 1 — a winning quote must accumulate at least one net
+// positive signal beyond just having non-negative sentiment. A quote
+// like "I bought it last week" passes the sentiment gate but has no
+// endorsement content; it shouldn't win the primary slot when better
+// candidates might exist in a later tier (LLM-authored or synthesized).
+// Also requires at least one explicit positive lexeme so we don't
+// promote neutral-lived-experience quotes with no endorsement value.
+const SCORE_FLOOR = 1;
+
 function pickStrongestQuote(candidates) {
   if (!Array.isArray(candidates) || candidates.length === 0) return null;
   let best = null;
@@ -1265,7 +1316,22 @@ function pickStrongestQuote(candidates) {
       best = q;
     }
   }
-  return best;
+  if (!best || bestScore < SCORE_FLOOR) return null;
+  // Require at least one positive lexeme — prevents pure lived-experience
+  // narration ("Bought this three weeks ago") from winning the primary
+  // slot with no endorsement signal.
+  const s = String(best.text || '');
+  const hasPositive =
+       STRONG_POSITIVE.test(s)
+    || MODERATE_POSITIVE.test(s)
+    || PHRASE_STRONG.test(s);
+  // Reset the regex `lastIndex` state since STRONG_POSITIVE/MODERATE_POSITIVE
+  // use the global flag; leaving lastIndex non-zero would break subsequent
+  // matches on the next pick.
+  STRONG_POSITIVE.lastIndex = 0;
+  MODERATE_POSITIVE.lastIndex = 0;
+  PHRASE_STRONG.lastIndex = 0;
+  return hasPositive ? best : null;
 }
 
 // Normalize a raw quote object from any tier into the shape the
