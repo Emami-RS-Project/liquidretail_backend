@@ -141,7 +141,7 @@ router.get('/brands', async (req, res) => {
 
     // Batched aggregations for all brands — cheaper than N queries each.
     const brandIds = brands.map(b => b._id);
-    const [runs, productAgg, postAgg] = await Promise.all([
+    const [runs, productAgg, postAgg, reviewedAgg] = await Promise.all([
       DetectRun.aggregate([
         { $match: { brandId: { $in: brandIds }, status: { $in: ['queued', 'processing'] } } },
         { $group: { _id: '$brandId', count: { $sum: 1 } } }
@@ -157,17 +157,26 @@ router.get('/brands', async (req, res) => {
       Media.aggregate([
         { $match: { brandId: { $in: brandIds }, source: { $in: ['apify-ig', 'instagram'] } } },
         { $group: { _id: '$brandId', count: { $sum: 1 } } }
+      ]),
+      // Products that carried structured review data (rating/quotes) — the
+      // numerator for the "review coverage %" shown on the brand card.
+      // Mirrors the ingester's reviewsCaptured counter (productReviews set).
+      CatalogProduct.aggregate([
+        { $match: { brandId: { $in: brandIds }, productReviews: { $ne: null } } },
+        { $group: { _id: '$brandId', count: { $sum: 1 } } }
       ])
     ]);
     const inFlightByBrand = new Map(runs.map(r => [String(r._id), r.count]));
     const productsByBrand = new Map(productAgg.map(r => [String(r._id), r.count]));
     const postsByBrand    = new Map(postAgg.map(r => [String(r._id), r.count]));
+    const reviewedByBrand = new Map(reviewedAgg.map(r => [String(r._id), r.count]));
 
     const enriched = brands.map(b => ({
       ...b,
-      inFlightDetectRuns: inFlightByBrand.get(String(b._id)) || 0,
-      productCount:       productsByBrand.get(String(b._id)) || 0,
-      postCount:          postsByBrand.get(String(b._id)) || 0
+      inFlightDetectRuns:  inFlightByBrand.get(String(b._id)) || 0,
+      productCount:        productsByBrand.get(String(b._id)) || 0,
+      postCount:           postsByBrand.get(String(b._id)) || 0,
+      reviewedProductCount: reviewedByBrand.get(String(b._id)) || 0
     }));
 
     res.json({ brands: enriched });

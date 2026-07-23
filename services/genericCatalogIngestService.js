@@ -143,7 +143,7 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted } = {}) {
 
   const totalPlanned = products.length || CAP;
   run?.tick?.(0, totalPlanned, `resolved ${products.length} products via sitemap-jsonld`);
-  run?.stage?.('upserting catalog products');
+  run?.stage?.('saving products to catalog');
 
   // ── Upsert each flat product ─────────────────────────────────────
   // If the resolver was already cancelled, still persist the partials it
@@ -219,7 +219,9 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted } = {}) {
     run?.tick?.(
       idx,
       totalPlanned,
-      `products ${idx}/${totalPlanned} · ${reviewsCaptured} reviews`
+      // Live review-coverage %: share of saved products that carried
+      // review data (rating/quotes) in their structured data.
+      `saved ${idx}/${totalPlanned} products · ${idx ? Math.round((reviewsCaptured / idx) * 100) : 0}% with reviews`
     );
   }
 
