@@ -936,16 +936,22 @@ async function renderWithRemotionAndSave({ ad, brand, format }) {
 
   const meta = await buildMetaForAd(ad, brand);
   // Resolve the spec through the full cascade: ad override > product
-  // override > brand spec > preset > canonical. Fetch the product's
-  // override doc (cheap, lean) when the ad is product-linked.
+  // override > category leaf→root > brand spec > preset > canonical.
+  // Fetch the product's override doc (cheap, lean) when the ad is
+  // product-linked; category chain is one extra query when categoryRef set.
   let productForSpec = null;
+  let categories = [];
   if (ad.productId) {
     try {
       const CatalogProduct = require('../models/CatalogProduct');
-      productForSpec = await CatalogProduct.findById(ad.productId).select('titleStyleSpec').lean();
+      productForSpec = await CatalogProduct.findById(ad.productId).select('titleStyleSpec categoryRef').lean();
+      if (productForSpec) {
+        const { loadCategoryChainForProduct } = require('./categoryChainService');
+        categories = await loadCategoryChainForProduct(productForSpec);
+      }
     } catch { /* non-fatal — falls back to brand/canonical */ }
   }
-  const { spec, source } = resolveSpec({ brand, product: productForSpec, ad, format });
+  const { spec, source } = resolveSpec({ brand, product: productForSpec, ad, format, categories });
   // Same LayoutInputArtifact tier buildMetaForAd uses — brands without
   // explicit color/font fields still inherit the creative director's
   // brand block (input.brand.primary_color / font_family / …).

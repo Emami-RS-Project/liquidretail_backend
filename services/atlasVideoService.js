@@ -31,7 +31,8 @@ const CatalogProduct            = require('../models/CatalogProduct');
 const LayoutInputArtifact       = require('../models/LayoutInputArtifact');
 const { uploadBufferToCloudinary, uploadUrlToCloudinary } = require('./cloudinaryService');
 const { recordFlatCost } = require('./costTracker');
-const { buildVeoPrompt, aspectRatioForPlatformFormat, promptProfileFor } = require('./veoPromptBuilder');
+const { buildVeoPrompt, aspectRatioForPlatformFormat, promptProfileFor, enforceRawByteCap } = require('./veoPromptBuilder');
+const { loadCategoryChainForProduct } = require('./categoryChainService');
 
 const { buildLayoutInput }   = require('./layoutInputService');
 
@@ -65,11 +66,16 @@ const VALID_TITLE_TEMPLATES = [
 ];
 
 // Resolve the layoutInput template (most-specific wins):
-//   CatalogProduct.videoSettings.titleTemplate → Brand.videoSettings.titleTemplate
+//   CatalogProduct.videoSettings.titleTemplate → each Category leaf→root
+//   videoSettings.titleTemplate → Brand.videoSettings.titleTemplate
 //   → canonical default. Unknown values warn and fall through to canonical.
-function resolveTitleTemplate({ brand = null, product = null } = {}) {
+function resolveTitleTemplate({ brand = null, product = null, categories = [] } = {}) {
   const chain = [
     ['CatalogProduct.videoSettings.titleTemplate', product?.videoSettings?.titleTemplate],
+    ...((Array.isArray(categories) ? categories : []).map((c) => [
+      `Category[${c?.breadcrumbKey || c?._id}].videoSettings.titleTemplate`,
+      c?.videoSettings?.titleTemplate
+    ])),
     ['Brand.videoSettings.titleTemplate',          brand?.videoSettings?.titleTemplate],
   ];
   for (const [source, raw] of chain) {
@@ -78,6 +84,20 @@ function resolveTitleTemplate({ brand = null, product = null } = {}) {
     console.warn(`⚠️  resolveTitleTemplate: invalid template '${raw}' from ${source} — falling through to ${CANONICAL_TITLE_TEMPLATE}`);
   }
   return CANONICAL_TITLE_TEMPLATE;
+}
+
+// Most-specific-wins prompt guidance (prepended into buildVeoPrompt as
+// operatorPrompt). No concatenation — first non-empty string wins.
+//   ad.videoPromptGuidance → product.videoSettings.promptGuidance
+//   → each category leaf→root videoSettings.promptGuidance
+//   → brand.videoSettings.promptGuidance → null
+function resolvePromptGuidance({ ad = null, product = null, categories = [], brand = null }) {
+  const pick = v => (typeof v === 'string' && v.trim()) ? v.trim() : null;
+  return pick(ad?.videoPromptGuidance)
+      || pick(product?.videoSettings?.promptGuidance)
+      || (Array.isArray(categories) ? categories : []).map(c => pick(c?.videoSettings?.promptGuidance)).find(Boolean)
+      || pick(brand?.videoSettings?.promptGuidance)
+      || null;
 }
 
 const BASE_URL     = process.env.ATLAS_BASE_URL || 'https://api.atlascloud.ai/api/v1';
@@ -273,7 +293,7 @@ function estimateRenderCostUsd({ model, durationSec = 8, resolution = null } = {
 // instead of silently running with generic caps. Both prepareStoryboard
 // and generateForAd resolve from the same persisted docs, so the two
 // stages of one ad always agree on the model.
-function resolveVideoModel({ brand = null, product = null, canvasKeys = [] } = {}) {
+function resolveVideoModel({ brand = null, product = null, categories = [], canvasKeys = [] } = {}) {
   const keys = (Array.isArray(canvasKeys) ? canvasKeys : [canvasKeys]).filter(Boolean);
   const links = [];
   const pushCanvasLinks = (label, settings) => {
@@ -285,6 +305,12 @@ function resolveVideoModel({ brand = null, product = null, canvasKeys = [] } = {
   };
   pushCanvasLinks('CatalogProduct.videoSettings', product?.videoSettings);
   links.push(['CatalogProduct.videoSettings.model', product?.videoSettings?.model]);
+  // Category tier between product and brand (leaf → root).
+  for (const cat of (Array.isArray(categories) ? categories : [])) {
+    const label = `Category[${cat?.breadcrumbKey || cat?._id}].videoSettings`;
+    pushCanvasLinks(label, cat?.videoSettings);
+    links.push([`${label}.model`, cat?.videoSettings?.model]);
+  }
   pushCanvasLinks('Brand.videoSettings', brand?.videoSettings);
   links.push(['Brand.videoSettings.model', brand?.videoSettings?.model]);
   links.push(['ATLAS_VIDEO_MODEL env', process.env.ATLAS_VIDEO_MODEL]);
@@ -359,7 +385,7 @@ function resolveAspectRatioForModel(requested, caps) {
 // Returns { model, caps, aspectRatio, fallback } where fallback is
 // null or { from, reason } for logging / the Ad doc.
 function resolveModelAndAspect({
-  brand = null, product = null, canvasKeys = [],
+  brand = null, product = null, categories = [], canvasKeys = [],
   platformAspect, modelOverride = null, hasVideoSeed = false
 } = {}) {
   let model;
@@ -369,7 +395,7 @@ function resolveModelAndAspect({
     if (modelOverride) {
       console.warn(`⚠️  resolveModelAndAspect: unknown modelOverride '${modelOverride}' — using the persisted chain`);
     }
-    model = resolveVideoModel({ brand, product, canvasKeys });
+    model = resolveVideoModel({ brand, product, categories, canvasKeys });
   }
 
   let fallback = null;
@@ -773,6 +799,10 @@ function validateVideoSettings(vs) {
   if (vs.titleTemplate != null && vs.titleTemplate !== '' && !VALID_TITLE_TEMPLATES.includes(vs.titleTemplate)) {
     return `videoSettings.titleTemplate must be one of ${VALID_TITLE_TEMPLATES.join(', ')}`;
   }
+  if (vs.promptGuidance != null && vs.promptGuidance !== '') {
+    if (typeof vs.promptGuidance !== 'string' || vs.promptGuidance.length > 1000)
+      return 'videoSettings.promptGuidance must be a string ≤1000 characters';
+  }
   return null;
 }
 
@@ -1165,6 +1195,7 @@ async function prepareStoryboard({ ad, operatorPrompt = null, modelOverride = nu
       .sort({ createdAt: -1 }).lean(),
     ad.campaignId ? Campaign.findById(ad.campaignId).select('kind').lean() : null
   ]);
+  const categories = product ? await loadCategoryChainForProduct(product) : [];
 
   // Model resolution needs the brand + product docs, and aspect
   // resolution needs the model's supportedAspectRatios — so this block
@@ -1172,7 +1203,7 @@ async function prepareStoryboard({ ad, operatorPrompt = null, modelOverride = nu
   // of one ad agree on model + aspect (incl. the Grok aspect fallback).
   const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
   const { model, aspectRatio, fallback } = resolveModelAndAspect({
-    brand, product, canvasKeys: [ad.platformFormat, platformAspect],
+    brand, product, categories, canvasKeys: [ad.platformFormat, platformAspect],
     platformAspect, modelOverride, hasVideoSeed: media.fileType === 'video'
   });
   if (fallback) {
@@ -1186,7 +1217,7 @@ async function prepareStoryboard({ ad, operatorPrompt = null, modelOverride = nu
   let layoutInput = layoutInputInitial;
   const lpEmpty = !layoutInput?.input || Object.keys(layoutInput.input || {}).length === 0;
   if (lpEmpty && ad.productId) {
-    const tmpl = resolveTitleTemplate({ brand, product });
+    const tmpl = resolveTitleTemplate({ brand, product, categories });
     try {
       console.log(`📐 layoutInput[ad=${ad._id}]: deriving (template=${tmpl}, aspect=${aspectRatio}, product=${ad.productId})...`);
       const t0 = Date.now();
@@ -1243,6 +1274,7 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
           .lean()
       : []
   ]);
+  const categories = product ? await loadCategoryChainForProduct(product) : [];
 
   // Model resolution needs the brand + product docs (per-canvas /
   // per-product / per-brand overrides), and aspect resolution needs the
@@ -1252,7 +1284,7 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   // aspect fallback (shared with prepareStoryboard).
   const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
   const { model, caps, aspectRatio, fallback } = resolveModelAndAspect({
-    brand, product, canvasKeys: [ad.platformFormat, platformAspect],
+    brand, product, categories, canvasKeys: [ad.platformFormat, platformAspect],
     platformAspect, modelOverride, hasVideoSeed: media.fileType === 'video'
   });
   if (fallback) {
@@ -1282,7 +1314,7 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   let layoutInput = layoutInputInitial;
   const lpEmpty = !layoutInput?.input || Object.keys(layoutInput.input || {}).length === 0;
   if (lpEmpty && ad.productId) {
-    const tmpl = resolveTitleTemplate({ brand, product });
+    const tmpl = resolveTitleTemplate({ brand, product, categories });
     try {
       console.log(`📐 layoutInput[ad=${ad._id}]: deriving (template=${tmpl}, aspect=${aspectRatio}, product=${ad.productId})...`);
       const t0 = Date.now();
@@ -1343,19 +1375,34 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
 
   // Camera-only prompt — the canonical brand-script overlay composites
   // all on-screen text downstream from ad.copy + LayoutInputArtifact.
+  // Priority: (1) explicit operatorPrompt param (regenerate) → buildVeoPrompt
+  // prepend; (2) ad.videoPromptRaw → full replacement, bypass buildVeoPrompt;
+  // (3) guidance cascade → buildVeoPrompt prepend.
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
-  const prompt = buildVeoPrompt({
+  const promptArgs = {
     brand, product, media,
     layoutInput:  lpInput,
     sourceMedia:  lpSrcMedia,
     aspectRatio,
     seedHasText,
     hasProductReference: hasProductAnchor,
-    operatorPrompt,
     storyboard,
     caps,
     durationSec
-  });
+  };
+  // Whitespace-only operatorPrompt must NOT count as an override — trim-gate
+  // branch 1 so it falls through to raw/guidance like an empty refinement.
+  const opTrim = typeof operatorPrompt === 'string' ? operatorPrompt.trim() : null;
+  let prompt;
+  if (opTrim) {
+    prompt = buildVeoPrompt({ ...promptArgs, operatorPrompt: opTrim });
+  } else if (typeof ad.videoPromptRaw === 'string' && ad.videoPromptRaw.trim()) {
+    prompt = enforceRawByteCap(ad.videoPromptRaw, caps);
+    console.warn(`⚠️ atlasVideo[ad=${ad._id}]: RAW prompt override — canonical directives bypassed`);
+  } else {
+    const effectiveGuidance = resolvePromptGuidance({ ad, product, categories, brand });
+    prompt = buildVeoPrompt({ ...promptArgs, operatorPrompt: effectiveGuidance });
+  }
 
   // Omni reference-to-video consumes the seed VIDEO itself (trimmed to
   // the render window via the existing Cloudinary segment builder);

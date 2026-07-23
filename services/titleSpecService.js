@@ -51,21 +51,27 @@ function clearPresetCache() {
  * that tier's override). Tiers, highest→lowest:
  *   ad.titleStyleSpec[format]      (per-video override)
  *   product.titleStyleSpec[format] (per-product override)
+ *   category.titleStyleSpec[format] (each leaf→root; source `category:<breadcrumbKey>`)
  *   brand.titleStyleSpec[format]   (per-brand override)
  *   brand.titleStylePreset         (pinned named preset)
  *   canonical                      (guaranteed floor)
  * An invalid override validates+warns+falls through, never throws (only a
  * broken canonical throws — a deploy bug). Returns { spec, source } where
- * source ∈ 'ad' | 'product' | 'brand' | 'preset:<name>' | 'canonical'.
+ * source ∈ 'ad' | 'product' | 'category:<breadcrumbKey>' | 'brand' |
+ * 'preset:<name>' | 'canonical'.
  *
- * Brand parity: with no product/ad overrides this is byte-identical to the
- * previous brand→preset→canonical resolver.
+ * Brand parity: with no product/ad/category overrides this is byte-identical
+ * to the previous brand→preset→canonical resolver.
  */
-function resolveSpec({ brand = null, product = null, ad = null, format } = {}) {
+function resolveSpec({ brand = null, product = null, ad = null, format, categories = [] } = {}) {
   // 1. override documents, most-specific first
   const overrideTiers = [
     ['ad',      ad?.titleStyleSpec],
     ['product', product?.titleStyleSpec],
+    ...((Array.isArray(categories) ? categories : []).map((c) => [
+      `category:${c?.breadcrumbKey || c?._id || 'unknown'}`,
+      c?.titleStyleSpec
+    ])),
     ['brand',   brand?.titleStyleSpec],
   ];
   for (const [tier, doc] of overrideTiers) {

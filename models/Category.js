@@ -76,6 +76,13 @@ const categorySchema = new mongoose.Schema({
   // Shape: { quotes: [{text, author, source}], rating, reviewCount, summary, sources[], fetchedAt }
   categoryReviews: { type: mongoose.Schema.Types.Mixed, default: null },
 
+  // Cascade tier between product and brand for video model / prompt /
+  // title template (same shape as Brand.videoSettings) and per-format
+  // Remotion titleStyleSpec (same shape as Brand.titleStyleSpec). Null =
+  // inherit next broader tier. Mixed → callers MUST markModified.
+  videoSettings:  { type: mongoose.Schema.Types.Mixed, default: null },
+  titleStyleSpec: { type: mongoose.Schema.Types.Mixed, default: null },
+
   // Denormalized FK caches — relatedProducts list comes from
   // CatalogProduct.categoryRef pointing at this row; relatedMedia from
   // Media.matchedCategories[]. Maintained on best-effort basis; consumers
