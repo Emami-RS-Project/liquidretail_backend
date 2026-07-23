@@ -44,20 +44,39 @@ function clearPresetCache() {
 }
 
 /**
- * Resolve the normalized spec for a brand+format. Returns
- * { spec, source } where source ∈ 'brand' | 'preset:<name>' | 'canonical'.
- * Throws only if even the canonical preset is missing/invalid (deploy bug).
+ * Resolve the normalized spec for a scope + format. Cascade, most-specific
+ * wins, WHOLE per-format spec (not slot-merged — each override tier is a
+ * complete, self-validated per-format spec that the scope-parameterized
+ * Title Studio always saves in full; "revert to a broader scope" = clear
+ * that tier's override). Tiers, highest→lowest:
+ *   ad.titleStyleSpec[format]      (per-video override)
+ *   product.titleStyleSpec[format] (per-product override)
+ *   brand.titleStyleSpec[format]   (per-brand override)
+ *   brand.titleStylePreset         (pinned named preset)
+ *   canonical                      (guaranteed floor)
+ * An invalid override validates+warns+falls through, never throws (only a
+ * broken canonical throws — a deploy bug). Returns { spec, source } where
+ * source ∈ 'ad' | 'product' | 'brand' | 'preset:<name>' | 'canonical'.
+ *
+ * Brand parity: with no product/ad overrides this is byte-identical to the
+ * previous brand→preset→canonical resolver.
  */
-function resolveSpecForBrand(brand, format) {
-  // 1. per-brand override document
-  const doc = brand?.titleStyleSpec;
-  if (doc && typeof doc === 'object' && doc[format]) {
-    const res = validateTitleSpec(doc[format], { format });
-    if (res.ok) return { spec: res.normalized, source: 'brand' };
-    console.warn(`🎬 titleSpec: brand ${brand?.name || '?'} has invalid ${format} spec (${res.errors[0]}) — falling back`);
+function resolveSpec({ brand = null, product = null, ad = null, format } = {}) {
+  // 1. override documents, most-specific first
+  const overrideTiers = [
+    ['ad',      ad?.titleStyleSpec],
+    ['product', product?.titleStyleSpec],
+    ['brand',   brand?.titleStyleSpec],
+  ];
+  for (const [tier, doc] of overrideTiers) {
+    if (doc && typeof doc === 'object' && doc[format]) {
+      const res = validateTitleSpec(doc[format], { format });
+      if (res.ok) return { spec: res.normalized, source: tier };
+      console.warn(`🎬 titleSpec: ${tier} override has invalid ${format} spec (${res.errors[0]}) — falling through`);
+    }
   }
 
-  // 2. pinned named preset
+  // 2. pinned named preset (brand-level)
   const presetName = brand?.titleStylePreset;
   if (presetName) {
     const preset = loadPresetFile(presetName);
@@ -66,18 +85,23 @@ function resolveSpecForBrand(brand, format) {
       const res = validateTitleSpec(spec, { format });
       if (res.ok) return { spec: res.normalized, source: `preset:${presetName}` };
       console.warn(`🎬 titleSpec: preset '${presetName}' invalid for ${format} (${res.errors[0]}) — falling back to canonical`);
-    } else if (presetName) {
+    } else {
       console.warn(`🎬 titleSpec: preset '${presetName}' missing ${format} — falling back to canonical`);
     }
   }
 
-  // 3. canonical
+  // 3. canonical (guaranteed floor)
   const canonical = loadPresetFile(CANONICAL_PRESET);
   const spec = canonical?.byFormat?.[format];
   if (!spec) throw new Error(`canonical preset missing for format '${format}' (remotion/presets/canonical.json)`);
   const res = validateTitleSpec(spec, { format });
   if (!res.ok) throw new Error(`canonical preset invalid for '${format}': ${res.errors.join('; ')}`);
   return { spec: res.normalized, source: 'canonical' };
+}
+
+/** Brand-only convenience wrapper — unchanged behavior for existing callers. */
+function resolveSpecForBrand(brand, format) {
+  return resolveSpec({ brand, format });
 }
 
 function hexOrNull(v) {
@@ -143,6 +167,7 @@ async function buildBrandTokens(brand, { layoutInputBrand = null, specFontOverri
 }
 
 module.exports = {
+  resolveSpec,
   resolveSpecForBrand,
   buildBrandTokens,
   loadPresetFile,

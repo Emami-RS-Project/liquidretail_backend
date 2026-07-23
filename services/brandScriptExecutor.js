@@ -931,11 +931,21 @@ async function renderWithRemotionAndSave({ ad, brand, format }) {
     e.status = 400;
     throw e;
   }
-  const { resolveSpecForBrand, buildBrandTokens } = require('./titleSpecService');
+  const { resolveSpec, buildBrandTokens } = require('./titleSpecService');
   const { renderTitles } = require('./remotionRenderService');
 
   const meta = await buildMetaForAd(ad, brand);
-  const { spec, source } = resolveSpecForBrand(brand, format);
+  // Resolve the spec through the full cascade: ad override > product
+  // override > brand spec > preset > canonical. Fetch the product's
+  // override doc (cheap, lean) when the ad is product-linked.
+  let productForSpec = null;
+  if (ad.productId) {
+    try {
+      const CatalogProduct = require('../models/CatalogProduct');
+      productForSpec = await CatalogProduct.findById(ad.productId).select('titleStyleSpec').lean();
+    } catch { /* non-fatal — falls back to brand/canonical */ }
+  }
+  const { spec, source } = resolveSpec({ brand, product: productForSpec, ad, format });
   // Same LayoutInputArtifact tier buildMetaForAd uses — brands without
   // explicit color/font fields still inherit the creative director's
   // brand block (input.brand.primary_color / font_family / …).
