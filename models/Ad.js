@@ -138,6 +138,11 @@ const adSchema = new mongoose.Schema({
   conceptId:          { type: String, default: null, index: true },
   conceptArtifactId:  { type: mongoose.Schema.Types.ObjectId, ref: 'CreativeDirectionArtifact', default: null, index: true },
   mediaIds:           { type: [mongoose.Schema.Types.ObjectId], ref: 'Media', default: [] },
+  // Operator's explicit reference-image stack IN SELECTION ORDER for
+  // deterministic video ads (position 0 = primary seed). Empty ⇒ render
+  // falls back to default hero + feed-order alts (buildReferenceImages).
+  // Distinct from mediaIds (Director concept media picks / full set).
+  referenceMediaIds:  { type: [mongoose.Schema.Types.ObjectId], ref: 'Media', default: [] },
   judgeRank:          { type: Number, default: null, index: true },
   judgeScore:         { type: Number, default: null },
   generationOrder:    { type: Number, default: null },
