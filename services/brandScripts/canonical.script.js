@@ -276,10 +276,14 @@ module.exports = {
     const starFontSize   = isVertical ? 28 : 22;
     const scoreFontSize  = isVertical ? 22 : 18;
     const reviewFontSize = isVertical ? 19 : 16;
-    const stars = '\u2605 \u2605 \u2605 \u2605 \u2605';
 
-    ctx.font = `800 ${starFontSize}px "${fonts.sans}"`;
-    const starsW = ctx.measureText(stars).width;
+    // Stars are drawn as canvas paths (not text) so brand fonts that
+    // lack the U+2605 glyph don't render tofu boxes. See drawStarRow
+    // helper at file bottom. `starsW` is precomputed the same way the
+    // helper renders so downstream layout math is consistent.
+    const starGap  = Math.round(starFontSize * 0.35);
+    const starsW   = starFontSize * 5 + starGap * 4;
+
     ctx.font = `700 ${scoreFontSize}px "${fonts.sans}"`;
     const scoreText = `${rating.toFixed(1)}/5`;
     const scoreW = ctx.measureText(scoreText).width;
@@ -317,10 +321,15 @@ module.exports = {
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
 
-    // Stars
-    ctx.font = `800 ${starFontSize}px "${fonts.sans}"`;
-    ctx.fillStyle = rgba(colors.accentGold, 1);
-    ctx.fillText(stars, ratingBoxX + scrimPadX, rowMidY);
+    // Stars — path-drawn to bypass font glyph-coverage issues.
+    drawStarRow(
+      ctx,
+      ratingBoxX + scrimPadX,
+      rowMidY,
+      starFontSize,
+      starGap,
+      rgba(colors.accentGold, 1)
+    );
     // Score
     ctx.font = `700 ${scoreFontSize}px "${fonts.sans}"`;
     ctx.fillStyle = rgba(colors.textPrimary, 1);
@@ -635,4 +644,35 @@ function normalizeQuote(value) {
     .replace(/^[\u201C\u201D"'\u2018\u2019]+/, '')
     .replace(/[\u201C\u201D"'\u2018\u2019]+$/, '')
     .trim();
+}
+
+// Draw a row of 5 filled 5-point stars using canvas paths instead of
+// the U+2605 glyph. Brand fonts (Bebas Neue, Antonio, Great Vibes,
+// etc.) frequently lack the star glyph and produce tofu boxes — this
+// bypasses font glyph-coverage entirely.
+//   x, yCenter — top-left of the row, vertically centered around yCenter
+//   size       — outer diameter of each star (matches previous font-px size)
+//   gap        — horizontal gap between adjacent stars
+//   fillStyle  — canvas fill string
+function drawStarRow(ctx, x, yCenter, size, gap, fillStyle) {
+  ctx.save();
+  ctx.fillStyle = fillStyle;
+  const outerR = size / 2;
+  const innerR = outerR * 0.4;                  // 5-point-star ratio ~0.38
+  for (let s = 0; s < 5; s++) {
+    const cx = x + s * (size + gap) + outerR;
+    const cy = yCenter;
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 === 0 ? outerR : innerR;
+      const a = -Math.PI / 2 + i * (Math.PI / 5); // start at top, 36° steps
+      const px = cx + r * Math.cos(a);
+      const py = cy + r * Math.sin(a);
+      if (i === 0) ctx.moveTo(px, py);
+      else         ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
 }

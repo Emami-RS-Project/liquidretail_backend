@@ -126,6 +126,56 @@ const Accent = ({ accent, tokens, progress, dims }) => {
   );
 };
 
+// StarRow — inline SVG so the star row never depends on the caller's
+// font having U+2605. Brand fonts (Bebas Neue, Antonio, Great Vibes,
+// etc.) frequently lack the glyph and the previous text-based rendering
+// showed tofu boxes on shipped ads. `size` is the outer diameter of
+// each star (matches the previous font-px value); `gap` is horizontal
+// spacing between stars.
+function StarRow({ color, size, gap, count = 5 }) {
+  const points = starPoints(size / 2, (size / 2) * 0.4);
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap,
+        lineHeight: 1,
+        // Non-breaking so a 5-star row never wraps mid-row on tight rating scrims.
+        whiteSpace: 'nowrap',
+      }}
+      aria-label={`${count} out of ${count} stars`}
+    >
+      {Array.from({ length: count }, (_, i) => (
+        <svg
+          key={i}
+          width={size}
+          height={size}
+          viewBox={`0 0 ${size} ${size}`}
+          style={{ display: 'block' }}
+        >
+          <polygon points={points} fill={color} />
+        </svg>
+      ))}
+    </span>
+  );
+}
+
+// Build a "cx,cy cx,cy …" polygon points string for a 5-point star of
+// the given outer + inner radii, centered at (r, r) so the SVG viewBox
+// can be a square of side 2r.
+function starPoints(outerR, innerR) {
+  const cx = outerR;
+  const cy = outerR;
+  const verts = [];
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? outerR : innerR;
+    const a = -Math.PI / 2 + i * (Math.PI / 5);
+    verts.push(`${(cx + r * Math.cos(a)).toFixed(2)},${(cy + r * Math.sin(a)).toFixed(2)}`);
+  }
+  return verts.join(' ');
+}
+
 export const TextSlot = ({ slot, content, tokens, dims, format, progress }) => {
   const t = slot.treatment;
   const text = applyCasing(content, t.casing);
@@ -159,18 +209,11 @@ export const RatingSlot = ({ slot, content, tokens, dims, format }) => {
   const secondaryToken = t.colorToken === 'textOnLight' ? 'textSecondaryOnLight' : 'textSecondary';
   return (
     <div style={{ ...scrimStyle(t, tokens, dims), display: 'inline-flex', alignItems: 'center', gap: Math.round(dims.width * 0.016) }}>
-      <span
-        style={{
-          color: tokenColor(tokens, 'stars'),
-          fontSize: Math.round(size * 1.15),
-          letterSpacing: '0.12em',
-          fontFamily: fontFamilyCss(font),
-          fontWeight: 800,
-          textShadow: TEXT_SHADOWS.soft,
-        }}
-      >
-        {'★★★★★'}
-      </span>
+      <StarRow
+        color={tokenColor(tokens, 'stars')}
+        size={Math.round(size * 1.15)}
+        gap={Math.round(size * 0.15)}
+      />
       <span style={{ color: tokenColor(tokens, t.colorToken), fontSize: size, fontWeight: 700, fontFamily: fontFamilyCss(font), textShadow: TEXT_SHADOWS.soft }}>
         {rating.toFixed(1)}/5
       </span>

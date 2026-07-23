@@ -435,14 +435,12 @@ module.exports = {
       30
     );
 
-    const stars = '\u2605\u2605\u2605\u2605\u2605';
     const scoreText = `${rating.toFixed(1)}/5`;
 
-    ctx.font =
-      `800 ${starFontSize}px "${fonts.sans}"`;
-
-    const starsW =
-      ctx.measureText(stars).width;
+    // Stars — path-drawn to bypass font glyph-coverage issues.
+    // See drawStarRow helper at the bottom of the file.
+    const starGap = Math.round(starFontSize * 0.15);
+    const starsW  = starFontSize * 5 + starGap * 4;
 
     ctx.font =
       `700 ${scoreFontSize}px "${fonts.sans}"`;
@@ -510,17 +508,14 @@ module.exports = {
     let currentX =
       ratingBoxX + scrimPadX;
 
-    // Stars
-    ctx.font =
-      `800 ${starFontSize}px "${fonts.sans}"`;
-
-    ctx.fillStyle =
-      rgba(colors.stars, 1);
-
-    ctx.fillText(
-      stars,
+    // Stars — path-drawn.
+    drawStarRow(
+      ctx,
       currentX,
-      centerY
+      centerY,
+      starFontSize,
+      starGap,
+      rgba(colors.stars, 1)
     );
 
     currentX +=
@@ -1029,4 +1024,30 @@ function normalizeQuote(value) {
     .replace(/^[\u201C\u201D"'\u2018\u2019]+/, '')
     .replace(/[\u201C\u201D"'\u2018\u2019]+$/, '')
     .trim();
+}
+
+// Path-drawn 5-point star row — bypasses font glyph-coverage issues
+// that produce tofu boxes when brand fonts lack U+2605. Matches the
+// helper in canonical.script.js / top_scrim_editorial.script.js.
+function drawStarRow(ctx, x, yCenter, size, gap, fillStyle) {
+  ctx.save();
+  ctx.fillStyle = fillStyle;
+  const outerR = size / 2;
+  const innerR = outerR * 0.4;
+  for (let s = 0; s < 5; s++) {
+    const cx = x + s * (size + gap) + outerR;
+    const cy = yCenter;
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 === 0 ? outerR : innerR;
+      const a = -Math.PI / 2 + i * (Math.PI / 5);
+      const px = cx + r * Math.cos(a);
+      const py = cy + r * Math.sin(a);
+      if (i === 0) ctx.moveTo(px, py);
+      else         ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
 }
