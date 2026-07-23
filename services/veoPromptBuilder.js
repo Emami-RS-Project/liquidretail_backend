@@ -83,20 +83,6 @@ function archetypeDescription(arch) {
   return map[arch] || 'cinematic product shot';
 }
 
-function archetypeNegativeSpaceGuidance(arch) {
-  const map = {
-    full_bleed_hero_bottom_panel: 'Keep the bottom 30% of the frame open and relatively uncluttered — animated text panels and a CTA will appear there.',
-    vertical_split:               'Keep one half of the frame (the side without the product) visually simple and low-contrast — animated brand copy and social proof will fill that side.',
-    diagonal_carve:               'Keep the quieter diagonal half of the frame clean — animated headline and proof text will occupy that zone.',
-    typographic_dominant:         'Keep the upper 60% of the frame open with strong negative space — large animated headline copy anchors that area.',
-    hero_quote_overlay:           'Keep the lower-left third and upper-left quadrant free of visual complexity — animated quote cards and review text will rotate through those zones.',
-    magazine_editorial:           'Keep the left third of the frame clean and low-contrast — animated editorial copy, eyebrow labels, and review text occupy that column.',
-    stat_led_social_proof:        'Keep the center of the frame open above and below the subject — animated stats and cycling review snippets rotate through the center zone.',
-    product_card_grid:            'Keep the frame edges and corners clean — animated copy and CTA overlays occupy the border zones.'
-  };
-  return map[arch] || 'Keep a clear uncluttered section of the frame free of visual complexity — animated text overlays will composite there.';
-}
-
 // Converts "Person (Florist)" → "florist", "Person (Model)" → "model", etc.
 function naturalizeLabel(label) {
   const m = String(label).match(/^Person \((.+)\)$/i);
@@ -163,13 +149,6 @@ function resolveSubject({ layoutInput, sourceMedia, media }) {
     : null;
 
   return { label: naturalizeLabel(label), richDesc, hPos, vSpan };
-}
-
-function buildOverlayIntent({ concept }) {
-  // The canonical brand-script overlay composites deterministic text
-  // downstream. The video model only needs to know: (a) text will land,
-  // (b) where to keep negative space open for it.
-  return `COMPOSITING CONTEXT: Text overlays composited downstream. ${archetypeNegativeSpaceGuidance(concept?.archetype)}`;
 }
 
 // ── GEMINI OMNI default prompt — optimized for google/gemini-omni-flash/* (20,000-byte cap) ──
@@ -270,7 +249,6 @@ const GROK_DIRECTIVES = {
 // Static directive phrasing comes from OMNI_DIRECTIVES or GROK_DIRECTIVES
 // via promptProfileFor(caps); shared dynamic lines stay below.
 function buildVeoPrompt({
-  concept,
   brand,          // eslint-disable-line no-unused-vars — kept for call-site stability
   product,
   media,
@@ -336,7 +314,8 @@ function buildVeoPrompt({
   // NO TEXT — the brand-script overlay composites downstream. Text and
   // logos physically present in the photographs are fine to show (Scene
   // 2 zooms toward the logo); GENERATING text/graphics is what's banned.
-  lines.push(buildOverlayIntent({ concept }));
+  // (The creative-director negative-space hint was removed — titling is
+  // canonical/deterministic and no longer shapes the video prompt.)
   lines.push(d.noText);
 
   if (seedHasText) {
@@ -422,7 +401,6 @@ module.exports = {
   buildVeoPrompt,
   resolveSubject,
   archetypeDescription,
-  archetypeNegativeSpaceGuidance,
   aspectRatioForPlatformFormat,
   PLATFORM_FORMAT_ASPECT,
   promptProfileFor,

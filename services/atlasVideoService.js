@@ -29,7 +29,6 @@ const Brand                     = require('../models/Brand');
 const Campaign                  = require('../models/Campaign');
 const CatalogProduct            = require('../models/CatalogProduct');
 const LayoutInputArtifact       = require('../models/LayoutInputArtifact');
-const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact');
 const { uploadBufferToCloudinary, uploadUrlToCloudinary } = require('./cloudinaryService');
 const { recordFlatCost } = require('./costTracker');
 const { buildVeoPrompt, aspectRatioForPlatformFormat, promptProfileFor } = require('./veoPromptBuilder');
@@ -55,20 +54,31 @@ const REFRAME_COST_USD = () => {
   return Number.isFinite(n) && n >= 0 ? n : 0.04;
 };
 
-// Maps the concept's creative_style enum to an AI template id for
-// layoutInput derivation. Mirrors the table in campaignAdsGenerationService
-// but kept inline here to avoid a circular import. All AI templates
-// share the same derivationTemplate ('ugc_split_screen') so the
-// derived input is structurally identical across styles — picking the
-// concept-aligned template just preserves any style-specific derivation
-// hints baked into the registry.
-const CREATIVE_STYLE_TO_TEMPLATE = {
-  brand_led:        'ai_brand_led',
-  ugc_led:          'ai_ugc_led',
-  social_proof_led: 'ai_social_proof_led',
-  editorial:        'ai_editorial',
-  promotional:      'ai_promotional'
-};
+// Titling is CANONICAL by default. The layoutInput derivation template is
+// fixed to the canonical template ('ai_brand_led') UNLESS a brand or product
+// overrides it in Title Studio via videoSettings.titleTemplate. The creative
+// director no longer selects the template (concept.creative_style is ignored
+// here) — titling is deterministic + operator-controlled, not concept-driven.
+const CANONICAL_TITLE_TEMPLATE = 'ai_brand_led';
+const VALID_TITLE_TEMPLATES = [
+  'ai_brand_led', 'ai_ugc_led', 'ai_social_proof_led', 'ai_editorial', 'ai_promotional',
+];
+
+// Resolve the layoutInput template (most-specific wins):
+//   CatalogProduct.videoSettings.titleTemplate → Brand.videoSettings.titleTemplate
+//   → canonical default. Unknown values warn and fall through to canonical.
+function resolveTitleTemplate({ brand = null, product = null } = {}) {
+  const chain = [
+    ['CatalogProduct.videoSettings.titleTemplate', product?.videoSettings?.titleTemplate],
+    ['Brand.videoSettings.titleTemplate',          brand?.videoSettings?.titleTemplate],
+  ];
+  for (const [source, raw] of chain) {
+    if (raw == null || raw === '') continue;
+    if (VALID_TITLE_TEMPLATES.includes(raw)) return raw;
+    console.warn(`⚠️  resolveTitleTemplate: invalid template '${raw}' from ${source} — falling through to ${CANONICAL_TITLE_TEMPLATE}`);
+  }
+  return CANONICAL_TITLE_TEMPLATE;
+}
 
 const BASE_URL     = process.env.ATLAS_BASE_URL || 'https://api.atlascloud.ai/api/v1';
 const BUILT_IN_DEFAULT_MODEL = 'google/gemini-omni-flash/image-to-video-developer';
@@ -760,6 +770,9 @@ function validateVideoSettings(vs) {
   if (vs.titlePlacementMode != null && vs.titlePlacementMode !== '' && !['canonical', 'content'].includes(vs.titlePlacementMode)) {
     return "videoSettings.titlePlacementMode must be 'canonical' or 'content'";
   }
+  if (vs.titleTemplate != null && vs.titleTemplate !== '' && !VALID_TITLE_TEMPLATES.includes(vs.titleTemplate)) {
+    return `videoSettings.titleTemplate must be one of ${VALID_TITLE_TEMPLATES.join(', ')}`;
+  }
   return null;
 }
 
@@ -1166,12 +1179,6 @@ async function prepareStoryboard({ ad, operatorPrompt = null, modelOverride = nu
     console.log(`🎬 atlasVideo[ad=${ad._id}]: model fallback ${fallback.from} → ${model} (${fallback.reason})`);
   }
 
-  let concept = null;
-  if (ad.conceptId && ad.conceptArtifactId) {
-    const direction = await CreativeDirectionArtifact.findById(ad.conceptArtifactId).lean();
-    concept = direction?.concepts?.find(c => c.concept_id === ad.conceptId) || null;
-  }
-
   // Derive layoutInput if missing — the brand-script overlay downstream
   // reads its copy/proof/product/theme fields directly. Cached per
   // (mediaId, template, aspectRatio, productId, variantKind,
@@ -1179,7 +1186,7 @@ async function prepareStoryboard({ ad, operatorPrompt = null, modelOverride = nu
   let layoutInput = layoutInputInitial;
   const lpEmpty = !layoutInput?.input || Object.keys(layoutInput.input || {}).length === 0;
   if (lpEmpty && ad.productId) {
-    const tmpl = CREATIVE_STYLE_TO_TEMPLATE[concept?.creative_style] || 'ai_brand_led';
+    const tmpl = resolveTitleTemplate({ brand, product });
     try {
       console.log(`📐 layoutInput[ad=${ad._id}]: deriving (template=${tmpl}, aspect=${aspectRatio}, product=${ad.productId})...`);
       const t0 = Date.now();
@@ -1261,26 +1268,21 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   // standard 8s), clamped/enum-snapped to the resolved model's caps.
   const durationSec = resolveDurationSec(ad.videoDurationSec, caps);
 
-  let concept = null;
-  if (ad.conceptId && ad.conceptArtifactId) {
-    const direction = await CreativeDirectionArtifact.findById(ad.conceptArtifactId).lean();
-    concept = direction?.concepts?.find(c => c.concept_id === ad.conceptId) || null;
-  }
-
   // Video pipeline previously skipped layoutInput derivation, so
   // products that hadn't been through the image-gen pipeline arrived
-  // here with no derived rating/price/benefits/badges/proof data —
-  // collapsing every ad to the concept.copy_picks fallback shape.
-  // Trigger derivation now if the artifact is missing or empty. The
-  // builder caches per (mediaId, template, aspectRatio, productId,
-  // variantKind, campaignContextHash) — so subsequent runs hit the
-  // cache instead of re-deriving. Non-fatal: if derivation fails
-  // (e.g. Gemini credits exhausted), we fall back to whatever data
-  // was already on the artifact / CatalogProduct.
+  // here with no derived rating/price/benefits/badges/proof data.
+  // Trigger derivation now if the artifact is missing or empty, using the
+  // CANONICAL template (or the brand/product Title Studio override) — the
+  // creative director no longer influences it. The builder caches per
+  // (mediaId, template, aspectRatio, productId, variantKind,
+  // campaignContextHash) — so subsequent runs hit the cache instead of
+  // re-deriving. Non-fatal: if derivation fails (e.g. Gemini credits
+  // exhausted), we fall back to whatever data was already on the artifact
+  // / CatalogProduct.
   let layoutInput = layoutInputInitial;
   const lpEmpty = !layoutInput?.input || Object.keys(layoutInput.input || {}).length === 0;
   if (lpEmpty && ad.productId) {
-    const tmpl = CREATIVE_STYLE_TO_TEMPLATE[concept?.creative_style] || 'ai_brand_led';
+    const tmpl = resolveTitleTemplate({ brand, product });
     try {
       console.log(`📐 layoutInput[ad=${ad._id}]: deriving (template=${tmpl}, aspect=${aspectRatio}, product=${ad.productId})...`);
       const t0 = Date.now();
@@ -1343,7 +1345,7 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   // all on-screen text downstream from ad.copy + LayoutInputArtifact.
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
   const prompt = buildVeoPrompt({
-    concept, brand, product, media,
+    brand, product, media,
     layoutInput:  lpInput,
     sourceMedia:  lpSrcMedia,
     aspectRatio,
