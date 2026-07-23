@@ -59,7 +59,7 @@ const { buildVeoPrompt, aspectRatioForPlatformFormat, promptProfileFor } = requi
     ad.productId ? CatalogProduct.findById(ad.productId).lean() : null,
     ad.productId
       ? Media.find({ source: 'catalog-product', 'metadata.catalogProductId': ad.productId })
-          .select('_id fileUrl classification metadata').sort({ createdAt: 1 }).lean()
+          .select('_id fileUrl classification metadata width height').sort({ createdAt: 1 }).lean()
       : []
   ]);
 
@@ -71,7 +71,10 @@ const { buildVeoPrompt, aspectRatioForPlatformFormat, promptProfileFor } = requi
   });
 
   const referenceCount = resolveReferenceImageCount({ brand, product });
-  const imageUrls = buildReferenceImages({ media, product, catalogMedias, aspectRatio, caps, referenceCount, brand });
+  // Dry run must never spend: force the generative reframe OFF so the async
+  // builder returns deterministic Cloudinary crops (no billable outpaint).
+  process.env.REFRAME_ENABLED = 'false';
+  const imageUrls = await buildReferenceImages({ media, product, catalogMedias, aspectRatio, caps, referenceCount, brand });
   const hasProductAnchor = imageUrls.length >= 2;
   const seedHasText = Array.isArray(media.text) && media.text.length > 0;
 
