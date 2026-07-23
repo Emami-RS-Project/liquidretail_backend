@@ -8,6 +8,8 @@ const router  = express.Router();
 
 const Brand                = require('../models/Brand');
 const DetectRun            = require('../models/DetectRun');
+const CatalogProduct       = require('../models/CatalogProduct');
+const Media                = require('../models/Media');
 const AdvertiserMembership = require('../models/AdvertiserMembership');
 const {
   ensureSalesDemosAdvertiser,
@@ -137,17 +139,35 @@ router.get('/brands', async (req, res) => {
 
     if (brands.length === 0) return res.json({ brands });
 
-    // One aggregation for all brands — cheaper than N queries.
+    // Batched aggregations for all brands — cheaper than N queries each.
     const brandIds = brands.map(b => b._id);
-    const runs = await DetectRun.aggregate([
-      { $match: { brandId: { $in: brandIds }, status: { $in: ['queued', 'processing'] } } },
-      { $group: { _id: '$brandId', count: { $sum: 1 } } }
+    const [runs, productAgg, postAgg] = await Promise.all([
+      DetectRun.aggregate([
+        { $match: { brandId: { $in: brandIds }, status: { $in: ['queued', 'processing'] } } },
+        { $group: { _id: '$brandId', count: { $sum: 1 } } }
+      ]),
+      // Ingested catalog size per brand.
+      CatalogProduct.aggregate([
+        { $match: { brandId: { $in: brandIds } } },
+        { $group: { _id: '$brandId', count: { $sum: 1 } } }
+      ]),
+      // IG posts only — Media source 'apify-ig'/'instagram'. EXCLUDES the
+      // 'catalog-product' wrapper Media that product-detect creates, so the
+      // post count reflects real posts, not product images.
+      Media.aggregate([
+        { $match: { brandId: { $in: brandIds }, source: { $in: ['apify-ig', 'instagram'] } } },
+        { $group: { _id: '$brandId', count: { $sum: 1 } } }
+      ])
     ]);
     const inFlightByBrand = new Map(runs.map(r => [String(r._id), r.count]));
+    const productsByBrand = new Map(productAgg.map(r => [String(r._id), r.count]));
+    const postsByBrand    = new Map(postAgg.map(r => [String(r._id), r.count]));
 
     const enriched = brands.map(b => ({
       ...b,
-      inFlightDetectRuns: inFlightByBrand.get(String(b._id)) || 0
+      inFlightDetectRuns: inFlightByBrand.get(String(b._id)) || 0,
+      productCount:       productsByBrand.get(String(b._id)) || 0,
+      postCount:          postsByBrand.get(String(b._id)) || 0
     }));
 
     res.json({ brands: enriched });
