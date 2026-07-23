@@ -253,13 +253,21 @@ const adSchema = new mongoose.Schema({
   chromeVersion:      { type: String, default: null },
   renderUrl:          { type: String, default: null },
   // Per-AD (per-video) titling override — top of the resolution cascade
-  // (ad > product > brand > preset > canonical, see titleSpecService.
+  // (ad > product > category > brand > preset > canonical, see titleSpecService.
   // resolveSpec). Same per-format shape as Brand.titleStyleSpec. Written by
   // the per-video Title Studio when the operator saves scope "this ad";
   // null = inherit product/brand. DISTINCT from titlingSnapshot below (that
   // is a read-only render-time audit copy, NOT a source of truth). Mixed →
   // callers MUST markModified('titleStyleSpec').
   titleStyleSpec:     { type: mongoose.Schema.Types.Mixed, default: null },
+  // Operator INPUT fields for video prompt — distinct from the render-time
+  // audit outputs veoPrompt / veoModel above. Guidance merges into
+  // buildVeoPrompt as the operatorPrompt prepend; raw fully replaces the
+  // canonical prompt (bypasses buildVeoPrompt). Most-specific cascade also
+  // reads product/category/brand videoSettings.promptGuidance when these
+  // are null (see atlasVideoService.resolvePromptGuidance).
+  videoPromptGuidance: { type: String, default: null },
+  videoPromptRaw:      { type: String, default: null },
   // Snapshot of the EXACT resolved titling used for the last render —
   // { engine, format, spec?, meta, capturedAt }. buildMetaForAd is
   // otherwise recomputed at view time from ad.copy + LayoutInputArtifact +

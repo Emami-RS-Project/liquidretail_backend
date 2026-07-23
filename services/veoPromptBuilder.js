@@ -397,6 +397,27 @@ function enforceByteCap(lines, caps = null) {
   return prompt;
 }
 
+// Hard-truncate a full raw-prompt override to the model's byte cap.
+// Unlike enforceByteCap (which drops low-priority lines from a structured
+// line list), this just cuts the string on a safe UTF-8 boundary and
+// warns — used when ad.videoPromptRaw bypasses buildVeoPrompt entirely.
+function enforceRawByteCap(text, caps = null) {
+  const cap = caps?.promptByteCap || DEFAULT_BYTE_CAP;
+  const s = String(text ?? '');
+  const bytes = Buffer.byteLength(s, 'utf8');
+  if (bytes <= cap) return s;
+
+  let buf = Buffer.from(s, 'utf8').subarray(0, cap);
+  // Do not end mid multi-byte codepoint (continuation bytes are 10xxxxxx).
+  while (buf.length > 0 && (buf[buf.length - 1] & 0xc0) === 0x80) {
+    buf = buf.subarray(0, buf.length - 1);
+  }
+  console.warn(
+    `⚠️  veoPrompt raw: truncated operator raw prompt from ${bytes} → ${buf.length} bytes (cap=${cap})`
+  );
+  return buf.toString('utf8');
+}
+
 module.exports = {
   buildVeoPrompt,
   resolveSubject,
@@ -404,6 +425,7 @@ module.exports = {
   aspectRatioForPlatformFormat,
   PLATFORM_FORMAT_ASPECT,
   promptProfileFor,
-  PROMPT_PROFILES
+  PROMPT_PROFILES,
+  enforceRawByteCap
 };
 

@@ -403,6 +403,73 @@ router.get('/categories', async (req, res) => {
   }
 });
 
+// PATCH /api/catalog/categories/:id
+// Editable keys ONLY: videoSettings (validate + shallow-merge + markModified)
+// and titleStyleSpec (validateTitleStyleSpecDoc → normalized + markModified).
+// Declared BEFORE router.patch('/:id') so '/categories/:id' is not captured
+// by the product :id route. Mirrors routes/brand.js MIXED_FIELDS pattern.
+router.patch('/categories/:id', express.json(), async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ error: 'id is not a valid ObjectId' });
+    }
+    const category = await Category.findOne(tenantFilter(req, { _id: req.params.id }));
+    if (!category) return res.status(404).json({ error: 'category not found' });
+
+    // videoSettings carries model slugs + promptGuidance consumed at render
+    // time — reject invalid shapes here (same validator as brand/product PATCH).
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'videoSettings') && req.body.videoSettings != null) {
+      const { validateVideoSettings } = require('../services/atlasVideoService');
+      const err = validateVideoSettings(req.body.videoSettings);
+      if (err) return res.status(400).json({ error: err });
+    }
+
+    // titleStyleSpec is rendered by the Remotion engine — schema-validate
+    // at write time so a bad edit can never be persisted. Render time
+    // re-validates and falls back to the canonical preset regardless.
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'titleStyleSpec') && req.body.titleStyleSpec != null) {
+      const { validateTitleStyleSpecDoc } = require('../services/titleSpecValidator');
+      const specRes = validateTitleStyleSpecDoc(req.body.titleStyleSpec);
+      if (!specRes.ok) return res.status(400).json({ error: `titleStyleSpec invalid: ${specRes.errors.slice(0, 5).join('; ')}` });
+      req.body.titleStyleSpec = specRes.normalized;
+    }
+
+    const editable = ['videoSettings', 'titleStyleSpec'];
+    const MIXED_FIELDS = new Set(['videoSettings', 'titleStyleSpec']);
+    let touched = false;
+
+    for (const k of editable) {
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, k)) {
+        const v = req.body[k];
+        const isEmpty = v == null || v === '' || (Array.isArray(v) && v.length === 0);
+        if (isEmpty) {
+          category[k] = null;
+        } else if (
+          // SHALLOW MERGE for videoSettings: multiple UI cards may PATCH
+          // with partial objects; replace semantics would drop sibling keys.
+          k === 'videoSettings'
+          && v && typeof v === 'object' && !Array.isArray(v)
+          && category.videoSettings && typeof category.videoSettings === 'object'
+          && !Array.isArray(category.videoSettings)
+        ) {
+          category.videoSettings = { ...(category.videoSettings || {}), ...v };
+        } else {
+          category[k] = v;
+        }
+        if (MIXED_FIELDS.has(k)) category.markModified(k);
+        touched = true;
+      }
+    }
+
+    if (!touched) return res.status(400).json({ error: 'no editable fields provided' });
+    await category.save();
+    res.json({ category });
+  } catch (err) {
+    console.error('catalog categories PATCH failed:', err);
+    res.status(500).json({ error: err.message || 'category update failed' });
+  }
+});
+
 // POST /api/catalog/brands/:id/infer-categories?force=true
 // → { ok, total, ok_count, skipped, failed, durationMs }
 //
