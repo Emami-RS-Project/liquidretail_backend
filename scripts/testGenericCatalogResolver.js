@@ -21,6 +21,10 @@ const {
   looksLikeSlug,
   extractProductIdFromHtml
 } = require('../services/genericCatalogResolver');
+// Breadcrumb capture reuses the pure breadcrumbParser — the resolver
+// calls this on each PDP's HTML to stamp inferredBreadcrumb in-scan
+// (avoids a second per-product crawl). Cover the parser directly here.
+const { extractBreadcrumb } = require('../services/breadcrumbParser');
 
 let passed = 0;
 let failed = 0;
@@ -462,6 +466,32 @@ check('price: all-$0 offers → price null (no fake $0 stored)', () => {
 check('category: breadcrumb array → most-specific leaf string', () => {
   const p = mapJsonLdProduct({ '@type': 'Product', name: 'X', sku: 'A', category: ['Furniture', 'Living Room', 'Sofas'], offers: { price: '1' }, image: 'x' }, 'https://s.com/x');
   assert.equal(p.category, 'Sofas');
+});
+
+// ── breadcrumb capture (in-scan, reused by resolver) ──
+check('breadcrumb: BreadcrumbList → names, nav-chrome ("Home") stripped', () => {
+  const html = `<script type="application/ld+json">${JSON.stringify({
+    '@type': 'BreadcrumbList',
+    itemListElement: [
+      { '@type': 'ListItem', position: 1, name: 'Home' },
+      { '@type': 'ListItem', position: 2, name: 'Mens' },
+      { '@type': 'ListItem', position: 3, name: 'Tops' }
+    ]
+  })}</script>`;
+  const r = extractBreadcrumb(html);
+  assert.deepEqual(r.breadcrumb, ['Mens', 'Tops']);
+  assert.equal(r.source, 'breadcrumbList');
+});
+check('breadcrumb: falls back to Product.category "A > B > C" string', () => {
+  const html = `<script type="application/ld+json">${JSON.stringify({
+    '@type': 'Product', name: 'X', category: 'Apparel > Mens > Shirts'
+  })}</script>`;
+  const r = extractBreadcrumb(html);
+  assert.deepEqual(r.breadcrumb, ['Apparel', 'Mens', 'Shirts']);
+  assert.equal(r.source, 'productCategory');
+});
+check('breadcrumb: no structured data → null (resolver leaves it to inference)', () => {
+  assert.equal(extractBreadcrumb('<html><body>no schema here</body></html>'), null);
 });
 
 // ── summary ────────────────────────────────────────────────────────

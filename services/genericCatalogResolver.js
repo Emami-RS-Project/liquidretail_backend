@@ -29,6 +29,10 @@
 const zlib = require('zlib');
 const http = require('./httpScrapeClient');
 const ingestHelpers = require('./shopifyPublicIngestService');
+// Reuse the pure (axios-free) breadcrumb parser so we can capture the
+// PDP's BreadcrumbList from the SAME HTML the scan already fetched —
+// avoids a second full per-product crawl by the post-sync inference pass.
+const { extractBreadcrumb } = require('./breadcrumbParser');
 
 // ── constants ──────────────────────────────────────────────────────
 const LOG = '🗺';
@@ -1027,108 +1031,86 @@ async function resolveGenericCatalog(brand, { run = null, abortCheck = async () 
   console.log(`   · ${LOG}  ${pageEntries.length} candidate URLs (scanning up to cap=${effectiveCap})`);
   run?.stage?.('scanning product pages');
 
-  // ── PDP loop (sequential; respect crawl-delay) ───────────────────
-  let aborted = false;
-  for (let i = 0; i < pageEntries.length; i++) {
-    if (products.length >= effectiveCap) break;
-    if (stats.urlsScanned >= MAX_SITEMAP_URLS) break;
-    if (await abortCheck()) { aborted = true; break; }
+  // ── PDP scan (bounded-parallel; parallel-fetch → serial-reduce) ──
+  // Fetch+parse up to pdpConcurrency pages at once, then FOLD the outcomes
+  // into shared state (stats / dedup / products) synchronously, in input
+  // order — so cap, dedup and the empty-run stat counters stay exactly as
+  // the old serial loop produced them. The old loop awaited each page to
+  // completion (~1/response-time ≈ 0.5-1/s); httpScrapeClient's per-host
+  // min-gap already serializes *starts* at ~1/gap (≈4/s), so several
+  // fetches in flight lets the scan hit that ceiling instead of crawling
+  // below it. Politeness is preserved: a site-declared crawl-delay
+  // (pdpGapMs>0) forces serial + the inter-page sleep; only when the sole
+  // spacing is the client's own min-gap do we parallelize.
+  const pdpConcurrency = pdpGapMs > 0
+    ? 1
+    : Math.max(1, parseInt(process.env.GENERIC_CATALOG_PDP_CONCURRENCY, 10) || 5);
 
-    const { loc, lastmod } = pageEntries[i];
-    stats.urlsScanned += 1;
-    // Live progress on every scanned page (progressService throttles the
-    // actual writes to ~1/s). Keeps the brand-page progress dock fresh
-    // through long scans where most pages aren't products — shows both
-    // pages-scanned and products-found instead of a frozen bar.
-    run?.tick?.(
-      products.length,
-      effectiveCap,
-      `scanned ${stats.urlsScanned} · found ${products.length}/${effectiveCap}`
-    );
-
-    // robots allow check (fail-open)
+  // Fetch + parse ONE page. Pure w.r.t. scan state — returns an outcome
+  // the reduce step applies; never touches stats/products/seenIds.
+  const scanOnePdp = async ({ loc, lastmod }) => {
     let allowed = true;
-    try {
-      allowed = await http.isAllowedByRobots(loc);
-    } catch {
-      allowed = true;
-    }
+    try { allowed = await http.isAllowedByRobots(loc); } catch { allowed = true; }
     if (!allowed) {
       console.log(`   · ${LOG}  robots disallows ${loc} — skip`);
-      continue;
-    }
-
-    if (i > 0 && pdpGapMs > 0) {
-      await sleep(pdpGapMs);
+      return { skipped: true };
     }
 
     let html = null;
     try {
       const res = await http.fetchText(loc, { timeoutMs: 15000, maxBytes: 4_000_000 });
-      if (res.cfChallenged) {
-        stats.cfChallenges += 1;
-        continue;
-      }
-      if (res.rateLimited) {
-        rateLimited = true;
-        console.warn(`   ⚠️  ${LOG}  rate-limited at ${loc} — stopping PDP scan`);
-        break;
-      }
-      if (!res.ok || !res.text) continue;
+      if (res.cfChallenged) return { cfChallenged: true };
+      if (res.rateLimited)  return { rateLimited: true, loc };
+      if (!res.ok || !res.text) return { skipped: true };
       html = res.text;
     } catch (err) {
       console.warn(`   ⚠️  ${LOG}  PDP fetch failed ${loc}: ${err.message}`);
-      continue;
+      return { skipped: true };
     }
 
     let mapped = null;
+    let jsonLdFound = false, ogUsed = false, idMiss = false;
     try {
       const nodes = extractJsonLdProducts(html);
       if (nodes.length) {
-        stats.jsonLdProductsFound += 1;
-        // Prefer first Product node that maps cleanly
-        for (const node of nodes) {
-          mapped = mapJsonLdProduct(node, loc);
-          if (mapped) break;
-        }
-        // Product node(s) present but NONE carried a structured feed id
-        // (sku/productID/offers.sku) or a strict URL id → recover the feed
-        // id from the page (canonical <meta itemprop=productID>) and re-map.
+        jsonLdFound = true;
+        for (const node of nodes) { mapped = mapJsonLdProduct(node, loc); if (mapped) break; }
+        // Product node(s) present but no structured feed id → recover the
+        // id from the page (canonical <meta itemprop=productID>) + re-map.
         if (!mapped) {
           const htmlId = extractProductIdFromHtml(html);
           if (htmlId) {
-            for (const node of nodes) {
-              mapped = mapJsonLdProduct(node, loc, htmlId);
-              if (mapped) break;
-            }
+            for (const node of nodes) { mapped = mapJsonLdProduct(node, loc, htmlId); if (mapped) break; }
           }
-          // Still nothing usable → a real id-resolution miss, not a
-          // "no product data" page. Count it so the empty-run reason is
-          // honest ("required fields" rather than "no schema.org Product").
-          if (!mapped) stats.validationFailures += 1;
+          if (!mapped) idMiss = true;   // real id-resolution miss (counts as validationFailure)
         }
       }
-      if (!mapped) {
-        mapped = mapOgProduct(html, loc);
-        if (mapped) stats.ogFallbackUsed += 1;
-      }
+      if (!mapped) { mapped = mapOgProduct(html, loc); if (mapped) ogUsed = true; }
     } catch (err) {
       console.warn(`   ⚠️  ${LOG}  extract failed ${loc}: ${err.message}`);
-      continue;
+      return { jsonLdFound, skipped: true };
     }
 
-    if (!mapped) continue;
+    if (!mapped) return { jsonLdFound, ogUsed, idMiss };
 
     if (lastmod) mapped._lastmod = lastmod;
+
+    // Capture the category breadcrumb from the SAME page HTML (avoids a
+    // second per-product crawl by the post-sync inference pass).
+    try {
+      const bc = extractBreadcrumb(html);
+      if (bc && Array.isArray(bc.breadcrumb) && bc.breadcrumb.length) {
+        mapped.breadcrumb = bc.breadcrumb;
+        mapped.breadcrumbSource = bc.source;
+      }
+    } catch { /* best-effort — inference pass will backfill on a miss */ }
 
     // Optional: enrich reviews via the shared HTML helper (also flattens
     // JSON-LD aggregateRating) when mapper left rating empty.
     if (mapped.rating == null || !mapped.productReviews) {
       try {
         const rev = ingestHelpers.extractReviewsFromHtml(html, null);
-        if (rev.rating != null && mapped.rating == null) {
-          mapped.rating = rev.rating;
-        }
+        if (rev.rating != null && mapped.rating == null) mapped.rating = rev.rating;
         if ((rev.quotes && rev.quotes.length) || rev.rating != null) {
           if (!mapped.productReviews) {
             mapped.productReviews = {
@@ -1140,24 +1122,52 @@ async function resolveGenericCatalog(brand, { run = null, abortCheck = async () 
             };
           }
         }
-      } catch {
-        // best-effort
+      } catch { /* best-effort */ }
+    }
+
+    if (!validateProduct(mapped).valid) return { jsonLdFound, ogUsed, idMiss, validationFailure: true };
+    return { jsonLdFound, ogUsed, idMiss, mapped };
+  };
+
+  let aborted = false;
+  let stop = false;
+  for (let i = 0; i < pageEntries.length && !stop; i += pdpConcurrency) {
+    if (products.length >= effectiveCap) break;
+    if (stats.urlsScanned >= MAX_SITEMAP_URLS) break;
+    if (await abortCheck()) { aborted = true; break; }
+    // Respect a site-declared crawl-delay between (serial) chunks.
+    if (i > 0 && pdpGapMs > 0) await sleep(pdpGapMs);
+
+    const chunk = pageEntries.slice(i, i + pdpConcurrency);
+    const outcomes = await Promise.all(chunk.map(scanOnePdp));
+
+    // Serial reduce — mutate shared state in deterministic input order.
+    for (const o of outcomes) {
+      stats.urlsScanned += 1;
+      run?.tick?.(
+        products.length,
+        effectiveCap,
+        `scanned ${stats.urlsScanned} · found ${products.length}/${effectiveCap}`
+      );
+      if (o.rateLimited) {
+        rateLimited = true;
+        console.warn(`   ⚠️  ${LOG}  rate-limited at ${o.loc} — stopping PDP scan`);
+        stop = true;
+        break;
       }
-    }
+      if (o.cfChallenged) { stats.cfChallenges += 1; continue; }
+      if (o.jsonLdFound)  stats.jsonLdProductsFound += 1;
+      if (o.idMiss)       stats.validationFailures += 1;
+      if (o.ogUsed)       stats.ogFallbackUsed += 1;
+      if (o.validationFailure) { stats.validationFailures += 1; continue; }
+      if (o.skipped || !o.mapped) continue;
 
-    const v = validateProduct(mapped);
-    if (!v.valid) {
-      stats.validationFailures += 1;
-      continue;
+      const idKey = String(o.mapped.externalId);
+      if (seenIds.has(idKey)) { stats.duplicatesSkipped += 1; continue; }
+      seenIds.add(idKey);
+      products.push(o.mapped);
+      if (products.length >= effectiveCap) { stop = true; break; }
     }
-
-    const idKey = String(mapped.externalId);
-    if (seenIds.has(idKey)) {
-      stats.duplicatesSkipped += 1;
-      continue;
-    }
-    seenIds.add(idKey);
-    products.push(mapped);
   }
 
   // Aborted mid-scan — return truthfully as cancelled (keeping any

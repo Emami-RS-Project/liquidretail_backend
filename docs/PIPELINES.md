@@ -1,0 +1,438 @@
+# LiquidRetail Backend — Background & Creative Pipelines
+
+This is the engineer reference for every background and creative pipeline in the LiquidRetail backend (Node/Express + Mongoose). For each pipeline: what triggers it, its stages, which models/APIs it calls (and rough cost), which env knobs tune it, how progress/cancel works, and what consumes its output. Facts are code-verified as of **2026-07-22**. Prefer this doc over tribal memory; when in doubt, open the cited files.
+
+> **Cost hot-spots (read first)**
+>
+> | Hot-spot | When it fires | Rough cost | Mitigation (current default) |
+> |---|---|---|---|
+> | **Overlay zones** (`overlayZoneService.analyzeOverlayZones`, Gemini-2.5 vision) | Per catalog-product image after detect | ~**13–26s / image** Gemini vision | **Deferred** to ad time (`CATALOG_DETECT_PRECOMPUTE=false`); only products a campaign will use |
+> | **User-actuated product enrichment** (SerpAPI shopping + immersive + Gemini grounded-search) | Sales Demos **Enrich** button | ~**$0.05–0.12 / product** | Opt-in only; auto path is reviews gap-fill |
+> | **Static ad photoreal finish** (`gpt-image-2` image-ref, quality `high`) | After GPT-4.1 HTML layout + Puppeteer raster | Dominant static-ad $ when enabled | `AI_IMAGE_REFERENCE_ENABLED` / quality knob; seed dumps via `IMAGE_REF_DUMP_SEEDS` |
+> | **Veo / Atlas video** | Video ad generation | Provider rate limits (429 at concurrency >1) | `VEO_CONCURRENCY=1` — **do not raise** |
+> | **Catalog scan (sitemap + JSON-LD)** | Demo / catalog sync | Deterministic HTTP only — **no LLM** | Caps + per-host min-gap; bounded PDP concurrency |
+
+Non-secret defaults live in `config/defaults.env` (versioned). Secrets stay in the Render environment only (see [§9](#9-configuration--secrets)).
+
+---
+
+## 1. Catalog scan + save (generic sitemap + JSON-LD)
+
+Deterministic, cheap product ingest: discover product URLs from sitemaps, fetch PDPs, extract structured product data, upsert into `CatalogProduct`. No LLM.
+
+### Trigger
+
+- Sales-demo / catalog sync path that selects the **generic-sitemap** method (via `services/apifyIngestService.js` orchestration; kill-switch `GENERIC_CATALOG_ENABLED`).
+- Resolve: `services/genericCatalogResolver.js` → `resolveGenericCatalog`.
+- Persist: `services/genericCatalogIngestService.js` → `syncBrandGenericCatalog`.
+
+### Stages
+
+1. **Discovery** — robots.txt + sitemap index/urlset walk; product-URL ranking; lastmod descending.
+2. **Bounded caps** — `GENERIC_CATALOG_LIMIT` (products), `GENERIC_CATALOG_MAX_SITEMAP_URLS` (URL walk bound).
+3. **Per-PDP fetch** — `services/httpScrapeClient.js`:
+   - Per-host min-gap throttle (default **250ms**, `HTTP_SCRAPE_MIN_GAP_MS`)
+   - UA rotation, 429 / `Retry-After`, Cloudflare detection, streaming `maxBytes`
+4. **Bounded-parallel PDP scan** — `GENERIC_CATALOG_PDP_CONCURRENCY` (default **5**) parallel fetches when the site declares **no** crawl-delay; still **serial + spaced** when crawl-delay is present. `httpScrapeClient` enforces per-host min-gap regardless. ~**4–8×** faster than the old fully serial loop.
+5. **Extraction**
+   - Primary: JSON-LD Product → `mapJsonLdProduct` (`genericCatalogResolver.js`)
+   - Fallback: Open Graph → `mapOgProduct`
+6. **Validate** → **sku-dedup** → **CatalogProduct upsert**.
+7. **In-scan breadcrumb (NEW)** — reuses `services/breadcrumbParser.js` `extractBreadcrumb` → persisted as `inferredBreadcrumb` + `inferredCategoryAt` + Category tree via `Category.findOrCreateCategoryTree`, so post-sync category inference **skips** these products (no second crawl). See [§2](#2-post-sync-trio).
+
+**On-page fields captured:** title, description, price/currency/availability, primary + additional images, brand, gtin/mpn/sku, category, aggregate rating, review quotes, **and category breadcrumb**.
+
+**Feed-id strategy (`externalId`):**  
+`sku` → `productID` → `offers.sku`  
+**Never** use mpn/gtin as `externalId` — they repeat across variants; stored separately. Matches Shopify/GMC feed `id`.
+
+### Models & cost
+
+- **None (LLM).** Pure HTTP + HTML/JSON-LD parse. Cost is bandwidth + time under host politeness.
+
+### Env knobs
+
+| Var | Default | Role |
+|---|---|---|
+| `GENERIC_CATALOG_ENABLED` | `true` | Kill-switch (`false` disables generic-sitemap method) |
+| `GENERIC_CATALOG_LIMIT` | `10000` | Max products per resolve/sync |
+| `GENERIC_CATALOG_MAX_SITEMAP_URLS` | `20000` | Sitemap URL walk bound |
+| `GENERIC_CATALOG_PDP_CONCURRENCY` | `5` | Parallel PDP fetches (when no crawl-delay) |
+| `HTTP_SCRAPE_MIN_GAP_MS` | `250` | Per-host minimum gap between requests |
+| `HTTP_SCRAPE_DOMAIN_CONCURRENCY` | `3` | Concurrent in-flight per domain (`httpScrapeClient`) |
+
+See `config/defaults.env` and `services/genericCatalogResolver.js` / `httpScrapeClient.js`.
+
+### Progress / cancel
+
+- **OperationRun** kind: `demo-sync` (generic-catalog method under the broader demo-sync surface; also used by Apify/Shopify-direct paths with different stages).
+- Stages: `resolving generic catalog` → `saving products to catalog`.
+- Save-phase note: `saved X/Y products · Z% with reviews` (Z = share of *saved-so-far* products with rating/quotes).
+- Cancellable: yes (`demo-sync` ∈ `CANCELLABLE_KINDS` in `services/progressService.js`).
+
+### Consumers
+
+- `CatalogProduct` rows → IG→product matching, Sales Demos UI, campaign product pickers, later detect/enrichment/ads.
+- In-scan breadcrumb stamps → skip post-sync full category crawl ([§2c](#2-post-sync-trio)).
+- Variant-role stamping at end of sync (detect enqueue path) still runs even when image detect is deferred ([§3](#3-per-product-detect--overlay-zones--ad-readiness-deferred-to-ad-time)).
+
+---
+
+## 2. Post-sync trio
+
+Historically three jobs fired at the end of a catalog sync (`services/genericCatalogIngestService.js` ~258–324; mirrored in Shopify public / Apify / `catalogSyncService`). **Current behavior:**
+
+| # | Job | Behavior now |
+|---|---|---|
+| **(a)** | Product-detect enqueue | **DEFERRED** — variant roles stamped; image detect skipped unless precompute. [§3](#3-per-product-detect--overlay-zones--ad-readiness-deferred-to-ad-time) |
+| **(b)** | Catalog enrichment | **Gap-fill only** (reviews) on auto path. [§4](#4-catalog-enrichment-reviews--cross-seller-details) |
+| **(c)** | Category inference | **Mostly skipped** — breadcrumbs captured in-scan; backfills only gaps |
+
+### (c) Category inference (gap backfill)
+
+- **File:** `services/productCategoryInferenceService.js` → `inferBatch` (accepts `onProgress`).
+- **Query:** products with `productUrl` and missing/stale `inferredCategoryAt` (TTL-based).
+- **Concurrency:** 6, per-domain throttled.
+- **Progress:** own OperationRun — kind **`category-inference`** (distinct from paid `enrichment` so it isn't conflated in the activity log or blocked by the Enrich lock), label **`Category inference`**, per-item progress + cancel (`checkpoint` between items).
+
+---
+
+## 3. Per-product detect + overlay-zones + ad-readiness (DEFERRED to ad time)
+
+The former “idle worker” cost center: per catalog-product image, run vision pipelines that produce crops, **overlay zones**, and ad-readiness. Matching does **not** need this; **ad generation does**.
+
+### Trigger
+
+| Mode | When | Entry |
+|---|---|---|
+| **Sync-time (default)** | After catalog sync | `catalogProductDetectService.enqueueBrandProductDetects` — stamps **variant roles only** (`isPrimaryVariant` / `primaryProductId`); **skips** image enqueue unless `CATALOG_DETECT_PRECOMPUTE=true` |
+| **Eager precompute** | `CATALOG_DETECT_PRECOMPUTE=true` | Same function enqueues hero (+ alt) detects for primaries missing `imageMediaId` |
+| **On-demand (primary)** | Ad generation | `ensureDetectForProducts(ids, { wait })` from `campaignAdsGenerationService.expandWizardJob` (explicit product picks **and** products matched to selected media) |
+| **Pre-warm backstop** | IG post **confirms** a product match | Fire-and-forget in `productMatchService.js` — post-scale, not catalog-scale |
+
+### Stages (`pipelines/detect.js` → `runCatalogProductPipeline` ~480–640)
+
+Per catalog-product **Media** (source `catalog-product`):
+
+1. **YOLO object detection** — self-hosted microservice via `services/yoloService.js` (`yolo-microservice.onrender.com`) — cheap, fast; catalog path skips dual-engine product identify (metadata is source of truth).
+2. **Gemini vision classification** (subjects/text/shot-type chain).
+3. **Smart crops + LLM judge.**
+4. **Lazy chain (expensive):**
+   - **Overlay zones** — `services/overlayZoneService.js` `analyzeOverlayZones` — Gemini-2.5 vision (`GEMINI_VISION_MODEL` / default `gemini-2.5-pro`), ~**13–26s / image**.
+   - **Ad-readiness** — `services/adSuitabilityService.js` `scoreMedia`.
+
+### Models & cost
+
+| Step | Model / API | Cost notes |
+|---|---|---|
+| YOLO | Self-hosted microservice | Cheap / fast |
+| Classification / crops / judge | Gemini (+ related vision helpers) | Moderate |
+| Overlay zones | Gemini-2.5 vision | **Dominant** — multi-second per image |
+| Ad-readiness | Scoring over artifacts | Cheap relative to zones |
+
+### Env knobs
+
+| Var | Default | Role |
+|---|---|---|
+| `CATALOG_DETECT_PRECOMPUTE` | `false` | If `true`, restore whole-catalog eager detect at sync |
+
+Worker pool concurrency: `WORKER_CONCURRENCY` (`worker.js`, default 4, prod **5** via `defaults.env`) drains DetectRuns.
+
+### Progress / cancel
+
+- **On-demand:** OperationRun kind `detect`, label **`Preparing product imagery`**, cancellable.
+- Materialize + enqueue is fast; optional **bounded wait ~4 min** polls hero Media until `latestArtifacts.overlayZones` land (lazy chain finishes *after* DetectRun critical path). Timeout → caller proceeds; render degrades without spatial analysis.
+- `detect` ∈ `CANCELLABLE_KINDS`.
+
+### Consumers (why defer, not delete)
+
+| Consumer | Needs |
+|---|---|
+| **IG→product matching** | **No** — post-driven text overlap on `CatalogProduct` + visual confirm falls back to raw `product.imageUrl` when refined crops are missing |
+| `adSuitabilityService` | Overlay / readiness score (catalog UI + Generate Ads picker) |
+| `overlayPlacementService` | `product_overlay` text placement/contrast from brightness + density grids |
+| `aiCanvasInputBuilder` | `spatial_analysis` block fed to GPT-4.1 layout LLM |
+
+---
+
+## 4. Catalog enrichment (reviews + cross-seller details)
+
+**File:** `services/catalogProductEnrichmentService.js`.
+
+Two paths, split for cost control:
+
+### A. AUTO — reviews-only gap-fill (after sync)
+
+- **Entry:** `enqueueBrandProductEnrichment(brandId)` (post-sync `setImmediate`).
+- **Gate:** `needsEnrichment(row)` = true only when **no** on-page review signal: no review quotes **and** `rating == null`.
+- **Does not** run SerpAPI product-details.
+- **OperationRun:** kind `enrichment`, label **`Review gap-fill`**, per-item progress + cancel.
+
+### B. USER-ACTUATED — full cross-seller + reviews (Enrich button)
+
+- **Entry:** `enrichBrandDetails` via `POST /api/sales-demos/brands/:id/enrich`.
+- **Work per product:** SerpAPI `google_shopping` (up to **8** sellers) + Gemini grounded-search review synthesis + SerpAPI `google_immersive_product` specs.
+- **Cost:** ~**$0.05–0.12 / product** (cold cache; sibling gtin/mpn hit → $0).
+- **OperationRun:** kind `enrichment`, label **`Product enrichment`**. **409** if already running.
+
+### Write-through fix
+
+`services/productDetailsService.js` `writeThroughToCatalogProduct`:
+
+- **`rating`:** gap-fill only when row’s rating is **null** (never clobber on-page AggregateRating).
+- **`ratingDistribution` / `reviews` / `specs` / `sellers` / `reviewSummary`:** cross-web data (disjoint from scan) — refresh in place.
+- Sets `detailsRefreshedAt`.
+
+**Why the old path was wasteful:** gate field `detailsRefreshedAt` was never written by the scan, so SerpAPI+Gemini details fired for **100%** of products on every first sync even when price/rating/reviews were already on-page.
+
+### Env knobs
+
+| Var | Default | Role |
+|---|---|---|
+| `CATALOG_ENRICHMENT_CONCURRENCY` | `6` | Parallel enrich workers |
+| `CATALOG_ENRICHMENT_MAX_PER_RUN` | `500` | Hard cap per brand run |
+
+Requires secrets: `SERPAPI_API_KEY`, `GEMINI_API_KEY` (details path no-ops if SerpAPI disabled).
+
+### Progress / cancel
+
+Both paths: kind `enrichment`, cancellable; partials kept. Idempotent via 30-day caches + gtin/mpn sibling dedup in underlying services.
+
+### Consumers
+
+- Catalog UI (sellers table, specs, review summary, rating distribution).
+- Ad copy / social-proof templates that pull review quotes and ratings.
+- Matching still works without enrichment; enrichment improves merchandising + social-proof creatives.
+
+---
+
+## 5. Static-image ad generation (THE default ad path)
+
+> **Critical:** the default static ad is **not** a diffusion image model from a text prompt alone.  
+> Flow: **GPT-4.1 authors an HTML/CSS layout** → **Puppeteer rasterizes** → (optional) **image model re-renders** that screenshot for a photoreal finish.
+
+### Trigger
+
+- `routes/ads.js` `POST /generate` → **202** + `setImmediate` → `campaignAdsGenerationService.expandWizardJob` → `selectAdsForRun` → `runRenderLoop` (all in the **web** process).
+- `CampaignRun` tracks batch status; ad-batch progress via OperationRun kind `ad-batch`.
+
+### Stages
+
+1. **Ensure product imagery** — `ensureDetectForProducts` for campaign products ([§3](#3-per-product-detect--overlay-zones--ad-readiness-deferred-to-ad-time)).
+2. **Concept / seed selection** — wizard expansion; when `AI_CONCEPT_DRIVEN=true`, concept-driven V2 path (`aiCreativeDirectorService` / related).
+3. **HTML layout (default creative)** — `services/aiCanvasHtmlGeneratorService.js`  
+   - `MODEL_ID = 'gpt-4.1'`  
+   - Gated by `AI_HTML_LAYOUT_ENABLED`  
+   - Templates: `ai_brand_led` / `ai_ugc_led` / `ai_social_proof_led` / `ai_editorial` / `ai_promotional`  
+   - Older overlay templates: `product_overlay` / `testimonial_overlay` via `services/overlayPlacementService.js`
+4. **Rasterize** — `services/renderService.js` (Puppeteer).
+5. **Image-ref photoreal finish** (when `AI_IMAGE_REFERENCE_ENABLED=TRUE`, **on in prod**):  
+   - `services/aiImageReferenceService.js`  
+   - `AI_IMAGE_REF_MODEL_ID` = **`gpt-image-2`** (prod via defaults)  
+   - `AI_IMAGE_REF_QUALITY` = **`high`**  
+   - `Campaign.useImageRefAsProduction` (default **true**) swaps it in as production creative via `services/adDisplayUrlService.js`.
+
+**Other image-model uses (not the default full-ad path):**
+
+- Extended-crop outpainting — `services/openaiImageService.js` (`gpt-image-1`, masked) before overlay zones exist.
+- Atlas gateway — `services/atlasImageService.js` defaults `openai/gpt-image-1.5` for text-to-image/edit.
+
+### Overlay-zone consumers in this path
+
+| Service | Role |
+|---|---|
+| `adSuitabilityService` | Ad-readiness score (catalog UI + Generate Ads picker) |
+| `overlayPlacementService` | `product_overlay` text placement / contrast from brightness + density grids |
+| `aiCanvasInputBuilder` | `spatial_analysis` block for the GPT-4.1 layout LLM |
+
+### Models & cost
+
+| Stage | Model | Notes |
+|---|---|---|
+| Layout authoring | **GPT-4.1** | HTML/CSS layout spec |
+| Raster | Puppeteer | CPU/memory on web process |
+| Photoreal finish | **gpt-image-2** (prod) | Quality `high` — main static $ driver when enabled |
+| Extended crop / Atlas edit | gpt-image-1 / gpt-image-1.5 | Secondary paths |
+
+### Env knobs
+
+| Var | Default (repo) | Role |
+|---|---|---|
+| `AI_IMAGE_REFERENCE_ENABLED` | `TRUE` | Enable image-ref re-render |
+| `AI_IMAGE_REF_MODEL_ID` | `gpt-image-2` | Image-ref model |
+| `AI_IMAGE_REF_QUALITY` | `high` | Image-ref quality |
+| `IMAGE_REF_DUMP_SEEDS` | `true` | Diagnostic — uploads every seed PNG; **candidate to turn off** to cut Cloudinary writes |
+| `AI_CONCEPT_DRIVEN` | `true` | Concept-driven V2 expansion |
+| `AI_HTML_LAYOUT_ENABLED` | `true` | GPT-4.1 HTML layout path |
+| `AI_LAYOUT_DIRECT_HTML` | `true` | Direct HTML (JSON-gen retirement path) |
+| `RENDER_CONCURRENCY` | `4` | Parallel static renders in `runRenderLoop` |
+
+### Progress / cancel
+
+- OperationRun kinds: `ad-batch` (pool stops claiming; in-flight finish; unclaimed → draft), `ad-regenerate`, `ai-layout` as applicable.
+- Cancel semantics: item/pool boundaries via `progressService.checkpoint`.
+
+### Consumers
+
+- `Ad` documents / display URLs → Meta & Google push, previews, campaign UI.
+- `Campaign.useImageRefAsProduction` controls whether image-ref or HTML screenshot is production.
+
+---
+
+## 6. Video generation (Veo / Atlas)
+
+### Trigger
+
+- Video ads selected in wizard expansion (`expandWizardJob`) when format flags allow (`AI_VEO_FEED` / `AI_VEO_REELS`).
+- Routed by `services/videoRouter.js` on `VIDEO_PROVIDER` (default **`atlas`**).
+
+### Stages / files
+
+| Piece | File | Role |
+|---|---|---|
+| Atlas video submit/poll | `services/atlasVideoService.js` | Provider jobs, chrome force, poll interval |
+| Storyboard text | `services/veoStoryboardService.js` | GPT-4.1 storyboard when `VEO_USE_GPT_STORYBOARD` |
+| Brand title/script composite | `services/brandScriptExecutor.js` | Titling / brand scripts over base video |
+| Direct Veo fallback (deprecated) | `services/aiVideoReferenceService.js` | `VIDEO_PROVIDER=vertex` path |
+
+**Does not use overlay zones** — text placement is scripted (titling engine / Remotion or canvas), not zone-driven product overlay.
+
+### Models & cost
+
+- Veo / Grok (via Atlas) video generation — rate-limited; **429s if concurrency > 1**.
+- GPT-4.1 for storyboard text (`VEO_STORYBOARD_MODEL_ID` override; default `gpt-4.1`).
+
+### Env knobs
+
+| Var | Default | Role |
+|---|---|---|
+| `VIDEO_PROVIDER` | `atlas` | `atlas` \| `vertex` |
+| `AI_VEO_FEED` | `true` | Enable Veo for non-Reels formats |
+| `AI_VEO_REELS` | `true` | Enable Veo for 9:16 Reels |
+| `VEO_CONCURRENCY` | **`1`** | **Keep at 1** — provider 429s above this |
+| `VEO_USE_GPT_STORYBOARD` | `true` | GPT storyboard before video |
+| `ATLAS_VIDEO_FORCE_CHROME` | `true` | Force chrome handling on Atlas path |
+| `ATLAS_POLL_INTERVAL_MS` | `15000` | Prediction poll interval |
+| `ATLAS_VIDEO_MODEL` | (empty) | Optional model override |
+
+Secret: `ATLAS_API_KEY`.
+
+### Progress / cancel
+
+- Kind `veo-video` / regenerate stages; poll accepts `shouldCancel` (stops waiting; provider job may still finish server-side). See `docs/PROGRESS.md`.
+
+### Consumers
+
+- Video `Ad` assets, Meta Reels / feed push, retitle batch (`POST /api/brand/:id/retitle-videos` — see `docs/TITLING.md`).
+
+---
+
+## 7. Progress + activity system
+
+### Core
+
+- **Model:** `models/OperationRun.js` — tenant-scoped runs (kind, status, stage, note, pct/items, heartbeat, cancel).
+- **Service:** `services/progressService.js`
+  - Lifecycle: `startRun` → `stage` / `tick` / `note` / `checkpoint` → `succeed` / `fail` / `markCancelled`
+  - Throttled writes ~**1/s**; heartbeat **30s**; stale reaper **2 min** (`STALE_HEARTBEAT_MS`); max run **4h** (`MAX_RUN_MS`)
+  - `startRun` never throws into business code (no-op handle on failure)
+  - `checkpoint()` throws `CancelledError` at safe boundaries when cancel requested
+
+### Cancellable kinds
+
+From `CANCELLABLE_KINDS` in `progressService.js`:
+
+`social-ingest`, `catalog-sync`, `demo-sync`, `enrichment`, `font-ingest`, `campaign-sync`, `scheduled-sync`, `ad-batch`, `ad-regenerate`, `veo-video`, `ai-layout`, `detect`
+
+### Surfaces
+
+| Surface | Location |
+|---|---|
+| Global activity dock | Frontend `src/shell/ActivityBar.tsx` (separate **liquidretail** repo, `frontend/app/`) |
+| Per-brand SyncProgress | Sales Demos page |
+| Cross-brand Activity log | `GET /api/sales-demos/activity` → active + recent runs (`routes/salesDemos.js`) |
+| Progress API | `routes/progress.js` — `GET /api/progress/active`, `GET /:runId`, `POST /:runId/cancel` |
+
+Deeper instrumentation notes: `docs/PROGRESS.md`.
+
+### Scheduler
+
+- `services/scheduledSyncService.js` — **60s** `setInterval`, per-brand catalog/posts cadence; labels spawned syncs `(scheduled)`; kind `scheduled-sync`.
+
+---
+
+## 8. Concurrency knobs
+
+| Knob | Default | Prod / notes |
+|---|---|---|
+| `WORKER_CONCURRENCY` | 4 (`worker.js` fallback) | **5** in `defaults.env` — DetectRun / job poll workers |
+| `RENDER_CONCURRENCY` | 4 | Static ad Puppeteer pool (`routes/ads.js`) |
+| `VEO_CONCURRENCY` | **1** | **Do not raise** — provider 429s at >1 |
+| `CATALOG_ENRICHMENT_CONCURRENCY` | 6 | Enrich auto + full path |
+| `GENERIC_CATALOG_PDP_CONCURRENCY` | 5 | Parallel PDP fetches (no crawl-delay) |
+| Category inference concurrency | **6** | Hardcoded in post-sync call; per-domain throttled |
+| `HTTP_SCRAPE_DOMAIN_CONCURRENCY` | 3 | In-flight HTTP per host |
+
+Video and static image runs share `runRenderLoop` but pick concurrency by run type (`isVeoRun` → `VEO_CONCURRENCY`, else `RENDER_CONCURRENCY`).
+
+---
+
+## 9. Configuration & secrets
+
+### Non-secret config — `config/defaults.env`
+
+Versioned with the repo. Loaded in `index.js` / `worker.js` **after** the process environment so **env always wins** (Render dashboard or local `.env` can override without editing the file).
+
+**Categories in `defaults.env`:**
+
+| Category | Examples |
+|---|---|
+| AI creative feature flags | `AI_CONCEPT_DRIVEN`, `AI_HTML_LAYOUT_ENABLED`, `AI_LAYOUT_DIRECT_HTML`, `CANONICAL_DR_V1`, `RENDER_USE_HTML`, `RENDER_USE_RESOLVED` |
+| Static image-ref path | `AI_IMAGE_REFERENCE_ENABLED`, `AI_IMAGE_REF_MODEL_ID`, `AI_IMAGE_REF_QUALITY`, `IMAGE_REF_DUMP_SEEDS` |
+| Video (Veo / Atlas) | `AI_VEO_FEED`, `AI_VEO_REELS`, `AI_VIDEO_POSTER_ENABLED`, `VIDEO_PROVIDER`, `VEO_USE_GPT_STORYBOARD`, `ATLAS_*`, `VEO_CONCURRENCY` |
+| Concurrency | `WORKER_CONCURRENCY`, `RENDER_CONCURRENCY`, `VEO_CONCURRENCY` |
+| Ingest tuning | `APIFY_*`, `POST_FETCH_LIMIT`, `CATALOG_SYNC_MAX_ITEMS`, `CATALOG_VISUAL_MATCH_MAX_IMAGES` |
+| Generic catalog scraper | `GENERIC_CATALOG_*`, `HTTP_SCRAPE_MIN_GAP_MS` |
+| Catalog detect / enrichment | `CATALOG_DETECT_PRECOMPUTE`, `CATALOG_ENRICHMENT_*` |
+| Public IDs / URLs | Cloudinary cloud name, frontend URLs, Google/Meta client IDs & redirect URIs, Jira base/email, sales-demo admins, Shopify store domain |
+
+**Never put secrets in this file** — it is committed to git.
+
+### Secrets — Render env only
+
+| Secret | Used for |
+|---|---|
+| `APIFY_TOKEN` | Apify actors (IG / Shopify scrapers) |
+| `ATLAS_API_KEY` | Atlas video / image / LLM gateway |
+| `BRANDFETCH_API_KEY` | Brand enrichment |
+| `CLOUDINARY_API_KEY` / `CLOUDINARY_API_SECRET` | Media storage |
+| `GEMINI_API_KEY` | Vision, grounded search, overlay zones |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth (app login) |
+| `GOOGLE_ADS_CLIENT_SECRET` / `GOOGLE_ADS_DEVELOPER_TOKEN` | Google Ads integration |
+| `INTEGRATION_ENCRYPTION_KEY` | Encrypted integration credentials at rest |
+| `JIRA_API_TOKEN` | Jira integration |
+| `JWT_SECRET` | Auth tokens |
+| `META_APP_SECRET` | Meta / Instagram OAuth & webhooks |
+| `MONGODB_URI` | Database |
+| `OPENAI_API_KEY` | GPT / image models (direct OpenAI paths) |
+| `RENDER_AUTH_TOKEN` | Render-protected service auth |
+| `SERPAPI_API_KEY` | Shopping / immersive product enrichment |
+| `SESSION_SECRET` | Session cookies |
+| `SHOPIFY_ACCESS_TOKEN` / `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` | Shopify API |
+
+---
+
+## Quick map: file → pipeline
+
+| Concern | Primary files |
+|---|---|
+| Generic catalog resolve/save | `services/genericCatalogResolver.js`, `genericCatalogIngestService.js`, `httpScrapeClient.js`, `breadcrumbParser.js` |
+| Post-sync trio | `genericCatalogIngestService.js` (end-of-run), `catalogProductDetectService.js`, `catalogProductEnrichmentService.js`, `productCategoryInferenceService.js` |
+| Detect / overlay / readiness | `pipelines/detect.js`, `yoloService.js`, `overlayZoneService.js`, `adSuitabilityService.js`, `worker.js` |
+| Enrichment | `catalogProductEnrichmentService.js`, `productDetailsService.js` |
+| Static ads | `routes/ads.js`, `campaignAdsGenerationService.js`, `aiCanvasHtmlGeneratorService.js`, `renderService.js`, `aiImageReferenceService.js`, `overlayPlacementService.js`, `aiCanvasInputBuilder.js` |
+| Video | `atlasVideoService.js`, `veoStoryboardService.js`, `brandScriptExecutor.js`, `videoRouter.js` |
+| Progress | `progressService.js`, `models/OperationRun.js`, `routes/progress.js`, `routes/salesDemos.js` (`/activity`) |
+| Config | `config/defaults.env`, `index.js`, `worker.js` |
+
+Related docs: `docs/PROGRESS.md` (progress/cancel details), `docs/ai-creative-pipeline.md` (creative depth), `docs/ATLAS.md` (Atlas migration), `docs/TITLING.md` (video titling engine).

@@ -201,12 +201,16 @@ async function readFromCatalogCache(catalogProductId) {
 async function writeThroughToCatalogProduct(catalogProductId, fetched) {
   if (!fetched) return;
   const cp = await CatalogProduct.findById(catalogProductId)
-    .select('description imageUrl price currency')
+    .select('description imageUrl price currency rating')
     .lean();
   if (!cp) return;
 
   const setOps = {
-    rating:             fetched.rating ?? null,
+    // ratingDistribution/reviews/specs/sellers/reviewSummary are
+    // cross-web data disjoint from what the scan captures, so they
+    // refresh in place. `rating`, by contrast, IS captured on-page by
+    // the catalog scan (AggregateRating JSON-LD) — gap-fill it only so
+    // enrichment can't clobber the brand's own on-page rating.
     ratingDistribution: fetched.ratingDistribution || [],
     reviews:            fetched.reviews || [],
     specs:              fetched.specs || {},
@@ -214,7 +218,8 @@ async function writeThroughToCatalogProduct(catalogProductId, fetched) {
     reviewSummary:      fetched.reviewSummary || null,
     detailsRefreshedAt: new Date()
   };
-  // Fill commerce gaps only — never overwrite curated brand data
+  // Fill commerce gaps only — never overwrite curated / on-page brand data
+  if (cp.rating == null && fetched.rating != null) setOps.rating = fetched.rating;
   if (!cp.description && fetched.description) setOps.description = fetched.description;
   if (!cp.imageUrl    && fetched.thumbnail)   setOps.imageUrl    = fetched.thumbnail;
   if (cp.price == null && typeof fetched.price?.value === 'number') {

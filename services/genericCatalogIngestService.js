@@ -20,6 +20,7 @@
 'use strict';
 
 const CatalogProduct = require('../models/CatalogProduct');
+const Category = require('../models/Category');
 const { resolveGenericCatalog, DEFAULT_CAP } = require('./genericCatalogResolver');
 const ingestHelpers = require('./shopifyPublicIngestService');
 
@@ -173,6 +174,27 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted } = {}) {
     try {
       const externalId = String(p.externalId);
 
+      // Category breadcrumb captured during the scan (from the PDP HTML we
+      // already fetched). Build the Category tree + stamp inferredCategoryAt
+      // here so the post-sync inference pass SKIPS this product (its query
+      // filters on inferredCategoryAt) — no second per-product crawl.
+      let inferredBreadcrumb = null;
+      let categoryRefId = null;
+      if (Array.isArray(p.breadcrumb) && p.breadcrumb.length) {
+        inferredBreadcrumb = p.breadcrumb;
+        try {
+          categoryRefId = await Category.findOrCreateCategoryTree({
+            brandId:          brand._id,
+            advertiserId:     brand.advertiserId || null,
+            breadcrumb:       p.breadcrumb.join(' > '),
+            url:              p.productUrl || null,
+            firstSeenMediaId: null
+          });
+        } catch (err) {
+          console.warn(`   ⚠️  ${LOG}  category tree build failed for ${externalId}: ${err.message}`);
+        }
+      }
+
       const set = {
         advertiserId:     brand.advertiserId,
         brandId:          brand._id,
@@ -198,6 +220,13 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted } = {}) {
       // persist explicit undefined → null and wipe prior values.
       if (Number.isFinite(p.rating)) set.rating = p.rating;
       if (p.productReviews) set.productReviews = p.productReviews;
+      // Category breadcrumb captured in-scan (see above). Stamping
+      // inferredCategoryAt makes the post-sync inferBatch skip this row.
+      if (inferredBreadcrumb) {
+        set.inferredBreadcrumb = inferredBreadcrumb;
+        set.inferredCategoryAt = new Date();
+        if (categoryRefId) set.categoryRef = categoryRefId;
+      }
 
       await CatalogProduct.findOneAndUpdate(
         { brandId: brand._id, externalId },
@@ -246,12 +275,16 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted } = {}) {
 
     setImmediate(() => {
       (async () => {
+        let catRun = null;
         try {
           const inference = require('./productCategoryInferenceService');
           // NOTE: not { $ne: null, …, $ne: '' } — duplicate keys in a JS
           // object literal keep only the LAST one, silently dropping the
           // null exclusion (adversarial-review find; same bug fixed in
           // catalogSyncService's copy of this query).
+          // Most products now arrive pre-stamped with inferredCategoryAt
+          // (breadcrumb captured in-scan), so this backfills only the gaps
+          // the scan couldn't parse — no longer a full per-product crawl.
           const candidates = await CatalogProduct.find({
             brandId: brand._id,
             productUrl: { $exists: true, $nin: [null, ''] },
@@ -262,9 +295,31 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted } = {}) {
           }).select('_id').lean();
           if (!candidates.length) return;
           console.log(`🔎 categoryInference: brand=${brand._id} scheduling ${candidates.length} product page scrapes`);
-          const result = await inference.inferBatch(candidates.map(c => c._id), { concurrency: 6 });
+          // Surface as a cancellable run so it shows in the activity dock.
+          const progressService = require('./progressService');
+          catRun = await progressService.startRun({
+            // Distinct kind so this free category re-scrape isn't conflated
+            // with (or blocked by) the paid 'enrichment' runs in the
+            // activity log / Enrich lock.
+            kind:         'category-inference',
+            advertiserId: brand.advertiserId,
+            brandId:      brand._id,
+            total:        candidates.length,
+            cancellable:  true,
+            label:        'Category inference'
+          });
+          const result = await inference.inferBatch(candidates.map(c => c._id), {
+            concurrency: 6,
+            onProgress: async (done, total) => {
+              catRun.tick(done, total, `category inference ${done}/${total}`);
+              try { await catRun.checkpoint(); } catch { throw new Error('cancelled'); }
+            }
+          });
+          if (result.cancelled) catRun.markCancelled?.('Cancelled — partial categories kept');
+          else await catRun.succeed({ ok: result.ok, skipped: result.skipped, failed: result.failed });
           console.log(`🔎 categoryInference: brand=${brand._id} done — ok=${result.ok} cfChallenged=${result.challenged || 0} skipped=${result.skipped} failed=${result.failed}`);
         } catch (err) {
+          if (catRun) catRun.fail?.(err);
           console.warn(`   ⚠️  ${LOG}  category inference enqueue failed: ${err.message}`);
         }
       })();

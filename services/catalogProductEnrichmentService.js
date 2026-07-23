@@ -1,21 +1,29 @@
-// Eager catalog enrichment — fires right after catalog sync so every
-// product has reviews + commerce data ready BEFORE its first UGC match.
+// Catalog enrichment — two distinct paths, split for cost control:
 //
-// Without this, productReviews and productDetails (rating, reviews[],
-// specs, sellers) were only fetched lazily on a product's first
-// product_match outcome (productMatchService.maybeFetchProductReviewsCached
-// at line 2100 + productDetailsService.fetchProductDetails at line 48).
-// Products that never get a UGC match never got enriched — meaning the
-// operator opens the Ads page for those products and sees no rating /
-// no reviews / no sellers / no AI-summarized testimonial pool.
+//   AUTO (enqueueBrandProductEnrichment) — fires after a catalog sync.
+//     Reviews-only GAP-FILL: only touches products the scan captured NO
+//     on-page review signal for (no quotes AND no aggregate rating), and
+//     only fetches web-wide review sentiment for them. It does NOT run the
+//     paid SerpAPI product-details fetch anymore — most products already
+//     have price/rating/reviews on-page, so firing details for all of them
+//     was pure waste (the old detailsRefreshedAt gate never matched the
+//     scan's fields, so it fired for 100% of products every first sync).
 //
-// This service walks the brand's CatalogProducts after sync and fires
-// both enrichment services per product in a concurrency-capped queue.
-// Idempotent: both downstream services check their 30-day cache first
-// and skip products that are already fresh, so re-running on a fully-
-// cached brand is a no-op (zero LLM/SerpAPI calls).
+//   USER-ACTUATED (enrichBrandDetails) — fires from the "Enrich" button.
+//     FULL enrichment for every non-draft product: cross-seller price
+//     table (SerpAPI google_shopping) + web-wide review synthesis (Gemini)
+//     + immersive specs. This is the genuinely-additive data a single
+//     product page can't provide; it's opt-in because it costs
+//     ~$0.05–0.12/product and most catalog products never become ads.
 //
-// Cost shape per product (worst case, cold cache):
+// Both paths are capped, concurrency-limited, and surfaced as a
+// cancellable OperationRun (kind 'enrichment') so the work is visible in
+// the ActivityBar dock and can be stopped mid-flight (partials kept).
+//
+// Idempotent: the underlying reviews/details services check their 30-day
+// caches (+ gtin/mpn sibling dedup) first, so re-running is cheap.
+//
+// Cost shape per product (worst case, cold cache, FULL path only):
 //   - productDetails: 1 SerpAPI google_shopping + 1 SerpAPI immersive
 //                     + 1 Gemini grounded-search → ~$0.05–0.12
 //   - productReviews: 1 Gemini grounded-search → ~$0.02–0.05
@@ -25,24 +33,22 @@
 
 const CatalogProduct        = require('../models/CatalogProduct');
 const productDetailsService = require('./productDetailsService');
+const progressService       = require('./progressService');
 const {
   maybeFetchProductReviewsCached
 } = require('./productMatchService');
 
 const CONCURRENCY = Math.max(
   1,
-  parseInt(process.env.CATALOG_ENRICHMENT_CONCURRENCY, 10) || 3
+  parseInt(process.env.CATALOG_ENRICHMENT_CONCURRENCY, 10) || 6
 );
-// Hard cap on how many products we'll enrich per sync. Large catalogs
-// (5000+ items) shouldn't dump $500 of API spend on a first sync;
-// the rest will lazy-fetch on first match or on the next manual
-// "Refresh enrichment" affordance (Phase 2 — not built yet).
+// Hard cap on how many products we'll enrich per run. Large catalogs
+// (5000+ items) shouldn't dump $500 of API spend in one go; the rest
+// lazy-fetch on first match or on the next "Enrich" click.
 const MAX_PER_RUN = Math.max(
   1,
   parseInt(process.env.CATALOG_ENRICHMENT_MAX_PER_RUN, 10) || 500
 );
-// 30-day TTL — matches productDetailsService + productReviews cache.
-const DETAILS_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 (function logConfig() {
   console.log(
@@ -52,33 +58,28 @@ const DETAILS_TTL_MS = 30 * 24 * 60 * 60 * 1000;
   );
 })();
 
-// Decide whether a row needs enrichment:
-//   - missing productReviews.quotes (or no productReviews at all)
-//   - OR missing detailsRefreshedAt (never fetched)
-//   - OR detailsRefreshedAt older than the 30-day TTL
-//
-// Cheaper than calling the underlying services per row — they'd hit
-// their own caches and no-op, but we'd still pay the round-trip cost
-// on every sync.
+// AUTO-path gate: a product needs an automatic review gap-fill only when
+// the scan captured NO on-page review signal at all — neither individual
+// review quotes NOR an aggregate rating. Products that already carry
+// on-page reviews/rating are left alone (the paid cross-seller details
+// fetch is user-actuated now, so we no longer gate on detailsRefreshedAt).
+// NOTE: callers must .select('rating productReviews') for this to work.
 function needsEnrichment(row) {
-  const noReviews = !row.productReviews
-                 || !Array.isArray(row.productReviews.quotes)
-                 || row.productReviews.quotes.length === 0;
-  const noDetails = !row.detailsRefreshedAt
-                 || (Date.now() - new Date(row.detailsRefreshedAt).getTime()) > DETAILS_TTL_MS;
-  return noReviews || noDetails;
+  const hasQuotes = Array.isArray(row.productReviews?.quotes) && row.productReviews.quotes.length > 0;
+  const hasRating = row.rating != null;
+  return !hasQuotes && !hasRating;
 }
 
-// Reviews + details for a single product. Errors are caught + logged
-// so one bad product doesn't poison the whole queue.
-async function enrichOne(product) {
+// Reviews (+ optionally full details) for a single product. Errors are
+// caught + logged so one bad product doesn't poison the whole queue.
+async function enrichOne(product, { includeDetails = false } = {}) {
   const id    = String(product._id);
   const label = `"${product.title || '(untitled)'}"`;
   const t0    = Date.now();
   try {
-    // Reviews — fire-and-forget under the hood (the underlying service
-    // returns null synchronously after kicking off a background Gemini
-    // fetch on cache miss). Cheap to call; safe to skip the result.
+    // Reviews — cheap: the underlying service returns cached/sibling data
+    // synchronously and only kicks off a background Gemini fetch on a
+    // genuine cache miss.
     await maybeFetchProductReviewsCached({
       catalogProductId: id,
       productName:      product.title || null,
@@ -89,9 +90,10 @@ async function enrichOne(product) {
     console.warn(`   ⚠️  enrich-reviews ${label}: ${err.message}`);
   }
 
-  // Details — blocking (writes-through to CatalogProduct on success).
-  // Only if SERPAPI is enabled; otherwise this is a no-op.
-  if (productDetailsService.isEnabled()) {
+  // Details (cross-seller table + immersive specs) — USER-ACTUATED path
+  // only. Blocking, writes-through to CatalogProduct on success. No-op if
+  // SERPAPI is disabled.
+  if (includeDetails && productDetailsService.isEnabled()) {
     try {
       await productDetailsService.fetchProductDetails(
         {
@@ -111,75 +113,135 @@ async function enrichOne(product) {
 }
 
 // Concurrency-capped queue — N workers pull from the same product list.
-async function processQueue(products) {
+// opts.includeDetails threads through to enrichOne.
+// opts.onDone(n, total) is awaited after each item (progress ticks +
+//   cooperative-cancel checkpoint live here).
+// opts.isCancelled() → truthy stops launching new work (in-flight items
+//   still finish). Returns { processed, cancelled }.
+async function processQueue(products, { includeDetails = false, onDone = null, isCancelled = null } = {}) {
   let next = 0;
   let inflight = 0;
   let processed = 0;
+  let stopped = false;
   await new Promise(resolve => {
-    const launch = () => {
-      while (inflight < CONCURRENCY && next < products.length) {
+    const pump = () => {
+      // Nothing left to launch and nothing in flight → done.
+      if ((next >= products.length || stopped) && inflight === 0) {
+        resolve();
+        return;
+      }
+      while (!stopped && inflight < CONCURRENCY && next < products.length) {
         const p = products[next++];
         inflight++;
-        enrichOne(p)
+        enrichOne(p, { includeDetails })
           .catch(err => console.warn(`   ⚠️  enrich crash for ${p._id}: ${err.message}`))
-          .finally(() => {
+          .finally(async () => {
             inflight--;
             processed++;
-            if (processed === products.length) resolve();
-            else launch();
+            if (onDone) { try { await onDone(processed, products.length); } catch {} }
+            if (isCancelled && !stopped) { try { if (await isCancelled()) stopped = true; } catch {} }
+            pump();
           });
       }
     };
-    launch();
+    pump();
   });
+  return { processed, cancelled: stopped };
 }
 
-// Public entry point. Called from catalogSyncService.syncCatalog after
-// enqueueBrandProductDetects so the detect pipeline + enrichment run in
-// parallel (different services, no contention).
-async function enqueueBrandProductEnrichment(brandId) {
+// Shared driver for both paths. Loads the brand's non-draft products,
+// filters to the target set, wraps the queue in a cancellable
+// 'enrichment' OperationRun so it's visible + stoppable.
+async function runEnrichment(brandId, { includeDetails, onlyGaps, label }) {
   if (!brandId) return { skipped: true, reason: 'no brandId' };
   const t0 = Date.now();
-  // Pull all non-draft products for the brand. Draft products
-  // (detect-identified, gated on operator approval) are excluded so
-  // we don't spend on review enrichment for SKUs the operator may
-  // never accept.
+
   const rows = await CatalogProduct.find({
     brandId,
     draft: { $ne: true }
   })
-    .select('_id title brand productUrl productReviews detailsRefreshedAt')
+    .select('_id advertiserId title brand productUrl productReviews rating detailsRefreshedAt')
     .lean();
 
-  const needing = rows.filter(needsEnrichment).slice(0, MAX_PER_RUN);
+  const candidates = onlyGaps ? rows.filter(needsEnrichment) : rows;
+  const targets = candidates.slice(0, MAX_PER_RUN);
+
   console.log(
-    `🛒 catalogProductEnrichment[brand=${brandId}]: ` +
-    `${rows.length} products, ${needing.length} need enrichment ` +
-    `(cap=${MAX_PER_RUN}, concurrency=${CONCURRENCY})`
+    `🛒 catalogProductEnrichment[brand=${brandId}]: ${label} — ` +
+    `${rows.length} products, ${targets.length} target(s) ` +
+    `(onlyGaps=${!!onlyGaps} includeDetails=${!!includeDetails} cap=${MAX_PER_RUN}, concurrency=${CONCURRENCY})`
   );
-  if (!needing.length) {
+  if (!targets.length) {
     return { ok: true, total: rows.length, enriched: 0, skipped: rows.length, durationMs: Date.now() - t0 };
   }
 
-  await processQueue(needing);
+  const advertiserId = targets[0]?.advertiserId || rows[0]?.advertiserId || null;
+  const run = await progressService.startRun({
+    kind:        'enrichment',
+    advertiserId,
+    brandId,
+    total:       targets.length,
+    cancellable: true,
+    label
+  });
+
+  let cancelledByRun = false;
+  const noun = includeDetails ? 'enriched' : 'reviews';
+  const { processed, cancelled } = await processQueue(targets, {
+    includeDetails,
+    onDone: async (n, total) => {
+      run.tick(n, total, `${noun} ${n}/${total}`);
+      if (!cancelledByRun) {
+        // checkpoint() throws CancelledError (and writes the terminal
+        // 'cancelled' state) if a stop was requested — swallow it and let
+        // the queue drain its in-flight items.
+        try { await run.checkpoint(); } catch { cancelledByRun = true; }
+      }
+    },
+    isCancelled: () => cancelledByRun
+  });
 
   const durationMs = Date.now() - t0;
+  if (cancelledByRun || cancelled) {
+    // run already closed as 'cancelled' by checkpoint(); markCancelled is
+    // an idempotent no-op guard in case cancelled came from elsewhere.
+    run.markCancelled?.('Cancelled — partial enrichment kept');
+    console.log(`🛒 catalogProductEnrichment[brand=${brandId}]: ${label} CANCELLED after ${processed}/${targets.length} in ${Math.round(durationMs / 1000)}s`);
+    return { ok: true, cancelled: true, total: rows.length, enriched: processed, durationMs };
+  }
+
+  await run.succeed({ enriched: processed });
   console.log(
-    `🛒 catalogProductEnrichment[brand=${brandId}]: ` +
-    `done — enriched=${needing.length} skipped=${rows.length - needing.length} ` +
-    `in ${Math.round(durationMs / 1000)}s`
+    `🛒 catalogProductEnrichment[brand=${brandId}]: ${label} done — ` +
+    `enriched=${processed} skipped=${rows.length - targets.length} in ${Math.round(durationMs / 1000)}s`
   );
-  return {
-    ok:         true,
-    total:      rows.length,
-    enriched:   needing.length,
-    skipped:    rows.length - needing.length,
-    durationMs
-  };
+  return { ok: true, total: rows.length, enriched: processed, skipped: rows.length - targets.length, durationMs };
+}
+
+// AUTO path — called after catalog sync. Reviews-only gap-fill for
+// products with no on-page review signal. Cheap; no SerpAPI details.
+async function enqueueBrandProductEnrichment(brandId) {
+  return runEnrichment(brandId, {
+    includeDetails: false,
+    onlyGaps:       true,
+    label:          'Review gap-fill'
+  });
+}
+
+// USER-ACTUATED path — called from POST /api/sales-demos/brands/:id/enrich.
+// Full cross-seller details + web-wide reviews for every non-draft
+// product (capped). This is where the SerpAPI/Gemini spend lives now.
+async function enrichBrandDetails(brandId) {
+  return runEnrichment(brandId, {
+    includeDetails: true,
+    onlyGaps:       false,
+    label:          'Product enrichment'
+  });
 }
 
 module.exports = {
   enqueueBrandProductEnrichment,
+  enrichBrandDetails,
   // exported for tests / one-off scripts
   enrichOne,
   needsEnrichment

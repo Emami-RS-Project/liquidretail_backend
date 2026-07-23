@@ -339,6 +339,36 @@ async function expandWizardJob({
     console.log(`📦 expandWizardJob: stamped discount code "${promoDiscountCode}" onto ctaUrlParams`);
   }
 
+  // ── On-demand catalog detect (detect is deferred at sync time) ────
+  // Ensure the products this run will actually use have their catalog-
+  // product Media (so product_image seeds emit) + overlay-zone artifacts
+  // (so placement / ad-readiness work). Covers explicit product picks +
+  // the products matched to the selected media. Bounded wait; on timeout
+  // we proceed and the render path degrades gracefully. Skipped in dryRun.
+  if (!dryRun) {
+    try {
+      const { ensureDetectForProducts } = require('./catalogProductDetectService');
+      const ensureIds = new Set(productIds.map(String));
+      if (mediaIds.length) {
+        const pickedMedia = await Media.find({ _id: { $in: mediaIds.map(toObjectId).filter(Boolean) } })
+          .select('matchedProducts').lean();
+        for (const m of pickedMedia) {
+          for (const mp of (m.matchedProducts || [])) {
+            if (mp.catalogProductId && mp.outcome === 'product_match') ensureIds.add(String(mp.catalogProductId));
+          }
+        }
+      }
+      if (ensureIds.size) {
+        await ensureDetectForProducts([...ensureIds], {
+          advertiserId: campaign.advertiserId,
+          brandId
+        });
+      }
+    } catch (err) {
+      console.warn(`   ⚠️  on-demand detect prep failed (continuing): ${err.message}`);
+    }
+  }
+
   // ── Phase A5a — concept-driven V2 branch (AI_CONCEPT_DRIVEN flag) ─
   // When the flag is on AND format=Feed AND the operator picked at
   // least one product, take the V2 branch: per-product, build a seeded
