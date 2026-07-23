@@ -10,7 +10,9 @@ const Brand                = require('../models/Brand');
 const DetectRun            = require('../models/DetectRun');
 const CatalogProduct       = require('../models/CatalogProduct');
 const Media                = require('../models/Media');
+const OperationRun         = require('../models/OperationRun');
 const AdvertiserMembership = require('../models/AdvertiserMembership');
+const { enrichBrandDetails } = require('../services/catalogProductEnrichmentService');
 const {
   ensureSalesDemosAdvertiser,
   createDemoBrand,
@@ -185,6 +187,55 @@ router.get('/brands', async (req, res) => {
   }
 });
 
+// GET /api/sales-demos/activity — cross-brand activity log for the Sales
+// Demos workspace. Returns the OperationRun feed (every instrumented
+// process: demo-sync, catalog-sync, enrichment, detect, ad-batch, veo,
+// etc.) — active runs first, then recently-ended — so an operator can see
+// at a glance everything the system is currently working on. Read-only.
+router.get('/activity', async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    // Active (running/cancelling) first, then most-recent by start time.
+    // A compound sort on a computed "isActive" isn't index-friendly, so
+    // pull two cheap slices and merge — active set is tiny.
+    const [active, recent] = await Promise.all([
+      OperationRun.find({
+        advertiserId: req.salesDemosAdvertiserId,
+        status: { $in: ['running', 'cancelling'] }
+      }).sort({ startedAt: -1 }).limit(limit).lean(),
+      OperationRun.find({
+        advertiserId: req.salesDemosAdvertiserId,
+        status: { $in: ['succeeded', 'failed', 'cancelled'] }
+      }).sort({ endedAt: -1 }).limit(limit).lean()
+    ]);
+
+    const shape = r => ({
+      _id:         String(r._id),
+      kind:        r.kind,
+      label:       r.label || null,
+      status:      r.status,
+      stage:       r.stage || null,
+      note:        r.note || null,
+      pct:         r.pct ?? null,
+      itemsDone:   r.itemsDone ?? 0,
+      itemsTotal:  r.itemsTotal ?? null,
+      brandId:     r.brandId ? String(r.brandId) : null,
+      cancellable: !!r.cancellable,
+      error:       r.error || null,
+      startedAt:   r.startedAt,
+      endedAt:     r.endedAt || null,
+      heartbeatAt: r.heartbeatAt || null
+    });
+
+    res.json({
+      active: active.map(shape),
+      recent: recent.slice(0, limit).map(shape)
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'activity fetch failed' });
+  }
+});
+
 // POST /api/sales-demos/brands — create a demo brand.
 // Body: { name, igHandle?, shopifyUrl?, method? }
 // method: 'shopify-direct' (default when shopifyUrl set) | 'apify'
@@ -250,6 +301,52 @@ router.post('/brands/:id/sync', async (req, res) => {
     res.status(202).json({ ok: true, brandId: String(brand._id), status: 'started' });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'apify sync failed' });
+  }
+});
+
+// POST /api/sales-demos/brands/:id/enrich — user-actuated FULL catalog
+// enrichment (cross-seller price table + web-wide review synthesis +
+// immersive specs). This is the paid SerpAPI/Gemini path, deliberately
+// off the automatic sync path. Fire-and-forget (202); progress is
+// surfaced as a cancellable OperationRun (kind 'enrichment') that the UI
+// polls via /api/progress/active. 409 if one is already running.
+router.post('/brands/:id/enrich', async (req, res) => {
+  try {
+    // Atomic claim: only the request that flips enrichInFlight false→true
+    // proceeds; a concurrent double-click / second tab fails the filter and
+    // gets 409. Prevents two paid SerpAPI/Gemini runs on the same brand.
+    const brand = await Brand.findOneAndUpdate(
+      {
+        _id: req.params.id,
+        advertiserId: req.salesDemosAdvertiserId,
+        isDemo: true,
+        'apifyDemo.enrichInFlight': { $ne: true }
+      },
+      { $set: { 'apifyDemo.enrichInFlight': true } },
+      { new: true }
+    ).select('_id');
+
+    if (!brand) {
+      // Distinguish "not found" from "already locked" for a useful message.
+      const exists = await Brand.findOne({
+        _id: req.params.id, advertiserId: req.salesDemosAdvertiserId, isDemo: true
+      }).select('_id').lean();
+      if (!exists) return res.status(404).json({ error: 'demo brand not found' });
+      return res.status(409).json({ error: 'enrichment already running for this brand', code: 'ENRICH_IN_FLIGHT' });
+    }
+
+    // Fire-and-forget — errors are logged; the run's own terminal state
+    // reports success/failure to the UI. ALWAYS clear the lock on completion.
+    enrichBrandDetails(String(brand._id))
+      .catch(err => console.error(`⚠️  catalog enrichment failed for brand=${brand._id}: ${err.message}`))
+      .finally(() => {
+        Brand.updateOne({ _id: brand._id }, { $set: { 'apifyDemo.enrichInFlight': false } })
+          .catch(err => console.warn(`⚠️  clear enrichInFlight failed for brand=${brand._id}: ${err.message}`));
+      });
+
+    res.status(202).json({ ok: true, brandId: String(brand._id), status: 'started' });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'enrich failed' });
   }
 });
 

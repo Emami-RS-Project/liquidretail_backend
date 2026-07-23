@@ -14,13 +14,20 @@
 // Cost gate: alts are capped at MAX_ALT_IMAGES so a chatty catalog
 // (e.g. Shopify's 10+ angle shots per SKU) doesn't blow up the bill.
 
+const mongoose = require('mongoose');
 const Media = require('../models/Media');
 const DetectRun = require('../models/DetectRun');
 const CatalogProduct = require('../models/CatalogProduct');
 const { uploadUrlToCloudinary } = require('./cloudinaryService');
 const { normalizeBrandName } = require('../models/Brand');
+const progressService = require('./progressService');
 
 const MAX_ALT_IMAGES = 12;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function toOid(id) {
+  return mongoose.isValidObjectId(id) ? new mongoose.Types.ObjectId(String(id)) : null;
+}
 
 // ── Public API ───────────────────────────────────────────────────────
 
@@ -160,6 +167,29 @@ async function enqueueBrandProductDetects(brandId) {
     await CatalogProduct.bulkWrite(bulkOps, { ordered: false });
   }
 
+  // DETECT DEFERRAL (default): per-product detect — smart crops, overlay
+  // safe-zones, ad-readiness scoring — is the biggest cost in the pipeline
+  // and most catalog products never become ads. It now runs ON-DEMAND at
+  // ad-generation time (ensureDetectForProducts), not eagerly for the whole
+  // catalog at sync time. The variant-role stamping ABOVE still runs on
+  // every sync (matching + catalog UI depend on isPrimaryVariant /
+  // primaryProductId — cost-free DB writes); only the expensive image
+  // enqueue below is gated. Flip CATALOG_DETECT_PRECOMPUTE=true to restore
+  // eager whole-catalog precompute.
+  const precompute = String(process.env.CATALOG_DETECT_PRECOMPUTE || '').toLowerCase() === 'true';
+  if (!precompute) {
+    console.log(
+      `📦 catalog-product detect — brand=${brandId} DEFERRED to ad-time ` +
+      `(CATALOG_DETECT_PRECOMPUTE≠true) — variant roles stamped, no eager detect. ` +
+      `groups=${groups.size} primaries=${primaries.length} variants=${nonPrimaries.length} (rows ${products.length})`
+    );
+    return {
+      deferred: true, heroEnqueued: 0, altEnqueued: 0, skipped: primaries.length,
+      groups: groups.size, primaries: primaries.length,
+      variants: nonPrimaries.length, total: products.length
+    };
+  }
+
   // Only primaries that haven't been detected yet need an enqueue
   // call. Already-detected primaries no-op via the imageMediaId check
   // inside enqueueProductDetect.
@@ -186,6 +216,144 @@ async function enqueueBrandProductDetects(brandId) {
     variants:  nonPrimaries.length,
     total:     products.length
   };
+}
+
+// ── On-demand detect (ad-generation time) ────────────────────────────
+//
+// Detect is deferred at sync time (see enqueueBrandProductDetects); this
+// is the pull side. Given the CatalogProduct ids a campaign will actually
+// use, ensure each has its catalog-product Media (so product_image seeds
+// emit) + overlay-zone artifacts (so placement / ad-readiness work).
+// Materialize + enqueue is fast; the bounded wait blocks until zones land
+// — they arrive via detect.js's lazy overlay chain AFTER the DetectRun's
+// critical path, so we poll the Media doc, not DetectRun status. Surfaced
+// as a cancellable 'detect' OperationRun so it appears in the activity
+// dock. On timeout we return and the caller proceeds — the render path
+// degrades gracefully without spatial analysis.
+async function ensureDetectForProducts(catalogProductIds, {
+  advertiserId = null,
+  brandId      = null,
+  wait         = true,
+  timeoutMs    = 4 * 60 * 1000,
+  run: passedRun = null
+} = {}) {
+  const oids = [...new Set((catalogProductIds || []).map(String))].map(toOid).filter(Boolean);
+  if (!oids.length) return { ensured: 0, ready: 0, timedOut: 0, total: 0 };
+
+  // Collapse variants to their primary (matching + seeds already operate on
+  // primaries via isPrimaryVariant; without this a campaign using several
+  // SKUs of one product would re-materialize + re-detect the same hero N
+  // times). Map each requested id → primaryProductId || itself, dedupe.
+  const requested = await CatalogProduct.find({ _id: { $in: oids } })
+    .select('_id primaryProductId').lean();
+  if (!requested.length) return { ensured: 0, ready: 0, timedOut: 0, total: 0 };
+  const primaryOids = [...new Set(requested.map(p => String(p.primaryProductId || p._id)))]
+    .map(toOid).filter(Boolean);
+  const products = await CatalogProduct.find({ _id: { $in: primaryOids }, imageUrl: { $ne: null } }).lean();
+  if (!products.length) return { ensured: 0, ready: 0, timedOut: 0, total: 0 };
+
+  // 1. Materialize + enqueue detect for products without a hero wrapper.
+  //    (enqueueProductDetect is the per-product path — NOT gated by
+  //    CATALOG_DETECT_PRECOMPUTE — and no-ops when imageMediaId is set.)
+  let ensured = 0;
+  for (const p of products) {
+    if (p.imageMediaId) continue;
+    try {
+      const r = await enqueueProductDetect(p);
+      if (!r.skipped) ensured++;
+    } catch (err) {
+      console.warn(`   ⚠️  ensureDetectForProducts[${p._id}]: ${err.message}`);
+    }
+  }
+
+  console.log(`🎯 ensureDetectForProducts: ${products.length} primary product(s), ${ensured} newly enqueued (wait=${wait})`);
+  if (!wait) return { ensured, ready: 0, timedOut: products.length, total: products.length };
+
+  // 2. Bounded wait for overlay zones to land on each product's hero.
+  //    Zones land via detect.js's lazy overlay chain AFTER the DetectRun's
+  //    critical path, so poll the Media doc. Only WAIT on products that (a)
+  //    have a hero Media and (b) still have an in-flight DetectRun — so a
+  //    failed materialize, or a product whose detect already died without
+  //    landing zones, doesn't stall the whole batch for the full timeout.
+  const run = passedRun || await progressService.startRun({
+    kind:         'detect',
+    advertiserId: advertiserId || products[0].advertiserId,
+    brandId:      brandId || products[0].brandId,
+    total:        products.length,
+    cancellable:  true,
+    label:        'Preparing product imagery'
+  });
+
+  const pending = new Set(products.map(p => String(p._id)));  // productId strings
+  let ready = 0;
+  let cancelled = false;
+  let errored = false;
+  const deadline = Date.now() + timeoutMs;
+
+  try {
+    while (pending.size && Date.now() < deadline) {
+      const heros = await Media.find({
+        source: 'catalog-product',
+        'metadata.catalogProductId': { $in: [...pending].map(toOid) },
+        'metadata.imageRole': 'hero'
+      }).select('_id metadata.catalogProductId latestArtifacts.overlayZones').lean();
+
+      const heroByProduct = new Map();
+      for (const m of heros) heroByProduct.set(String(m.metadata?.catalogProductId), m);
+
+      for (const pid of [...pending]) {
+        const m = heroByProduct.get(pid);
+        if (!m) { pending.delete(pid); continue; }          // no hero Media → can't wait (materialize failed)
+        if (m.latestArtifacts?.overlayZones) {
+          pending.delete(pid);
+          ready++;
+          run.tick(ready, products.length, `product imagery ${ready}/${products.length}`);
+        }
+      }
+      if (!pending.size) break;
+
+      // Per-product fast-fail: overlay zones land via detect.js's LAZY
+      // chain AFTER the DetectRun flips to 'completed' (pipelines/detect.js
+      // — run.status='completed' returns before the fire-and-forget overlay
+      // chain finishes). So 'completed' is a normal wait state, NOT a stop
+      // signal. Drop a product only when its latest hero DetectRun is
+      // 'failed' or absent (nothing will ever produce zones) — keeping
+      // queued/processing/completed waiting until zones land or timeout.
+      const pendingHeroIds = [...pending].map(pid => heroByProduct.get(pid)?._id).filter(Boolean);
+      if (pendingHeroIds.length) {
+        const runRows = await DetectRun.find({ mediaId: { $in: pendingHeroIds } })
+          .sort({ createdAt: -1 }).select('mediaId status').lean();
+        const latestByMedia = new Map();
+        for (const r of runRows) {
+          const k = String(r.mediaId);
+          if (!latestByMedia.has(k)) latestByMedia.set(k, r.status);   // first = newest (sorted desc)
+        }
+        for (const pid of [...pending]) {
+          const hid = heroByProduct.get(pid)?._id;
+          const st = hid ? latestByMedia.get(String(hid)) : null;
+          if (st == null || st === 'failed') pending.delete(pid);      // dead / never-started → won't produce zones
+        }
+        if (!pending.size) break;
+      }
+
+      try { await run.checkpoint(); } catch { cancelled = true; break; }
+      await sleep(3000);
+    }
+  } catch (err) {
+    errored = true;
+    console.warn(`   ⚠️  ensureDetectForProducts wait failed: ${err.message}`);
+    if (!passedRun) run.fail?.(err);
+  } finally {
+    if (!passedRun && !errored) {
+      if (cancelled) run.markCancelled?.('Cancelled — imagery prep stopped');
+      else run.succeed({ ready, timedOut: pending.size });
+    }
+  }
+
+  if (pending.size) {
+    console.warn(`🎯 ensureDetectForProducts: ${pending.size}/${products.length} product(s) without overlay zones — proceeding (render degrades gracefully)`);
+  }
+  return { ensured, ready, timedOut: pending.size, total: products.length, cancelled, errored };
 }
 
 // Group products by (itemGroupId || nameNormalized(title)). Returns a
@@ -365,4 +533,4 @@ function hashShort(s) {
   return Math.abs(h).toString(36).slice(0, 8);
 }
 
-module.exports = { enqueueProductDetect, enqueueBrandProductDetects, materializeMissingAlts, MAX_ALT_IMAGES };
+module.exports = { enqueueProductDetect, enqueueBrandProductDetects, ensureDetectForProducts, materializeMissingAlts, MAX_ALT_IMAGES };

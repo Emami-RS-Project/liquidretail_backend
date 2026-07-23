@@ -16,6 +16,8 @@
 // is the only real ceiling.
 
 require('dotenv').config();
+// Repo-versioned non-secret defaults — see index.js. Env always wins.
+require('dotenv').config({ path: require('path').join(__dirname, 'config', 'defaults.env') });
 const mongoose = require('mongoose');
 
 const Job          = require('./models/Job');
@@ -29,7 +31,11 @@ const { processLegacyUploadJob } = require('./pipelines/inventory');
 const { sleep }                  = require('./pipelines/shared');
 const { startScheduler }         = require('./services/scheduledSyncService');
 
-const CONCURRENCY = Math.max(1, Math.min(parseInt(process.env.WORKER_CONCURRENCY, 10) || 2, 100));
+// Default 4 parallel worker loops (was 2). Detect/render/ad work is
+// I/O- and API-bound, so more loops drain the queues faster without
+// contention; the Mongo pool below scales with it. Prod overrides via
+// WORKER_CONCURRENCY (currently 5). Hard-capped at 100.
+const CONCURRENCY = Math.max(1, Math.min(parseInt(process.env.WORKER_CONCURRENCY, 10) || 4, 100));
 
 // Orphan reaper tuning. STALE_MIN is the threshold past which a claimed
 // (status: 'processing' / 'rendering' / 'running') doc is presumed

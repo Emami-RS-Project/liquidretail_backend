@@ -29,6 +29,7 @@ const CANCELLABLE_KINDS = new Set([
   'catalog-sync',
   'demo-sync',
   'enrichment',
+  'category-inference',
   'font-ingest',
   'campaign-sync',
   'scheduled-sync',

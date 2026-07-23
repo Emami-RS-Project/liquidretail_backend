@@ -834,6 +834,27 @@ async function enrichOneMatchInPlace(match, ctx) {
     }
   }
 
+  // ── Detect backstop (reverse-flow pre-warm) ──
+  // Catalog-product detect (crops/overlay zones) is deferred at sync
+  // time and runs on-demand at ad generation. When a post CONFIRMS a
+  // product match, that product is a likely ad subject — pre-warm its
+  // detect artifacts now (fire-and-forget, no wait) so ad generation
+  // finds them ready. Post-scale (few confident matches), not catalog-
+  // scale. Lazy require avoids a load-order cycle.
+  if (outcome === 'product_match' && match.catalogProductId) {
+    try {
+      require('./catalogProductDetectService')
+        .ensureDetectForProducts([match.catalogProductId], {
+          advertiserId: ctx.advertiserId || null,
+          brandId:      ctx.brandId || null,
+          wait:         false
+        })
+        .catch(err => console.warn(`   ⚠️  detect pre-warm[${match.catalogProductId}]: ${err.message}`));
+    } catch (err) {
+      console.warn(`   ⚠️  detect pre-warm enqueue[${match.catalogProductId}]: ${err.message}`);
+    }
+  }
+
   // ── Tier 1 — SKU enrichment ──
   if (outcome === 'product_match' && ident.productName && (ident.certainty || 0) >= 0.3) {
     // productDetails — fire when commerce data is thin (catalog rows have
