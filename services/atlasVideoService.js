@@ -30,11 +30,30 @@ const Campaign                  = require('../models/Campaign');
 const CatalogProduct            = require('../models/CatalogProduct');
 const LayoutInputArtifact       = require('../models/LayoutInputArtifact');
 const CreativeDirectionArtifact = require('../models/CreativeDirectionArtifact');
-const { uploadBufferToCloudinary } = require('./cloudinaryService');
+const { uploadBufferToCloudinary, uploadUrlToCloudinary } = require('./cloudinaryService');
 const { recordFlatCost } = require('./costTracker');
 const { buildVeoPrompt, aspectRatioForPlatformFormat, promptProfileFor } = require('./veoPromptBuilder');
 
 const { buildLayoutInput }   = require('./layoutInputService');
+
+// Generative reframe (video reference path only). Outpaint every ref to
+// the target aspect so the product stays fully visible; store labeled
+// results on Media.metadata.reframes for reuse (no re-spend). Master
+// switch + model/resolution/skip-threshold are all env-tunable.
+const REFRAME_ENABLED = () => String(process.env.REFRAME_ENABLED ?? 'true').toLowerCase() !== 'false';
+const REFRAME_OUTPAINT_MODEL = () => process.env.REFRAME_OUTPAINT_MODEL || 'google/nano-banana-2/edit-developer';
+const REFRAME_RESOLUTION = () => process.env.REFRAME_RESOLUTION || '4k';
+const REFRAME_SKIP_THRESHOLD = () => {
+  const n = Number(process.env.REFRAME_SKIP_THRESHOLD);
+  return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.985;
+};
+// Per-image outpaint price for the cost ledger (nano-banana-2/edit-developer
+// is $0.04 flat across 1k|2k|4k). Tunable so the ledger stays honest if the
+// model/tier changes — this is observability only, not a spend gate.
+const REFRAME_COST_USD = () => {
+  const n = Number(process.env.REFRAME_COST_USD);
+  return Number.isFinite(n) && n >= 0 ? n : 0.04;
+};
 
 // Maps the concept's creative_style enum to an AI template id for
 // layoutInput derivation. Mirrors the table in campaignAdsGenerationService
@@ -451,17 +470,21 @@ function cropImageUrlForAspect(originalUrl, aspectRatio, brandOrHex = null) {
 
 // ── Reference image set ──────────────────────────────────────────────
 //
-// Deterministic retrieval order:
+// Deterministic retrieval order (identity list, then generative reframe):
 //   Position 0:  seed media (the ad's main image — for product-seeded
 //                ads this is the product hero)
-//   Position 1:  CatalogProduct.imageUrl (product hero) when distinct
-//   Position 2+: CatalogProduct.additionalImages in stored order
-//                (already capped at 4 by MAX_ALT_IMAGES upstream)
+//   Next:        catalog-product Media docs (Cloudinary mirrors), hero
+//                first then alts (createdAt asc), deduped by Media _id
+//   Fallback:    CatalogProduct.imageUrl / additionalImages (originals,
+//                mediaDoc=null — no reframe cache) when stack < 2
+//   Legacy:      pickProductOnlyUrl when still < 2
 //
-// How many of those actually ship is selectable: default 3 (primary +
-// first two alts), configurable from 1 up to 7 via
+// Every identity is reframed to the target aspect via generative
+// outpaint (or exact-fit skip / Cloudinary crop fallback). How many
+// ship is selectable: default 3, configurable 1–7 via
 // videoSettings.referenceImageCount (product → brand → env → default),
-// always clamped to the model's maxReferenceImages.
+// always clamped to the model's maxReferenceImages. Cap BEFORE reframe
+// so we never pay for images we won't send.
 //
 // Historical note: an earlier Grok-era iteration deliberately shipped a
 // minimalist 2-reference stack (seed + one product_only anchor) because
@@ -509,6 +532,174 @@ function resolveReferenceImageCount({ brand = null, product = null } = {}) {
     console.warn(`⚠️  resolveReferenceImageCount: invalid value '${raw}' from ${source} (want 1–${MAX_REFERENCE_IMAGE_COUNT}) — falling through`);
   }
   return DEFAULT_REFERENCE_IMAGE_COUNT;
+}
+
+// Single billable image submit — NO retry (POST is charged). Sibling of
+// submitGeneration; reuses pollPrediction for the shared prediction API.
+async function submitImageGeneration({ model, images, prompt, aspectRatio, resolution }) {
+  const res = await axios.post(
+    `${BASE_URL}/model/generateImage`,
+    { model, images, prompt, aspect_ratio: aspectRatio, resolution },
+    {
+      headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' },
+      timeout: 60000
+    }
+  );
+  const id = res.data?.data?.id;
+  if (!id) throw new Error('atlasImage: submit response missing prediction id');
+  return id;
+}
+
+function outpaintPromptForAspect(aspectRatio) {
+  const [wr, hr] = String(aspectRatio).split(':').map(Number);
+  const orient = wr > hr ? 'horizontal (landscape)' : wr < hr ? 'vertical (portrait)' : 'square';
+  return `Reframe this image into a ${orient} ${wr}:${hr} composition. Keep the ENTIRE subject and all text fully visible and uncropped. Naturally extend the existing background, colors and scene to fill the new areas — do not add new objects, people or text. Seamless, photorealistic, matching the original style, lighting and palette.`;
+}
+
+// In-process single-flight for reframes. The product fan-out emits several
+// ads that SHARE reference medias, and workers run those ads in parallel —
+// without this, the same media+aspect would outpaint 2–3× concurrently
+// before any persist lands, paying $0.04 each for one asset. Keyed by media
+// _id (or source URL when there's no Media doc) + aspect; cleared on settle.
+const _inflightReframes = new Map();
+
+// Reframe sourceUrl to aspectRatio via generative outpaint (or exact-fit
+// skip). NEVER throws — any failure degrades to deterministic Cloudinary
+// crop so the ad pipeline keeps moving. Successful reframes (incl. exact)
+// are persisted on Media.metadata.reframes[aspectKey] for reuse.
+async function reframeReferenceForAspect({ media, sourceUrl, aspectRatio, brand }) {
+  const fallback = () => cropImageUrlForAspect(sourceUrl, aspectRatio, brand);
+  try {
+    // 1. Kill-switch / Atlas unconfigured / missing source → crop only.
+    if (!REFRAME_ENABLED() || !enabled() || !sourceUrl) return fallback();
+
+    // 2. Mongo-safe aspect key: alphanumeric+underscore only, so ':' AND
+    //    '.' are removed ('9:16'→'9_16', '1.91:1'→'1_91_1'). A raw dot would
+    //    make the $set path nest and permanently miss the flat-key read.
+    const aspectKey = String(aspectRatio).replace(/[^a-z0-9]+/gi, '_');
+
+    // 3. PERSISTENT CACHE HIT — no spend, no submit (survives restarts).
+    const cached = media?.metadata?.reframes?.[aspectKey]?.url;
+    if (typeof cached === 'string' && cached.trim()) return cached;
+
+    // 4. IN-PROCESS SINGLE-FLIGHT — collapse concurrent reframes of the same
+    //    media+aspect within this worker so the billable outpaint runs once.
+    const memoKey = `${media?._id ? String(media._id) : sourceUrl}|${aspectKey}`;
+    const existing = _inflightReframes.get(memoKey);
+    if (existing) return await existing;
+
+    // The worker below NEVER throws — it resolves to a reframe URL or the
+    // deterministic crop fallback, so every awaiter gets a usable value.
+    const work = (async () => {
+      const [wr, hr] = String(aspectRatio).split(':').map(Number);
+      // 4a. Malformed aspect → crop, never bill an outpaint on a broken prompt.
+      if (!(wr > 0 && hr > 0)) return fallback();
+
+      // 4b. Only MEDIA-BACKED refs are cacheable. An uncacheable ref (product
+      //     URL / legacy fallback, no Media doc) would re-outpaint $0.04 EVERY
+      //     render, so crop it instead of spending. The seed + catalog mirrors
+      //     always have _id, so the common path still outpaints.
+      if (!media?._id) return fallback();
+
+      // 4c. FRESH persistent-cache re-read. This lean media doc may have been
+      //     loaded BEFORE a sibling ad/worker persisted this aspect (fan-out
+      //     ads share reference medias) — the in-process single-flight only
+      //     covers overlapping calls, so re-check the DB to close the
+      //     post-settle sequential dual-bill window (one cheap read ≪ $0.04).
+      try {
+        const fresh = await Media.findById(media._id).select(`metadata.reframes.${aspectKey}`).lean();
+        const freshUrl = fresh?.metadata?.reframes?.[aspectKey]?.url;
+        if (typeof freshUrl === 'string' && freshUrl.trim()) return freshUrl;
+      } catch { /* fall through and compute */ }
+
+      // 5. ALREADY-CORRECT guard — source aspect within threshold of target.
+      if (media.width > 0 && media.height > 0) {
+        const sr = media.width / media.height;
+        const tr = wr / hr;
+        const retained = Math.min(sr, tr) / Math.max(sr, tr);
+        if (retained >= REFRAME_SKIP_THRESHOLD()) {
+          const exactUrl = fallback();
+          // Persist exact-fit too so every aspect is on file for reuse.
+          await persistReframe(media, aspectKey, aspectRatio, exactUrl, 'exact');
+          return exactUrl;
+        }
+      }
+
+      // 6. OUTPAINT (single billable POST) + Cloudinary mirror. Errors here
+      //    must NOT persist a fallback as the good reframe (allow retry next
+      //    render). Single submit only — never retry the charged POST.
+      let finalUrl;
+      try {
+        const id = await submitImageGeneration({
+          model: REFRAME_OUTPAINT_MODEL(),
+          images: [sourceUrl],
+          prompt: outpaintPromptForAspect(aspectRatio),
+          aspectRatio,
+          resolution: REFRAME_RESOLUTION()
+        });
+        const outUrl = await pollPrediction(id);
+        const up = await uploadUrlToCloudinary(outUrl, { folder: 'liquidretail/reframes' });
+        finalUrl = up.secure_url || up.url || outUrl;
+      } catch (err) {
+        console.warn(`⚠️  reframeReferenceForAspect[${aspectKey}]: outpaint failed — ${err.message}`);
+        return fallback();
+      }
+
+      // 7. Ledger the spend (best-effort telemetry — never blocks the URL).
+      try {
+        await recordFlatCost({
+          stage: 'reframe-outpaint',
+          provider: 'atlas',
+          model: REFRAME_OUTPAINT_MODEL(),
+          brandId: brand?._id || media?.brandId || null,
+          mediaId: media?._id || null,
+          productId: media?.metadata?.catalogProductId || null,
+          purposeTag: `reframe:${aspectRatio}`,
+          costUsd: REFRAME_COST_USD()
+        });
+      } catch { /* telemetry only */ }
+
+      // 8. PERSIST asset-library entry (DB write failure must not lose URL).
+      await persistReframe(media, aspectKey, aspectRatio, finalUrl, 'outpaint');
+      return finalUrl;
+    })();
+
+    _inflightReframes.set(memoKey, work);
+    try {
+      return await work;
+    } finally {
+      _inflightReframes.delete(memoKey);
+    }
+  } catch (err) {
+    console.warn(`⚠️  reframeReferenceForAspect: unexpected — ${err.message}`);
+    return fallback();
+  }
+}
+
+async function persistReframe(media, aspectKey, aspectRatio, finalUrl, method) {
+  if (!finalUrl) return;
+  const entry = {
+    url: finalUrl,
+    aspect: aspectRatio,
+    method,
+    model: REFRAME_OUTPAINT_MODEL(),
+    at: new Date().toISOString()
+  };
+  // Mutate in-memory lean doc so the same run reuses the cache.
+  if (media) {
+    media.metadata = media.metadata || {};
+    media.metadata.reframes = media.metadata.reframes || {};
+    media.metadata.reframes[aspectKey] = entry;
+  }
+  if (!media?._id) return;
+  try {
+    await Media.updateOne(
+      { _id: media._id },
+      { $set: { [`metadata.reframes.${aspectKey}`]: entry } }
+    );
+  } catch (err) {
+    console.warn(`⚠️  reframeReferenceForAspect: persist failed (url kept) — ${err.message}`);
+  }
 }
 
 // Resolve per-ad render duration. Operators may set Ad.videoDurationSec
@@ -572,40 +763,80 @@ function validateVideoSettings(vs) {
   return null;
 }
 
-function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio, caps = null, referenceCount = null, brand = null }) {
+async function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio, caps = null, referenceCount = null, brand = null }) {
   const requested = Number.isFinite(referenceCount) && referenceCount >= 1
     ? Math.min(referenceCount, MAX_REFERENCE_IMAGE_COUNT)
     : DEFAULT_REFERENCE_IMAGE_COUNT;
   const maxImages = Math.min(requested, caps?.maxReferenceImages || MAX_REFERENCE_IMAGE_COUNT);
-  const urls = [];
-  const seen = new Set();
 
-  const push = (sourceUrl) => {
-    if (!sourceUrl || seen.has(sourceUrl)) return;
-    seen.add(sourceUrl);
-    // Pass brand so image-source seeds flatten onto websiteBackground.
-    const cropped = cropImageUrlForAspect(sourceUrl, aspectRatio, brand);
-    if (cropped) urls.push(cropped);
-  };
+  // Ordered identity list: { mediaDoc, sourceUrl }, deduped.
+  const ids = [];
+  const seenMediaIds = new Set();
+  const seenUrls = new Set();
 
-  // Main image first — always position 0.
-  push(media?.fileUrl);
-
-  // Product hero, then alts in their stored (retrieval) order. Dedupe
-  // is on the pre-crop source URL, so the same asset reached via seed
-  // and catalog never lands twice.
-  push(product?.imageUrl);
-  for (const altUrl of (Array.isArray(product?.additionalImages) ? product.additionalImages : [])) {
-    push(altUrl);
+  // SEED first — position 0.
+  if (media?.fileUrl) {
+    ids.push({ mediaDoc: media, sourceUrl: media.fileUrl });
+    if (media._id) seenMediaIds.add(String(media._id));
+    seenUrls.add(media.fileUrl);
   }
 
-  // Fallback: when the product carries no direct image fields, fill
-  // from the product_only-classified catalog Media (legacy behavior).
-  if (urls.length < 2) {
-    push(pickProductOnlyUrl(catalogMedias, product));
+  // Catalog mirrors (hero-first / createdAt asc), skip seed id.
+  for (const cm of (catalogMedias || [])) {
+    if (!cm?.fileUrl) continue;
+    if (media?._id && String(cm._id) === String(media._id)) continue;
+    const mid = cm._id != null ? String(cm._id) : null;
+    if (mid && seenMediaIds.has(mid)) continue;
+    if (mid) seenMediaIds.add(mid);
+    ids.push({ mediaDoc: cm, sourceUrl: cm.fileUrl });
   }
 
-  return urls.slice(0, maxImages);
+  // FALLBACK when still < 2: product originals (no mediaDoc → no cache).
+  if (ids.length < 2) {
+    const originals = [];
+    if (product?.imageUrl) originals.push(product.imageUrl);
+    for (const alt of (Array.isArray(product?.additionalImages) ? product.additionalImages : [])) {
+      if (alt) originals.push(alt);
+    }
+    for (const url of originals) {
+      if (!url || seenUrls.has(url)) continue;
+      if (media?.fileUrl && url === media.fileUrl) continue;
+      seenUrls.add(url);
+      ids.push({ mediaDoc: null, sourceUrl: url });
+      if (ids.length >= maxImages) break;
+    }
+  }
+
+  // LEGACY FALLBACK when still < 2.
+  if (ids.length < 2) {
+    const legacy = pickProductOnlyUrl(catalogMedias, product);
+    if (legacy && !seenUrls.has(legacy) && legacy !== media?.fileUrl) {
+      ids.push({ mediaDoc: null, sourceUrl: legacy });
+    }
+  }
+
+  // Cap BEFORE reframing — never pay for images we won't send.
+  const capped = ids.slice(0, maxImages);
+
+  // Reframe all in parallel; preserve order.
+  const reframed = await Promise.all(
+    capped.map(id => reframeReferenceForAspect({
+      media: id.mediaDoc,
+      sourceUrl: id.sourceUrl,
+      aspectRatio,
+      brand
+    }))
+  );
+
+  // Dedup identical final URLs, keep order.
+  const out = [];
+  const seenFinal = new Set();
+  for (const u of reframed) {
+    if (!u || seenFinal.has(u)) continue;
+    seenFinal.add(u);
+    out.push(u);
+  }
+  return out;
 }
 
 // ── Polling ───────────────────────────────────────────────────────────
@@ -997,11 +1228,10 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
       ? Media.find({
           source: 'catalog-product',
           'metadata.catalogProductId': ad.productId
-        }).select('_id fileUrl classification adSuitability metadata')
-          // Deterministic order for the reference-stack fallback: the
-          // unsorted query returned insertion-order-ish results that
-          // could shuffle between runs. hero materializes before alts,
-          // so createdAt asc ≈ hero-first, alts in stored order.
+        }).select('_id fileUrl classification adSuitability metadata width height')
+          // Deterministic order for the reference stack: hero materializes
+          // before alts, so createdAt asc ≈ hero-first, alts in stored order.
+          // width/height feed the reframe already-correct skip guard.
           .sort({ createdAt: 1 })
           .lean()
       : []
@@ -1092,7 +1322,7 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   // paramShape — including 1-ref models where nothing beyond the seed
   // is actually transmitted.
   const referenceCount = resolveReferenceImageCount({ brand, product });
-  const imageUrls = buildReferenceImages({
+  const imageUrls = await buildReferenceImages({
     media, product, catalogMedias, aspectRatio, caps, referenceCount, brand
   });
   if (!imageUrls.length) throw new Error(`atlasVideo[ad=${ad._id}]: no reference images available`);

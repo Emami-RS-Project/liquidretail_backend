@@ -435,11 +435,12 @@ async function materializeImage({ sourceUrl, product, imageRole }) {
   if (existing) return existing;
 
   let mirroredUrl;
+  let uploadResult = null;
   try {
-    const result = await uploadUrlToCloudinary(sourceUrl, {
+    uploadResult = await uploadUrlToCloudinary(sourceUrl, {
       folder: `catalog-product/${product.brandId}`
     });
-    mirroredUrl = result.secure_url || result.url;
+    mirroredUrl = uploadResult.secure_url || uploadResult.url;
   } catch (err) {
     // Mirroring is best-effort — fall back to the source URL if
     // Cloudinary's free tier is exhausted or the upload errored.
@@ -449,7 +450,10 @@ async function materializeImage({ sourceUrl, product, imageRole }) {
   }
 
   try {
-    return await Media.create({
+    // Capture dimensions from the Cloudinary upload result when present
+    // so the video-reference reframe path can skip outpaint when the
+    // source aspect already matches the target (REFRAME_SKIP_THRESHOLD).
+    const doc = {
       advertiserId: product.advertiserId,
       brandId:      product.brandId,
       source:       'catalog-product',
@@ -463,7 +467,11 @@ async function materializeImage({ sourceUrl, product, imageRole }) {
         category:         product.category || null,
         productTitle:     product.title || null
       }
-    });
+    };
+    // Only set when present — mirror fallback path may not have dims.
+    if (typeof uploadResult?.width === 'number' && uploadResult.width > 0) doc.width = uploadResult.width;
+    if (typeof uploadResult?.height === 'number' && uploadResult.height > 0) doc.height = uploadResult.height;
+    return await Media.create(doc);
   } catch (err) {
     // Lost the race to a concurrent caller — the Media doc was
     // inserted between our findOne and create. Re-fetch and return.
