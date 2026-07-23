@@ -806,7 +806,14 @@ function validateVideoSettings(vs) {
   return null;
 }
 
-async function buildReferenceImages({ media, product, catalogMedias = [], aspectRatio, caps = null, referenceCount = null, brand = null }) {
+async function buildReferenceImages({
+  media, product, catalogMedias = [], aspectRatio, caps = null,
+  referenceCount = null, brand = null,
+  // Phase 3 — when non-empty, build the identity list DIRECTLY from this
+  // ordered Media-doc array (operator pick order). Position 0 = primary
+  // seed. Skips seed+catalogMedias+fallback assembly entirely.
+  orderedReferenceMedia = null
+}) {
   const requested = Number.isFinite(referenceCount) && referenceCount >= 1
     ? Math.min(referenceCount, MAX_REFERENCE_IMAGE_COUNT)
     : DEFAULT_REFERENCE_IMAGE_COUNT;
@@ -817,44 +824,62 @@ async function buildReferenceImages({ media, product, catalogMedias = [], aspect
   const seenMediaIds = new Set();
   const seenUrls = new Set();
 
-  // SEED first — position 0.
-  if (media?.fileUrl) {
-    ids.push({ mediaDoc: media, sourceUrl: media.fileUrl });
-    if (media._id) seenMediaIds.add(String(media._id));
-    seenUrls.add(media.fileUrl);
-  }
-
-  // Catalog mirrors (hero-first / createdAt asc), skip seed id.
-  for (const cm of (catalogMedias || [])) {
-    if (!cm?.fileUrl) continue;
-    if (media?._id && String(cm._id) === String(media._id)) continue;
-    const mid = cm._id != null ? String(cm._id) : null;
-    if (mid && seenMediaIds.has(mid)) continue;
-    if (mid) seenMediaIds.add(mid);
-    ids.push({ mediaDoc: cm, sourceUrl: cm.fileUrl });
-  }
-
-  // FALLBACK when still < 2: product originals (no mediaDoc → no cache).
-  if (ids.length < 2) {
-    const originals = [];
-    if (product?.imageUrl) originals.push(product.imageUrl);
-    for (const alt of (Array.isArray(product?.additionalImages) ? product.additionalImages : [])) {
-      if (alt) originals.push(alt);
+  // Operator-ordered stack — no seed/catalog/fallback assembly. Only taken
+  // when it yields at least one usable ref; if every pick lacks a fileUrl
+  // (degenerate) we fall through to the default assembly rather than throw.
+  let usedOrdered = false;
+  if (Array.isArray(orderedReferenceMedia) && orderedReferenceMedia.length) {
+    for (const m of orderedReferenceMedia) {
+      if (!m?.fileUrl) continue;
+      const mid = m._id != null ? String(m._id) : null;
+      if (mid && seenMediaIds.has(mid)) continue;
+      if (mid) seenMediaIds.add(mid);
+      if (seenUrls.has(m.fileUrl)) continue;
+      seenUrls.add(m.fileUrl);
+      ids.push({ mediaDoc: m, sourceUrl: m.fileUrl });
     }
-    for (const url of originals) {
-      if (!url || seenUrls.has(url)) continue;
-      if (media?.fileUrl && url === media.fileUrl) continue;
-      seenUrls.add(url);
-      ids.push({ mediaDoc: null, sourceUrl: url });
-      if (ids.length >= maxImages) break;
-    }
+    usedOrdered = ids.length > 0;
   }
+  if (!usedOrdered) {
+    // SEED first — position 0.
+    if (media?.fileUrl) {
+      ids.push({ mediaDoc: media, sourceUrl: media.fileUrl });
+      if (media._id) seenMediaIds.add(String(media._id));
+      seenUrls.add(media.fileUrl);
+    }
 
-  // LEGACY FALLBACK when still < 2.
-  if (ids.length < 2) {
-    const legacy = pickProductOnlyUrl(catalogMedias, product);
-    if (legacy && !seenUrls.has(legacy) && legacy !== media?.fileUrl) {
-      ids.push({ mediaDoc: null, sourceUrl: legacy });
+    // Catalog mirrors (hero-first / createdAt asc), skip seed id.
+    for (const cm of (catalogMedias || [])) {
+      if (!cm?.fileUrl) continue;
+      if (media?._id && String(cm._id) === String(media._id)) continue;
+      const mid = cm._id != null ? String(cm._id) : null;
+      if (mid && seenMediaIds.has(mid)) continue;
+      if (mid) seenMediaIds.add(mid);
+      ids.push({ mediaDoc: cm, sourceUrl: cm.fileUrl });
+    }
+
+    // FALLBACK when still < 2: product originals (no mediaDoc → no cache).
+    if (ids.length < 2) {
+      const originals = [];
+      if (product?.imageUrl) originals.push(product.imageUrl);
+      for (const alt of (Array.isArray(product?.additionalImages) ? product.additionalImages : [])) {
+        if (alt) originals.push(alt);
+      }
+      for (const url of originals) {
+        if (!url || seenUrls.has(url)) continue;
+        if (media?.fileUrl && url === media.fileUrl) continue;
+        seenUrls.add(url);
+        ids.push({ mediaDoc: null, sourceUrl: url });
+        if (ids.length >= maxImages) break;
+      }
+    }
+
+    // LEGACY FALLBACK when still < 2.
+    if (ids.length < 2) {
+      const legacy = pickProductOnlyUrl(catalogMedias, product);
+      if (legacy && !seenUrls.has(legacy) && legacy !== media?.fileUrl) {
+        ids.push({ mediaDoc: null, sourceUrl: legacy });
+      }
     }
   }
 
@@ -1355,9 +1380,30 @@ async function generateForAd({ ad, operatorPrompt = null, storyboard: precompute
   // maxReferenceImages, so hasProductAnchor is truthful for every
   // paramShape — including 1-ref models where nothing beyond the seed
   // is actually transmitted.
+  //
+  // Phase 3 — when ad.referenceMediaIds is non-empty, load those Media
+  // in exact pick order and pass as orderedReferenceMedia (skips the
+  // default seed+catalog assembly). ad.mediaId already equals
+  // referenceMediaIds[0], so no double-add.
+  let orderedReferenceMedia = null;
+  if (Array.isArray(ad.referenceMediaIds) && ad.referenceMediaIds.length) {
+    const orderedIds = ad.referenceMediaIds.map(String);
+    const docs = await Media.find({ _id: { $in: ad.referenceMediaIds } }).lean();
+    const byId = new Map(docs.map(d => [String(d._id), d]));
+    orderedReferenceMedia = orderedIds
+      .map(id => byId.get(id))
+      .filter(Boolean);
+    if (orderedReferenceMedia.length < orderedIds.length) {
+      console.warn(
+        `⚠️  atlasVideo[ad=${ad._id}]: referenceMediaIds missing ` +
+        `${orderedIds.length - orderedReferenceMedia.length} Media doc(s) — using ${orderedReferenceMedia.length} found`
+      );
+    }
+  }
   const referenceCount = resolveReferenceImageCount({ brand, product });
   const imageUrls = await buildReferenceImages({
-    media, product, catalogMedias, aspectRatio, caps, referenceCount, brand
+    media, product, catalogMedias, aspectRatio, caps, referenceCount, brand,
+    orderedReferenceMedia
   });
   if (!imageUrls.length) throw new Error(`atlasVideo[ad=${ad._id}]: no reference images available`);
 
@@ -1509,6 +1555,48 @@ async function downloadToBuffer(url) {
   return Buffer.from(res.data);
 }
 
+// Scaffold for the Advanced "raw prompt" editor: resolve model + aspect
+// + duration for the given brand/product/format, then return the
+// canonical buildVeoPrompt string (media=null, placeholder product when
+// none supplied). Used by GET /api/ads/veo-prompt-scaffold.
+async function buildPromptScaffold({
+  brand,
+  product = null,
+  categories = [],
+  platformFormat = null,
+  durationSec = null
+} = {}) {
+  const aspect = aspectRatioForPlatformFormat(platformFormat) || '9:16';
+  const { model, caps, aspectRatio } = resolveModelAndAspect({
+    brand,
+    product,
+    categories,
+    canvasKeys: [platformFormat, aspect],
+    platformAspect: aspect,
+    hasVideoSeed: false
+  });
+  const resolvedDuration = resolveDurationSec(durationSec, caps);
+  const productForPrompt = product || { title: '{{PRODUCT_TITLE}}' };
+  const prompt = buildVeoPrompt({
+    brand,
+    product: productForPrompt,
+    media: null,
+    aspectRatio,
+    seedHasText: false,
+    hasProductReference: true,
+    operatorPrompt: null,
+    caps,
+    durationSec: resolvedDuration
+  });
+  return {
+    prompt,
+    model,
+    aspectRatio,
+    durationSec: resolvedDuration,
+    byteCap: caps?.promptByteCap || 4096
+  };
+}
+
 module.exports = {
   generateForAd,
   prepareStoryboard,
@@ -1530,5 +1618,6 @@ module.exports = {
   cropImageUrlForAspect,
   buildVideoSegmentUrl,
   buildReferenceImages,
-  pickProductOnlyUrl
+  pickProductOnlyUrl,
+  buildPromptScaffold
 };

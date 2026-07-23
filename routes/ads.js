@@ -18,23 +18,72 @@
 const crypto = require('crypto');
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const router = express.Router();
 
 const Ad           = require('../models/Ad');
 const Media        = require('../models/Media');
 const Brand        = require('../models/Brand');
+const CatalogProduct = require('../models/CatalogProduct');
 const CropArtifact = require('../models/CropArtifact');
 const Campaign     = require('../models/Campaign');
 const CampaignRun  = require('../models/CampaignRun');
 const { expandWizardJob, selectAdsForRun } = require('../services/campaignAdsGenerationService');
 const { renderCreative }        = require('../services/renderService');
 const { generateForAd: veoGenerateForAd, prepareStoryboard: veoPrepareStoryboard } = require('../services/videoRouter');
-const { buildVideoSegmentUrl } = require('../services/atlasVideoService');
+const { buildVideoSegmentUrl, buildPromptScaffold } = require('../services/atlasVideoService');
+const { loadCategoryChainForProduct } = require('../services/categoryChainService');
 const { deleteFromCloudinary } = require('../services/cloudinaryService');
 const { buildVideoCompositeUrl } = require('../services/videoCompositeService');
 const { buildPreviewHtmlForAd }  = require('../services/adPreviewPageService');
 const registry = require('../services/templateRegistry');
 const { tenantFilter, assertBrandInTenant, assertCampaignInTenant } = require('../middleware/tenantHelpers');
+
+// Shared body-field validation for /preview + /generate Phase 3 params.
+// Returns { ok:true, fields } or { ok:false, status, error }.
+function parsePhase3WizardFields(body = {}) {
+  const {
+    directorVariants = false,
+    seedMediaIds = [],
+    videoPromptGuidance = null,
+    videoPromptRaw = null
+  } = body;
+
+  if (videoPromptGuidance != null && videoPromptGuidance !== '') {
+    if (typeof videoPromptGuidance !== 'string' || videoPromptGuidance.length > 1000) {
+      return { ok: false, status: 400, error: 'videoPromptGuidance must be a string ≤1000 characters' };
+    }
+  }
+  if (videoPromptRaw != null && videoPromptRaw !== '') {
+    if (typeof videoPromptRaw !== 'string' || videoPromptRaw.length > 4000) {
+      return { ok: false, status: 400, error: 'videoPromptRaw must be a string ≤4000 characters' };
+    }
+  }
+  if (seedMediaIds != null && seedMediaIds !== undefined) {
+    if (!Array.isArray(seedMediaIds)) {
+      return { ok: false, status: 400, error: 'seedMediaIds must be an array of ObjectId strings' };
+    }
+    for (const id of seedMediaIds) {
+      if (!mongoose.isValidObjectId(id)) {
+        return { ok: false, status: 400, error: `seedMediaIds entry is not a valid ObjectId: ${id}` };
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    fields: {
+      directorVariants: !!directorVariants,
+      seedMediaIds: Array.isArray(seedMediaIds) ? seedMediaIds : [],
+      videoPromptGuidance: (typeof videoPromptGuidance === 'string' && videoPromptGuidance.trim())
+        ? videoPromptGuidance
+        : null,
+      videoPromptRaw: (typeof videoPromptRaw === 'string' && videoPromptRaw.trim())
+        ? videoPromptRaw
+        : null
+    }
+  };
+}
 
 // Lifecycle states the PATCH endpoint can flip an Ad into. queued /
 // rendering / failed are set by the pipeline only — operators don't
@@ -79,10 +128,14 @@ router.post('/preview', async (req, res) => {
       kinds          = null,   // 'image' | 'video' | 'both'; null → use campaign.adKinds
       excludePairings = [],
       includeCategoryMatched = false,
-      includeBrandMatched    = false
+      includeBrandMatched    = false,
+      videoDurationSec = null
     } = req.body || {};
     if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
     if (!templateIds.length) return res.status(400).json({ error: 'templateIds required (at least 1 template)' });
+
+    const phase3 = parsePhase3WizardFields(req.body || {});
+    if (!phase3.ok) return res.status(phase3.status).json({ error: phase3.error });
 
     try {
       await assertCampaignInTenant(campaignId, req);
@@ -103,6 +156,11 @@ router.post('/preview', async (req, res) => {
       excludePairings,
       includeCategoryMatched,
       includeBrandMatched,
+      videoDurationSec,
+      directorVariants: phase3.fields.directorVariants,
+      seedMediaIds: phase3.fields.seedMediaIds,
+      videoPromptGuidance: phase3.fields.videoPromptGuidance,
+      videoPromptRaw: phase3.fields.videoPromptRaw,
       requestedBy: req.user?.userId || null,
       dryRun: true
     });
@@ -144,6 +202,9 @@ router.post('/generate', async (req, res) => {
 
     if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
     if (!templateIds.length) return res.status(400).json({ error: 'templateIds required (at least 1 template)' });
+
+    const phase3 = parsePhase3WizardFields(req.body || {});
+    if (!phase3.ok) return res.status(phase3.status).json({ error: phase3.error });
 
     // Per-ad video duration from the wizard. Optional; when present must
     // be an integer 1..15. null/''/absent → service default (standard 8s).
@@ -245,6 +306,10 @@ router.post('/generate', async (req, res) => {
           includeCategoryMatched,
           includeBrandMatched,
           videoDurationSec: parsedVideoDurationSec,
+          directorVariants: phase3.fields.directorVariants,
+          seedMediaIds: phase3.fields.seedMediaIds,
+          videoPromptGuidance: phase3.fields.videoPromptGuidance,
+          videoPromptRaw: phase3.fields.videoPromptRaw,
           requestedBy: req.user?.userId || null
         });
 
@@ -1047,6 +1112,67 @@ router.get('/video-models', async (req, res) => {
       estCostPer8s:          estimateRenderCostUsd({ model: slug, durationSec: caps.defaultDuration || 8 })
     }));
   res.json({ models });
+});
+
+// GET /api/ads/veo-prompt-scaffold
+// Query: campaignId, productId?, platformFormat?, durationSec?
+// Returns the canonical Veo prompt + resolved model/aspect/duration for
+// the Advanced raw-prompt editor (Phase 4 UI). media=null; product may
+// be a placeholder. NOTE: must stay registered above the '/:id' routes.
+router.get('/veo-prompt-scaffold', async (req, res) => {
+  try {
+    const {
+      campaignId,
+      productId = null,
+      platformFormat = null,
+      durationSec = null
+    } = req.query || {};
+
+    if (!campaignId) return res.status(400).json({ error: 'campaignId required' });
+    if (!mongoose.isValidObjectId(campaignId)) {
+      return res.status(400).json({ error: 'campaignId must be a valid ObjectId' });
+    }
+    if (productId && !mongoose.isValidObjectId(productId)) {
+      return res.status(400).json({ error: 'productId must be a valid ObjectId' });
+    }
+
+    let campaign;
+    try {
+      campaign = await assertCampaignInTenant(campaignId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
+
+    const brand = await Brand.findOne(
+      tenantFilter(req, { _id: campaign.brandId })
+    ).lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+
+    let product = null;
+    let categories = [];
+    if (productId) {
+      product = await CatalogProduct.findOne(
+        tenantFilter(req, { _id: productId, brandId: campaign.brandId })
+      ).lean();
+      if (!product) return res.status(404).json({ error: 'product not found' });
+      categories = await loadCategoryChainForProduct(product);
+    }
+
+    const scaffold = await buildPromptScaffold({
+      brand,
+      product,
+      categories,
+      platformFormat: platformFormat || null,
+      durationSec: durationSec != null && durationSec !== ''
+        ? Number(durationSec)
+        : null
+    });
+    res.json(scaffold);
+  } catch (err) {
+    console.error(`❌ GET /api/ads/veo-prompt-scaffold failed: ${err.message}\n${err.stack || ''}`);
+    res.status(500).json({ error: err.message || 'veo-prompt-scaffold failed' });
+  }
 });
 
 router.post('/push-to-meta', express.json(), async (req, res) => {

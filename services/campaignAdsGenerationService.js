@@ -283,6 +283,19 @@ async function expandWizardJob({
   // (integer 1–15). null = standard 8s. Stamped on video Ad payloads
   // only; not part of identityDigest.
   videoDurationSec = null,
+  // Phase 3 — deterministic video + optional director variants.
+  // directorVariants: when true, ALSO queue concept-driven video variants
+  // (in addition to the deterministic per-product ad). Default OFF.
+  directorVariants = false,
+  // Catalog-product Media ids in operator pick ORDER (position 0 =
+  // primary seed). Grouped by metadata.catalogProductId inside
+  // expandDeterministicVideo; order is preserved end-to-end.
+  seedMediaIds = [],
+  // Run-level video prompt overrides (stamped on every video Ad).
+  // Guidance merges via resolvePromptGuidance → operatorPrompt prepend;
+  // raw fully replaces the canonical prompt at render time.
+  videoPromptGuidance = null,
+  videoPromptRaw = null,
   // Dry-run mode — runs the entire seed assembly + cartesian + caps
   // but skips the Ad.insertMany. Returns the would-be payload counts
   // grouped by productId so the wizard can show "this will produce N
@@ -399,66 +412,127 @@ async function expandWizardJob({
     resolvedKinds = resolvedKinds.filter(k => k !== 'video');
   }
 
-  // Concept-driven V2 routing. Used for:
-  //   - any video output (Veo + chrome + Puppeteer composite pipeline)
-  //   - any image output when AI_CONCEPT_DRIVEN is on (any format) — the
-  //     legacy cartesian was 1:1-only and stamped Ad.aspectRatio='1:1'
-  //     regardless of platformFormat, so it can't serve 4:5 / 9:16 / 16:9
-  //     image ads. Concept-driven respects aspectRatioForPlatformFormat.
-  //
-  // Brand campaigns (productIds.length===0) now route through
-  // concept-driven too — seededUniverseService.buildSeededUniverse and
-  // aiCreativeDirectorService both handle productId=null cleanly, and
-  // runConceptDrivenExpansion iterates a single [null] product when
-  // productIds is empty (brand-only mode).
+  // Phase 3 routing — deterministic video by default; director opt-in.
+  //   conceptImage       — image via Director when AI_CONCEPT_DRIVEN is on
+  //   deterministicVideo — one video ad/product (hero or ordered picks)
+  //   conceptVideo       — director video variants: brand campaigns always,
+  //                        product campaigns only when directorVariants=true
+  // Legacy cartesian is reachable ONLY for wantsImage && !AI_CONCEPT_DRIVEN,
+  // with 'video' stripped so video never double-queues.
   const wantsVideo = resolvedKinds.includes('video');
   const wantsImage = resolvedKinds.includes('image');
-  const useConceptDriven =
-    wantsVideo
-    || (wantsImage && String(process.env.AI_CONCEPT_DRIVEN || '').toLowerCase() === 'true');
+  // Image → Director when AI_CONCEPT_DRIVEN is on OR the run also produces
+  // video. The `|| wantsVideo` preserves pre-Phase-3 behavior: the 1:1-only
+  // legacy cartesian was always bypassed once a video was in the run, so a
+  // mixed image+video run with the flag OFF must still route image through
+  // the Director rather than silently dropping it.
+  const aiConceptDriven    = String(process.env.AI_CONCEPT_DRIVEN || '').toLowerCase() === 'true';
+  const conceptImage       = wantsImage && (aiConceptDriven || wantsVideo);
+  const deterministicVideo = wantsVideo && productIds.length > 0;
+  const conceptVideo       = wantsVideo && (productIds.length === 0 || directorVariants === true);
 
-  if (useConceptDriven && !dryRun) {
-    const result = await runConceptDrivenExpansion({
-      campaignId, brandId, campaignKind, productIds,
-      mediaIds,   // operator-picked seeds — restricts the Director's universe when non-empty
-      ctaText, ctaUrl, ctaUrlParams,
-      platformFormat: effectivePlatformFormat,
-      kinds: resolvedKinds,
-      includeCategoryMatched, includeBrandMatched,
-      excludePairings, creativeIntent: null,
-      videoDurationSec
-    });
-    return result;
+  if (!dryRun && (deterministicVideo || conceptImage || conceptVideo)) {
+    let detResult = null;
+    let conceptResult = null;
+
+    if (deterministicVideo) {
+      detResult = await expandDeterministicVideo({
+        campaignId, brandId, campaignKind, productIds,
+        seedMediaIds,
+        ctaText, ctaUrl, ctaUrlParams,
+        platformFormat: effectivePlatformFormat,
+        videoDurationSec,
+        videoPromptGuidance, videoPromptRaw,
+        excludePairings
+      });
+    }
+
+    const conceptKinds = [
+      ...(conceptImage ? ['image'] : []),
+      ...(conceptVideo ? ['video'] : [])
+    ];
+    if (conceptKinds.length) {
+      conceptResult = await runConceptDrivenExpansion({
+        campaignId, brandId, campaignKind, productIds,
+        mediaIds,   // operator-picked UGC seeds — restricts the Director's universe when non-empty
+        ctaText, ctaUrl, ctaUrlParams,
+        platformFormat: effectivePlatformFormat,
+        kinds: conceptKinds,
+        includeCategoryMatched, includeBrandMatched,
+        excludePairings, creativeIntent: null,
+        videoDurationSec,
+        videoPromptGuidance, videoPromptRaw
+      });
+    }
+
+    if (detResult || conceptResult) {
+      return mergeExpansionResults(detResult, conceptResult);
+    }
+    // Both returned null/empty — fall through to legacy image path.
   }
 
-  // Concept-driven dryRun — approximate V2 counts without running the
-  // Director. Real generate path emits ~3 judged concepts/product × kinds,
-  // then caps image→ADS_PER_PRODUCT_CAP / video→VEO_ADS_PER_PRODUCT_CAP.
-  // Concept count is decided at generate time; this is a cap-based estimate
-  // so the wizard's "will produce N ads" isn't inflated by the legacy
-  // cartesian (seeds × templates × ratios) fall-through below.
-  if (useConceptDriven && dryRun) {
-    const perProductEstimate = resolvedKinds.reduce((sum, kind) => {
-      if (kind === 'video') return sum + VEO_ADS_PER_PRODUCT_CAP;
-      // image (and any other non-video kind)
-      return sum + Math.min(3, ADS_PER_PRODUCT_CAP);
-    }, 0);
-    // Brand-only (no productIds) is one null-keyed group — same as
-    // runConceptDrivenExpansion's productIterations.
+  // Dry-run estimate for deterministic + concept paths (no Director LLM).
+  // Deterministic: exactly 1 video ad per product (ordered picks compose
+  // one ad, not one-per-pick). Director: VEO_ADS_PER_PRODUCT_CAP when on.
+  // Image: conceptImage → min(3, ADS_PER_PRODUCT_CAP); else fall through
+  // to legacy cartesian below.
+  if (dryRun && (deterministicVideo || conceptImage || conceptVideo)) {
+    // Group seedMediaIds by product for labeling (cheap; Media load once).
+    // Estimate itself is always 1 det ad/product regardless of pick count.
     const estimateProducts = productIds.length > 0 ? productIds : [null];
     const byProduct = {};
+    let detTotal = 0;
+    let dirTotal = 0;
+    let imgTotal = 0;
+
     for (const pid of estimateProducts) {
-      byProduct[pid ? String(pid) : 'NULL'] = perProductEstimate;
+      const key = pid ? String(pid) : 'NULL';
+      let n = 0;
+      if (deterministicVideo && pid) {
+        n += 1; // one ordered-stack (or hero) ad per product
+        detTotal += 1;
+      }
+      if (conceptVideo) {
+        n += VEO_ADS_PER_PRODUCT_CAP;
+        dirTotal += VEO_ADS_PER_PRODUCT_CAP;
+      }
+      if (conceptImage) {
+        const imgN = Math.min(3, ADS_PER_PRODUCT_CAP);
+        n += imgN;
+        imgTotal += imgN;
+      }
+      byProduct[key] = n;
     }
-    const total = perProductEstimate * estimateProducts.length;
+
+    // Brand-only (no productIds): no deterministic; conceptVideo covers video.
+    if (!productIds.length && conceptVideo) {
+      // estimateProducts is [null] — already counted above
+    }
+
+    const total = detTotal + dirTotal + imgTotal;
     return {
       campaignId: String(campaignId), brandId, campaignKind,
       dryRun: true,
       total,
       byProduct,
+      byMode: { deterministic: detTotal, director: dirTotal },
       byVariantKind: { ugc: 0, product_image: 0 },
       seedCount:    0,
       productCount: estimateProducts.length
+    };
+  }
+
+  // Legacy cartesian path — image only. Strip 'video' so video can never
+  // double-queue via this path (guard even though today video always
+  // took the concept/deterministic branch above).
+  resolvedKinds = resolvedKinds.filter(k => k !== 'video');
+  if (!resolvedKinds.length) {
+    return {
+      campaignId: String(campaignId), brandId, campaignKind,
+      queuedCount: dryRun ? 0 : await Ad.countDocuments({ campaignId, status: 'queued' }),
+      newlyQueued: 0, alreadyQueued: 0, newAdIds: [], total: 0, byProduct: {},
+      byVariantKind: { ugc: 0, product_image: 0 },
+      byMode: { deterministic: 0, director: 0 }
     };
   }
 
@@ -789,25 +863,50 @@ async function expandWizardJob({
 // readinessScore desc (videos with null score sort last, FIFO by
 // queuedAt as tiebreaker)." Returns Ad IDs (strings).
 async function selectAdsForRun({ campaignId, limit }) {
-  // Phase A5b — concept-driven Ads (judgeRank != null) drain FIRST by
-  // judgeRank ASC (1 = best). Legacy Ads (judgeRank null) fill any
-  // remaining slots by readinessScore. Two queries instead of one
-  // because MongoDB sorts nulls before non-nulls in ASC order, which
-  // would push legacy Ads ahead of judged ones if we used a single
-  // {judgeRank: 1, readinessScore: -1} sort.
-  const v2 = await Ad.find({ campaignId, status: 'queued', judgeRank: { $ne: null } })
-    .sort({ judgeRank: 1, queuedAt: 1 })
+  // Tier 0 — DETERMINISTIC baseline video ads (Phase 3) drain FIRST so the
+  // guaranteed per-product standard video always renders before optional
+  // director variants / concept images can fill the run cap. Discriminator:
+  // no concept (conceptId null) + unjudged (judgeRank null) + video route.
+  // Concept video carries a conceptId; the legacy image cartesian is
+  // renderRoute 'html_gen' — so this set is exactly the deterministic videos
+  // (plus any pre-Phase-3 legacy veo ads, which rendering first is harmless).
+  const det = await Ad.find({
+    campaignId, status: 'queued',
+    conceptId: null, judgeRank: null, renderRoute: 'veo'
+  })
+    .sort({ queuedAt: 1 })
     .limit(limit)
     .select('_id')
     .lean();
-  if (v2.length >= limit) return v2.map(r => String(r._id));
-  const remaining = limit - v2.length;
-  const v1 = await Ad.find({ campaignId, status: 'queued', judgeRank: null })
+  const detIds = det.map(r => String(r._id));
+  if (detIds.length >= limit) return detIds;
+
+  // Phase A5b — concept-driven Ads (judgeRank != null) drain NEXT by
+  // judgeRank ASC (1 = best). Legacy Ads (judgeRank null) fill any
+  // remaining slots by readinessScore. Separate queries because MongoDB
+  // sorts nulls before non-nulls in ASC order.
+  const afterDet = limit - detIds.length;
+  const v2 = await Ad.find({ campaignId, status: 'queued', judgeRank: { $ne: null } })
+    .sort({ judgeRank: 1, queuedAt: 1 })
+    .limit(afterDet)
+    .select('_id')
+    .lean();
+  const v2Ids = v2.map(r => String(r._id));
+  if (detIds.length + v2Ids.length >= limit) return [...detIds, ...v2Ids];
+
+  // Legacy tier — judgeRank null, EXCLUDING the deterministic ads already
+  // taken in tier 0 (they share judgeRank null), by readinessScore.
+  const remaining = limit - detIds.length - v2Ids.length;
+  const detOids = det.map(r => r._id);
+  const v1 = await Ad.find({
+    campaignId, status: 'queued', judgeRank: null,
+    _id: { $nin: detOids }
+  })
     .sort({ readinessScore: -1, queuedAt: 1 })
     .limit(remaining)
     .select('_id')
     .lean();
-  return [...v2.map(r => String(r._id)), ...v1.map(r => String(r._id))];
+  return [...detIds, ...v2Ids, ...v1.map(r => String(r._id))];
 }
 
 // ── Seed builders ────────────────────────────────────────────────────
@@ -1373,6 +1472,323 @@ function computeV2IdentityDigest({ campaignId, productId, conceptId, platformFor
   return crypto.createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
+// Deterministic-video identity. Namespaced with 'det-video:v1' so it
+// cannot collide with V1 (JSON hash) or V2 (pipe-joined, no prefix)
+// digests. referenceMediaIds order is load-bearing — a different pick
+// order is a different ad. When referenceMediaIds is empty the seed
+// mediaId alone stands in (hero default path).
+function computeDeterministicVideoDigest({
+  campaignId, productId, referenceMediaIds, mediaId,
+  platformFormat, ctaText, ctaUrl, ctaUrlParams,
+  videoPromptGuidance, videoPromptRaw
+}) {
+  const refKey = (Array.isArray(referenceMediaIds) && referenceMediaIds.length
+    ? referenceMediaIds
+    : [mediaId]
+  ).map(String).join(',');
+  const parts = [
+    'det-video:v1',
+    String(campaignId),
+    String(productId),
+    refKey,
+    String(platformFormat || ''),
+    'video',
+    String(ctaText || ''),
+    String(ctaUrl || ''),
+    String(ctaUrlParams || ''),
+    String(videoPromptGuidance || ''),
+    String(videoPromptRaw || '')
+  ];
+  return crypto.createHash('sha256').update(parts.join('|')).digest('hex');
+}
+
+// Merge two expansion result objects (deterministic first, then concept).
+// newAdIds / perProduct keep deterministic entries first. queuedCount is
+// absolute (countDocuments snapshot) so we take max, not sum.
+function mergeExpansionResults(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  const sum = (x, y) => (Number(x) || 0) + (Number(y) || 0);
+  const byProduct = { ...(a.byProduct || {}) };
+  for (const [k, v] of Object.entries(b.byProduct || {})) {
+    byProduct[k] = sum(byProduct[k], v);
+  }
+  const byMode = {};
+  const modeKeys = new Set([
+    ...Object.keys(a.byMode || {}),
+    ...Object.keys(b.byMode || {})
+  ]);
+  for (const k of modeKeys) {
+    byMode[k] = sum(a.byMode?.[k], b.byMode?.[k]);
+  }
+  return {
+    campaignId:   a.campaignId || b.campaignId,
+    brandId:      a.brandId || b.brandId,
+    campaignKind: a.campaignKind || b.campaignKind,
+    queuedCount:  Math.max(a.queuedCount || 0, b.queuedCount || 0),
+    newlyQueued:  sum(a.newlyQueued, b.newlyQueued),
+    alreadyQueued: sum(a.alreadyQueued, b.alreadyQueued),
+    total:        sum(a.total, b.total),
+    // Deterministic first so selection/render order prefers standard ads.
+    newAdIds:     [...(a.newAdIds || []), ...(b.newAdIds || [])],
+    byProduct,
+    perProduct:   [...(a.perProduct || []), ...(b.perProduct || [])],
+    byMode,
+    conceptDriven: !!(a.conceptDriven || b.conceptDriven)
+  };
+}
+
+// Deterministic video expansion: one video Ad per product, seeded on
+// operator-ordered catalog picks (or the feed-order hero when no picks).
+// seedMediaIds is ORDER-SIGNIFICANT. No VEO_ADS_PER_PRODUCT_CAP — always
+// exactly one ad per product that has a resolvable seed.
+async function expandDeterministicVideo({
+  campaignId, brandId, campaignKind, productIds,
+  seedMediaIds = [],
+  ctaText, ctaUrl, ctaUrlParams,
+  platformFormat,
+  videoDurationSec,
+  videoPromptGuidance = null,
+  videoPromptRaw = null,
+  excludePairings = []
+}) {
+  if (!productIds || !productIds.length) {
+    return {
+      campaignId: String(campaignId), brandId, campaignKind,
+      queuedCount: await Ad.countDocuments({ campaignId, status: 'queued' }),
+      newlyQueued: 0, alreadyQueued: 0, newAdIds: [], total: 0,
+      byProduct: {}, perProduct: [], byMode: { deterministic: 0 }
+    };
+  }
+
+  // excludePairings shape: [{ productId, mediaId }] — same as V1/V2.
+  const excludeSet = new Set(
+    (excludePairings || []).map(p =>
+      `${p.productId ? String(p.productId) : 'NULL'}|${String(p.mediaId)}`
+    )
+  );
+
+  // Load picked Media once; group by catalogProductId PRESERVING pick order.
+  const productIdSet = new Set(productIds.map(String));
+  const seedOids = (seedMediaIds || []).map(toObjectId).filter(Boolean);
+  const seedDocs = seedOids.length
+    ? await Media.find({
+        _id: { $in: seedOids },
+        source: 'catalog-product'
+      }).select('_id metadata fileType').lean()
+    : [];
+  const seedById = new Map(seedDocs.map(d => [String(d._id), d]));
+
+  /** @type {Map<string, mongoose.Types.ObjectId[]>} */
+  const picksByProduct = new Map();
+  for (const rawId of (seedMediaIds || [])) {
+    const idStr = String(rawId);
+    const doc = seedById.get(idStr);
+    if (!doc) {
+      console.warn(
+        `📦 expandDeterministicVideo: seedMediaId=${idStr} not found or not catalog-product — dropped`
+      );
+      continue;
+    }
+    const cpid = doc.metadata?.catalogProductId != null
+      ? String(doc.metadata.catalogProductId)
+      : null;
+    if (!cpid || !productIdSet.has(cpid)) {
+      console.warn(
+        `📦 expandDeterministicVideo: seedMediaId=${idStr} catalogProductId=${cpid} ` +
+        `not in productIds — dropped`
+      );
+      continue;
+    }
+    if (!picksByProduct.has(cpid)) picksByProduct.set(cpid, []);
+    const list = picksByProduct.get(cpid);
+    // Preserve first occurrence only (re-picks of the same id ignored).
+    if (!list.some(x => String(x) === idStr)) {
+      list.push(doc._id);
+    }
+  }
+
+  const aspectRatio = aspectRatioForPlatformFormat(platformFormat) || '1:1';
+  const payloads = [];
+  const perProduct = [];
+
+  for (const productId of productIds) {
+    const pidStr = String(productId);
+    const productOid = toObjectId(productId);
+    if (!productOid) {
+      perProduct.push({ productId: pidStr, skipped: 'invalid_product_id' });
+      continue;
+    }
+
+    let mediaId = null;
+    let referenceMediaIds = [];
+    const picks = picksByProduct.get(pidStr) || [];
+
+    if (picks.length) {
+      // ONE ad with the ordered reference stack; position 0 = primary seed.
+      referenceMediaIds = picks.slice();
+      mediaId = picks[0];
+    } else {
+      // Feed-order hero: imageRole hero → earliest createdAt → lazy materialize.
+      let hero = await Media.findOne({
+        source: 'catalog-product',
+        'metadata.catalogProductId': productOid,
+        'metadata.imageRole': 'hero'
+      }).select('_id').lean();
+
+      if (!hero) {
+        hero = await Media.findOne({
+          source: 'catalog-product',
+          'metadata.catalogProductId': productOid
+        }).sort({ createdAt: 1 }).select('_id').lean();
+      }
+
+      if (!hero) {
+        // Lazy materialize — same pattern as seedsFromProduct ~:1133-1155.
+        try {
+          const fullProduct = await CatalogProduct.findById(productOid)
+            .select('_id brandId advertiserId imageUrl additionalImages imageMediaId')
+            .lean();
+          if (fullProduct?.imageUrl) {
+            const detectSvc = require('./catalogProductDetectService');
+            const out = await detectSvc.enqueueProductDetect(fullProduct);
+            const heroMediaId = out?.enqueued?.hero?.mediaId;
+            if (heroMediaId) {
+              hero = await Media.findById(heroMediaId).select('_id').lean();
+              console.log(
+                `📦 expandDeterministicVideo[${pidStr}]: lazy-materialized catalog-product Media ` +
+                `${heroMediaId} from product.imageUrl`
+              );
+            }
+          }
+        } catch (err) {
+          console.warn(
+            `   ⚠️  expandDeterministicVideo[${pidStr}]: lazy materialize failed: ${err.message}`
+          );
+        }
+      }
+
+      if (!hero) {
+        perProduct.push({ productId: pidStr, skipped: 'no_hero_media' });
+        continue;
+      }
+      mediaId = hero._id;
+      referenceMediaIds = []; // render derives hero+alt1+alt2
+    }
+
+    // excludePairings on (productId, mediaId) — mirror V2 filterUniverseForProduct.
+    const pairKey = `${pidStr}|${String(mediaId)}`;
+    if (excludeSet.has(pairKey)) {
+      perProduct.push({ productId: pidStr, skipped: 'excluded_pairing', mediaId: String(mediaId) });
+      continue;
+    }
+
+    const refForMediaIds = referenceMediaIds.length
+      ? referenceMediaIds.map(id => new mongoose.Types.ObjectId(String(id)))
+      : [new mongoose.Types.ObjectId(String(mediaId))];
+    const mediaIdOid = new mongoose.Types.ObjectId(String(mediaId));
+
+    payloads.push({
+      brandId,
+      campaignId,
+      campaignRunIds: [],
+      mediaId:             mediaIdOid,
+      productId:           productOid,
+      // No concept — deterministic path.
+      conceptId:           null,
+      conceptArtifactId:   null,
+      mediaIds:            refForMediaIds,
+      referenceMediaIds:   referenceMediaIds.length
+        ? referenceMediaIds.map(id => new mongoose.Types.ObjectId(String(id)))
+        : [],
+      judgeRank:           null,
+      judgeScore:          null,
+      generationOrder:     null,
+      renderRoute:         'veo',
+      kind:                'video',
+      template:            'ai_brand_led',
+      aspectRatio,
+      campaignKind,
+      platformFormat,
+      videoDurationSec:    videoDurationSec || null,
+      matchTier:           'product_match',
+      variantKind:         'product_image',
+      paletteSource:       'media',
+      rafflePrizeMediaId:  null,
+      readinessScore:      null,
+      status:              'queued',
+      videoPromptGuidance: videoPromptGuidance || null,
+      videoPromptRaw:      videoPromptRaw || null,
+      identityDigest: computeDeterministicVideoDigest({
+        campaignId,
+        productId: pidStr,
+        referenceMediaIds,
+        mediaId: mediaIdOid,
+        platformFormat,
+        ctaText, ctaUrl, ctaUrlParams,
+        videoPromptGuidance, videoPromptRaw
+      }),
+      ctaText, ctaUrl, ctaUrlParams,
+      queuedAt:    new Date(),
+      generatedAt: new Date()
+    });
+    perProduct.push({
+      productId: pidStr,
+      mediaId: String(mediaId),
+      referenceMediaIds: referenceMediaIds.map(String),
+      payloads: 1
+    });
+  }
+
+  if (!payloads.length) {
+    return {
+      campaignId: String(campaignId), brandId, campaignKind,
+      queuedCount: await Ad.countDocuments({ campaignId, status: 'queued' }),
+      newlyQueued: 0, alreadyQueued: 0, newAdIds: [], total: 0,
+      byProduct: {}, perProduct, byMode: { deterministic: 0 }
+    };
+  }
+
+  // Bulk insert — same dup-key(11000) swallow as runConceptDrivenExpansion.
+  let inserted = [];
+  try {
+    inserted = await Ad.insertMany(payloads, { ordered: false });
+  } catch (err) {
+    if (err.writeErrors && err.result?.insertedIds) {
+      const insertedIds = err.result.insertedIds || {};
+      inserted = Object.values(insertedIds);
+      if (inserted.length) inserted = await Ad.find({ _id: { $in: inserted } }).lean();
+    } else if (err.code === 11000) {
+      inserted = [];
+    } else {
+      throw err;
+    }
+  }
+
+  const newAdIds = inserted.map(d => String(d._id || d));
+  const alreadyQueued = payloads.length - newAdIds.length;
+  const queuedCount = await Ad.countDocuments({ campaignId, status: 'queued' });
+
+  console.log(
+    `📦 expandDeterministicVideo: campaign=${campaignId} products=${productIds.length} ` +
+    `payloads=${payloads.length} newlyQueued=${newAdIds.length} ` +
+    `alreadyQueued=${alreadyQueued} totalQueued=${queuedCount}`
+  );
+
+  return {
+    campaignId: String(campaignId), brandId, campaignKind,
+    queuedCount, newlyQueued: newAdIds.length, alreadyQueued,
+    newAdIds, total: payloads.length,
+    byProduct: payloads.reduce((acc, p) => {
+      const k = p.productId ? String(p.productId) : 'NULL';
+      acc[k] = (acc[k] || 0) + 1;
+      return acc;
+    }, {}),
+    perProduct,
+    byMode: { deterministic: payloads.length }
+  };
+}
+
 // Derive matchTier from the primary media's universe role. Catalog
 // (hero/alt) → 'product_match' (the product IS the SKU). UGC tiers
 // keep their semantic tier so readinessScore math stays consistent.
@@ -1408,7 +1824,9 @@ async function runConceptDrivenExpansion({
   kinds,                                            // [] of 'image'|'video' — what pipelines to emit per concept
   includeCategoryMatched, includeBrandMatched,
   excludePairings, creativeIntent,
-  videoDurationSec = null                           // wizard-requested video length (sec); null = standard 8s
+  videoDurationSec = null,                          // wizard-requested video length (sec); null = standard 8s
+  videoPromptGuidance = null,                       // run-level guidance — stamped on video Ad rows
+  videoPromptRaw = null                             // run-level raw override — stamped on video Ad rows
 }) {
   const { resolveKinds, renderRouteForKind } = require('./platformFormats');
   const resolvedKinds = (Array.isArray(kinds) && kinds.length)
@@ -1551,6 +1969,8 @@ async function runConceptDrivenExpansion({
             campaignKind,
             platformFormat,
             videoDurationSec:  kind === 'video' ? (videoDurationSec || null) : null,
+            videoPromptGuidance: kind === 'video' ? (videoPromptGuidance || null) : null,
+            videoPromptRaw:      kind === 'video' ? (videoPromptRaw || null) : null,
             matchTier:         matchTierForUniverseRole(role),
             variantKind:       variantKindForUniverseRole(role),
             paletteSource:     'media',
@@ -1624,7 +2044,8 @@ async function runConceptDrivenExpansion({
       queuedCount: await Ad.countDocuments({ campaignId, status: 'queued' }),
       newlyQueued: 0, alreadyQueued: 0, newAdIds: [], total: 0, byProduct: {},
       conceptDriven: true,
-      perProduct: perProductResults
+      perProduct: perProductResults,
+      byMode: { director: 0 }
     };
   }
 
@@ -1661,17 +2082,21 @@ async function runConceptDrivenExpansion({
 
   // byProduct from POST-CAP payloads (the array passed to insertMany) —
   // r.payloads is pre-cap and would over-report vs what actually queued.
+  const byProduct = payloads.reduce((acc, p) => {
+    const k = p.productId ? String(p.productId) : 'NULL';
+    acc[k] = (acc[k] || 0) + 1;
+    return acc;
+  }, {});
+  // Director-mode count for byMode merge (video payloads only).
+  const directorCount = payloads.filter(p => p.kind === 'video').length;
   return {
     campaignId: String(campaignId), brandId, campaignKind,
     queuedCount, newlyQueued: newAdIds.length, alreadyQueued,
     newAdIds, total: payloads.length,
-    byProduct: payloads.reduce((acc, p) => {
-      const k = p.productId ? String(p.productId) : 'NULL';
-      acc[k] = (acc[k] || 0) + 1;
-      return acc;
-    }, {}),
+    byProduct,
     conceptDriven: true,
-    perProduct: perProductResults
+    perProduct: perProductResults,
+    byMode: { director: directorCount }
   };
 }
 
@@ -1680,6 +2105,9 @@ module.exports = {
   selectAdsForRun,
   computeIdentityDigest,
   computeV2IdentityDigest,
+  computeDeterministicVideoDigest,
+  expandDeterministicVideo,
+  mergeExpansionResults,
   runConceptDrivenExpansion,
   SUPPORTED_TEMPLATES,
   // Exposed so picker endpoints can apply the same content-nature
