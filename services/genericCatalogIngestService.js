@@ -219,7 +219,9 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted } = {}) {
     run?.tick?.(
       idx,
       totalPlanned,
-      `saved ${idx}/${totalPlanned} products`
+      // Live review-coverage %: share of saved products that carried
+      // review data (rating/quotes) in their structured data.
+      `saved ${idx}/${totalPlanned} products · ${idx ? Math.round((reviewsCaptured / idx) * 100) : 0}% with reviews`
     );
   }
 
