@@ -32,10 +32,16 @@ const ingestHelpers = require('./shopifyPublicIngestService');
 
 // ── constants ──────────────────────────────────────────────────────
 const LOG = '🗺';
-const DEFAULT_CAP = Math.max(1, parseInt(process.env.GENERIC_CATALOG_LIMIT, 10) || 200);
+// Full-catalog by default — do NOT cap at a small demo number. 10k covers
+// essentially any real catalog; override via GENERIC_CATALOG_LIMIT.
+// NOTE: crawl throughput is ~1 page / HTTP_SCRAPE_MIN_GAP_MS (≈4/s at the
+// 250ms default) and the progress run self-terminates at ~4h, so the
+// practical ceiling per sync is ~10-14k pages. Downstream enrichment cost
+// scales with product count — see docs.
+const DEFAULT_CAP = Math.max(1, parseInt(process.env.GENERIC_CATALOG_LIMIT, 10) || 10000);
 const MAX_SITEMAP_URLS = Math.max(
   1,
-  parseInt(process.env.GENERIC_CATALOG_MAX_SITEMAP_URLS, 10) || 5000
+  parseInt(process.env.GENERIC_CATALOG_MAX_SITEMAP_URLS, 10) || 20000
 );
 const MAX_SITEMAP_DEPTH = 2;
 // Hard ceiling on total sitemap documents fetched per sync (index +
