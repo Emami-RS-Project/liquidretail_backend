@@ -386,6 +386,19 @@ async function renderTitles({ videoUrl, meta, spec, tokens, format, brandName = 
           cleanMeta.brandLogoUrl = null;
         }
       }
+      // Product image: same asset-server pattern so the productImage slot
+      // (title-spec bind chain: ['productImageUrl']) can render without
+      // relying on external egress from the render browser.
+      if (cleanMeta.productImageUrl && /^https?:\/\//i.test(cleanMeta.productImageUrl)) {
+        try {
+          const ext = (path.extname(new URL(cleanMeta.productImageUrl).pathname) || '.jpg').slice(0, 6);
+          await downloadToFile(cleanMeta.productImageUrl, path.join(jobDir, `product${ext}`));
+          cleanMeta.productImageUrl = `${base}/jobs/${jobId}/product${ext}`;
+        } catch (e) {
+          console.warn(`🎬 remotion[ad=${adId || '?'}]: product image download failed (${e.message}) — productImage slot will be skipped`);
+          cleanMeta.productImageUrl = null;
+        }
+      }
 
       const inputProps = {
         format,

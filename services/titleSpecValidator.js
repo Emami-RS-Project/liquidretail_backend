@@ -67,17 +67,66 @@
 
 'use strict';
 
+// SLOT_KEYS — every semantic element the titling engine can render. The
+// LLM prompt (see routes/brand.js titleSpecSchemaPrompt) surfaces the
+// full list, so extending here is enough for AI-modify to reference the
+// new slots. Kinds:
+//   text   — single-value string binding (bind chain reads meta.<field>)
+//   multi  — array-value binding (bind chain reads meta.<arrayField>); renders
+//            each item as its own visual unit, controlled by treatment.itemLayout /
+//            itemDelaySec / maxItems / itemStyle
+//   image  — URL-value binding (bind chain reads a meta URL served via the
+//            asset server); renders as <Img> with treatment.fit / sizePct / radiusPct
+//   rating — composite (rating value + reviewCount + star row); no bind chain
 const SLOT_KEYS = [
+  // Existing text slots
   'headline', 'quote', 'reviewer', 'rating', 'badge', 'brandPill',
   'productName', 'price', 'deliveryLine', 'cta', 'promo',
+  // Additional single-value text slots — enable the LLM to reference
+  // brand tagline, website, product description, per-slot review count,
+  // and engagement (likes) independently of the composite pills.
+  'productDescription', 'tagline', 'website', 'likes', 'reviewCount',
+  // Multi-value text slots — render an array of items with layout + stagger
+  'badges', 'benefits',
+  // Image slots — render the product-only image or brand logo standalone
+  'productImage', 'brandLogo',
 ];
 
-// Meta fields a slot may bind to (buildMetaForAd output, text-bearing only).
+// Slot type per key. Drives which treatment fields the validator accepts
+// and which resolver runs at render time. Anything not listed defaults
+// to 'text'.
+const SLOT_TYPE_BY_KEY = {
+  rating: 'rating',
+  badges: 'multi',
+  benefits: 'multi',
+  productImage: 'image',
+  brandLogo: 'image',
+  // brandPill is a composite (logo image + text pill fallback) with its
+  // own dedicated renderer; treat it as 'text' for validation purposes —
+  // the extra 'logoMode' treatment field is already handled below.
+};
+
+function slotTypeForKey(key) {
+  return SLOT_TYPE_BY_KEY[key] || 'text';
+}
+
+// Meta fields a text-typed slot may bind to (buildMetaForAd output). The
+// resolver iterates the bind chain and picks the first non-empty value.
 const BINDABLE_META_FIELDS = [
   'headline', 'quote', 'quoteSnippet', 'reviewer', 'badgeText', 'brandName',
   'productName', 'productDescription', 'price', 'deliveryLine', 'ctaText',
   'cta', 'promoText', 'brandTagline', 'brandWebsiteDomain', 'reviewsText',
+  // Numeric-formatted meta fields the resolver stringifies for display
+  'likes', 'reviewCount',
 ];
+
+// Array-valued meta fields a multi-typed slot may bind to.
+const BINDABLE_MULTI_META_FIELDS = ['badges', 'benefits'];
+
+// URL-valued meta fields (asset-server URLs, not disk paths) an image-typed
+// slot may bind to. `brandLogoUrl` is downloaded + served during setup;
+// `productImageUrl` mirrors that flow (see remotionRenderService).
+const BINDABLE_IMAGE_META_FIELDS = ['productImageUrl', 'brandLogoUrl'];
 
 const TOKEN_COLOR_KEYS = [
   'primary', 'secondary', 'accent', 'ctaBg', 'ctaText', 'scrim',
@@ -96,16 +145,25 @@ const CASINGS = ['upper', 'title', 'none'];
 const BRAND_MODES = ['keep', 'hide'];
 const FORMATS = ['vertical', 'feed', 'landscape'];
 
+// Multi-value + image treatment vocabularies.
+const ITEM_LAYOUTS = ['stack', 'row', 'grid'];
+const ITEM_STYLES  = ['pill', 'bullet', 'plain', 'chip'];
+const IMAGE_FITS   = ['contain', 'cover'];
+
 const MAX_PHASES = 4;
 const MAX_CLIP_SEC = 15;   // specs are authored for ≤15s clips (nominal 8s)
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
-// Default binding chain per slot (mirrors the canvas canonicals).
+// Default binding chain per slot (mirrors the canvas canonicals). Each
+// entry's shape must match the slot's type (text arrays for 'text', array
+// meta fields for 'multi', URL fields for 'image'). Rating is composite —
+// no bind chain, resolver reads rating/reviewCount directly.
 const DEFAULT_BIND = {
+  // Existing text slots
   headline: ['headline'],
   quote: ['quoteSnippet', 'quote'],
   reviewer: ['reviewer'],
-  rating: [],                    // composite slot — reads rating/reviewCount directly
+  rating: [],
   badge: ['badgeText'],
   brandPill: ['brandName'],
   productName: ['productName'],
@@ -113,6 +171,18 @@ const DEFAULT_BIND = {
   deliveryLine: ['deliveryLine'],
   cta: ['ctaText', 'cta'],
   promo: ['promoText'],
+  // Added text slots
+  productDescription: ['productDescription'],
+  tagline: ['brandTagline'],
+  website: ['brandWebsiteDomain'],
+  likes: ['likes'],
+  reviewCount: ['reviewCount', 'reviewsText'],
+  // Multi-value slots — bind to array meta fields
+  badges: ['badges'],
+  benefits: ['benefits'],
+  // Image slots — bind to asset-server URL meta fields
+  productImage: ['productImageUrl'],
+  brandLogo: ['brandLogoUrl'],
 };
 
 // Brand-mode defaults: what happens when meta.endcardMode === 'brand'
@@ -122,6 +192,14 @@ const DEFAULT_BRAND_MODE = {
   rating: 'hide',
   price: 'hide',
   promo: 'hide',
+  // Multi + image slots hide by default in brand mode — brand
+  // campaigns typically want a cleaner identity endcard.
+  badges: 'hide',
+  benefits: 'hide',
+  reviewCount: 'hide',
+  likes: 'hide',
+  productDescription: 'hide',
+  productImage: 'hide',
 };
 const DEFAULT_BRAND_MODE_BIND = {
   productName: ['brandTagline', 'headline'],
@@ -233,11 +311,22 @@ function validateTitleSpec(spec, { format = 'feed' } = {}) {
       seen.add(s.key);
 
       const out = { key: s.key, visible: s.visible !== false };
+      const slotType = slotTypeForKey(s.key);
+      out.slotType = slotType;
 
-      // bind
+      // bind — chain shape depends on slot type. Rating is composite so
+      // an empty chain is legal; every other type needs at least one field
+      // from the type-appropriate whitelist.
       const bind = s.bind == null ? DEFAULT_BIND[s.key] : s.bind;
-      if (!Array.isArray(bind) || bind.some((b) => !BINDABLE_META_FIELDS.includes(b))) {
-        err(`${where}.bind must be an array of meta fields (${BINDABLE_META_FIELDS.join(', ')})`);
+      const validFields = slotType === 'multi'  ? BINDABLE_MULTI_META_FIELDS
+                        : slotType === 'image'  ? BINDABLE_IMAGE_META_FIELDS
+                        : slotType === 'rating' ? []
+                        : BINDABLE_META_FIELDS;
+      if (!Array.isArray(bind)) {
+        err(`${where}.bind must be an array`); continue;
+      }
+      if (slotType !== 'rating' && bind.some((b) => !validFields.includes(b))) {
+        err(`${where}.bind (slot type '${slotType}') must be an array of ${validFields.join(', ')}`);
         continue;
       }
       out.bind = bind;
@@ -350,6 +439,46 @@ function validateTitleSpec(spec, { format = 'feed' } = {}) {
         weight: Math.round(weight), sizeScale, maxLines, trackingPx, colorToken, accent, logoMode,
       };
 
+      // Multi-value slot treatment fields — validated + defaulted only when
+      // the slot is a multi type. Keep them off other slot types so specs
+      // don't accumulate irrelevant knobs the renderer ignores.
+      if (slotType === 'multi') {
+        const itemLayout = tm.itemLayout ?? (s.key === 'benefits' ? 'stack' : 'row');
+        const itemStyle  = tm.itemStyle  ?? (s.key === 'benefits' ? 'bullet' : 'pill');
+        const itemDelaySec = tm.itemDelaySec ?? 0.12;
+        const itemGap      = tm.itemGap ?? 0.012;
+        const maxItems     = tm.maxItems ?? 4;
+        if (!ITEM_LAYOUTS.includes(itemLayout)) { err(`${where}.treatment.itemLayout must be one of ${ITEM_LAYOUTS.join('|')}`); continue; }
+        if (!ITEM_STYLES.includes(itemStyle))   { err(`${where}.treatment.itemStyle must be one of ${ITEM_STYLES.join('|')}`); continue; }
+        if (!inRange(itemDelaySec, 0, 2))       { err(`${where}.treatment.itemDelaySec must be 0..2`); continue; }
+        if (!inRange(itemGap, 0, 0.05))         { err(`${where}.treatment.itemGap must be 0..0.05 (fraction of canvas short edge)`); continue; }
+        if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > 8) { err(`${where}.treatment.maxItems must be an integer 1..8`); continue; }
+        out.treatment.itemLayout   = itemLayout;
+        out.treatment.itemStyle    = itemStyle;
+        out.treatment.itemDelaySec = itemDelaySec;
+        out.treatment.itemGap      = itemGap;
+        out.treatment.maxItems     = maxItems;
+      }
+
+      // Image slot treatment fields — same conditional pattern.
+      if (slotType === 'image') {
+        const fit          = tm.fit ?? 'contain';
+        const sizePct      = tm.sizePct ?? 0.35;
+        const radiusPct    = tm.radiusPct ?? 0;
+        const borderWidthPct = tm.borderWidthPct ?? 0;
+        const borderColorToken = tm.borderColorToken ?? 'accent';
+        if (!IMAGE_FITS.includes(fit))         { err(`${where}.treatment.fit must be one of ${IMAGE_FITS.join('|')}`); continue; }
+        if (!inRange(sizePct, 0.05, 0.9))      { err(`${where}.treatment.sizePct must be 0.05..0.9 (fraction of canvas short edge)`); continue; }
+        if (!inRange(radiusPct, 0, 0.5))       { err(`${where}.treatment.radiusPct must be 0..0.5`); continue; }
+        if (!inRange(borderWidthPct, 0, 0.02)) { err(`${where}.treatment.borderWidthPct must be 0..0.02`); continue; }
+        if (!TOKEN_COLOR_KEYS.includes(borderColorToken)) { err(`${where}.treatment.borderColorToken unknown`); continue; }
+        out.treatment.fit              = fit;
+        out.treatment.sizePct          = sizePct;
+        out.treatment.radiusPct        = radiusPct;
+        out.treatment.borderWidthPct   = borderWidthPct;
+        out.treatment.borderColorToken = borderColorToken;
+      }
+
       slots.push(out);
     }
   }
@@ -383,8 +512,12 @@ function validateTitleStyleSpecDoc(doc) {
 module.exports = {
   validateTitleSpec,
   validateTitleStyleSpecDoc,
+  slotTypeForKey,
   SLOT_KEYS,
+  SLOT_TYPE_BY_KEY,
   BINDABLE_META_FIELDS,
+  BINDABLE_MULTI_META_FIELDS,
+  BINDABLE_IMAGE_META_FIELDS,
   TOKEN_COLOR_KEYS,
   FONT_ROLES,
   ANCHORS,
@@ -393,6 +526,9 @@ module.exports = {
   SCRIMS,
   SHADOWS,
   CASINGS,
+  ITEM_LAYOUTS,
+  ITEM_STYLES,
+  IMAGE_FITS,
   FORMATS,
   DEFAULT_BIND,
   clamp,

@@ -13,8 +13,63 @@
 
 const path = require('path');
 const fs = require('fs');
-const { validateTitleSpec } = require('./titleSpecValidator');
+const {
+  validateTitleSpec,
+  SLOT_KEYS,
+  slotTypeForKey,
+  DEFAULT_BIND,
+} = require('./titleSpecValidator');
 const { resolveBrandFonts } = require('./fontResolverService');
+
+// Auto-hydrate stub entries for every SLOT_KEYS entry not already in the
+// spec. The stubs are `visible: false` so they don't render — they exist
+// purely to expose the slot key to the Title Studio dropdown and the
+// AI-modify prompt (which reads spec.slots). Operators can enable them
+// via UI toggle or natural-language request; the LLM can reference them
+// by name because they now appear in the CURRENT SPEC it edits against.
+// Runtime rendering already skips invisible slots, so this is a no-op
+// for actual output.
+function hydrateAllSlotKeys(spec) {
+  if (!spec || !Array.isArray(spec.slots)) return spec;
+  const present = new Set(spec.slots.map((s) => s.key));
+  const firstPhase = spec.phases?.[0]?.key || 'p0';
+  const stubs = [];
+  for (const key of SLOT_KEYS) {
+    if (present.has(key)) continue;
+    // Sensible defaults per slot type — visible:false, so exact position
+    // and timing only matter once the operator enables the slot. Chosen
+    // to be inoffensive placeholders that read well when flipped on.
+    const type = slotTypeForKey(key);
+    stubs.push({
+      key,
+      visible: false,
+      bind: DEFAULT_BIND[key] || [],
+      brandMode: 'keep',
+      brandModeBind: null,
+      phase: firstPhase,
+      position: {
+        anchor: type === 'image' ? 'center' : 'lowerThird',
+        align: type === 'image' ? 'center' : 'left',
+        offsetX: 0,
+        offsetY: 0,
+        maxWidthPct: 0.85,
+        row: null,
+      },
+    });
+  }
+  if (!stubs.length) return spec;
+  // Re-run through the validator so the stubs pick up full default
+  // treatments (varies by slot type — multi and image get their own
+  // treatment fields via the validator's type-conditional branch).
+  const merged = {
+    ...spec,
+    slots: [...spec.slots, ...stubs],
+  };
+  const res = validateTitleSpec(merged, { format: 'feed' /* format-neutral for stubs */ });
+  // If the stubs fail (shouldn't — the validator seeds all defaults),
+  // fall back to the original spec rather than crashing the API.
+  return res.ok ? res.normalized : spec;
+}
 
 const PRESET_DIR = path.join(__dirname, '..', 'remotion', 'presets');
 const CANONICAL_PRESET = 'canonical';
@@ -176,6 +231,7 @@ module.exports = {
   resolveSpec,
   resolveSpecForBrand,
   buildBrandTokens,
+  hydrateAllSlotKeys,
   loadPresetFile,
   clearPresetCache,
   PRESET_DIR,

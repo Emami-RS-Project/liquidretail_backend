@@ -72,6 +72,35 @@ function resolveSlotContent(slot, meta) {
   }
 
   const chain = brandMode && slot.brandModeBind ? slot.brandModeBind : slot.bind;
+
+  // Multi-value slots return the source array (capped at maxItems, empty
+  // slots skipped). Bind chain picks the first non-empty array.
+  if (slot.slotType === 'multi') {
+    for (const field of chain) {
+      const arr = meta?.[field];
+      if (Array.isArray(arr) && arr.length > 0) {
+        const cap = slot.treatment?.maxItems ?? 4;
+        const items = arr
+          .filter((v) => v != null && String(v).trim() !== '')
+          .map((v) => String(v).trim())
+          .slice(0, cap);
+        if (items.length > 0) return items;
+      }
+    }
+    return null;
+  }
+
+  // Image slots return the URL string. Same first-non-empty semantics as
+  // text, but the value stays as-is (no .trim() on URLs beyond whitespace).
+  if (slot.slotType === 'image') {
+    for (const field of chain) {
+      const v = meta?.[field];
+      if (typeof v === 'string' && v.trim() !== '') return v.trim();
+    }
+    return null;
+  }
+
+  // Text: first non-empty stringified value in the bind chain.
   for (const field of chain) {
     const v = meta?.[field];
     if (v != null && String(v).trim() !== '') return String(v).trim();

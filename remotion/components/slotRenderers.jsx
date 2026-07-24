@@ -30,6 +30,18 @@ const BASE_SIZE = {
   deliveryLine: { vertical: 22, feed: 16, landscape: 22 },
   cta: { vertical: 26, feed: 20, landscape: 24 },
   promo: { vertical: 26, feed: 20, landscape: 24 },
+  // Added text slots
+  productDescription: { vertical: 30, feed: 22, landscape: 26 },
+  tagline: { vertical: 40, feed: 28, landscape: 34 },
+  website: { vertical: 22, feed: 16, landscape: 22 },
+  likes: { vertical: 24, feed: 18, landscape: 22 },
+  reviewCount: { vertical: 24, feed: 18, landscape: 22 },
+  // Multi-value slots — per-item text size
+  badges: { vertical: 22, feed: 16, landscape: 20 },
+  benefits: { vertical: 24, feed: 18, landscape: 22 },
+  // Image slots — sizePct drives the actual pixel size; BASE_SIZE unused
+  productImage: { vertical: 0, feed: 0, landscape: 0 },
+  brandLogo:    { vertical: 0, feed: 0, landscape: 0 },
 };
 
 export function baseSize(slotKey, format, sizeScale) {
@@ -408,6 +420,181 @@ export const PriceSlot = ({ slot, content, tokens, dims, format }) => {
   );
 };
 
+// ── Text slots added to the vocabulary — all reuse TextSlot but with
+// their own BASE_SIZE entry so per-slot size defaults track semantic
+// weight (tagline > website > likes).
+
+export const ProductDescriptionSlot = TextSlot;
+export const TaglineSlot = TextSlot;
+export const WebsiteSlot = TextSlot;
+
+// Likes — text prefixed with a heart glyph (SVG, not text char, so no
+// font-glyph-coverage risk). Content is either a raw number or the
+// prewrapped "Loved by N" text; the renderer formats numeric values.
+export const LikesSlot = ({ slot, content, tokens, dims, format }) => {
+  const t = slot.treatment;
+  const size = baseSize('likes', format, t.sizeScale);
+  const font = tokenFont(tokens, t.fontRole);
+  const raw = String(content);
+  const asNum = Number(raw.replace(/[,_\s]/g, ''));
+  const label = Number.isFinite(asNum) && asNum > 0
+    ? `${formatCount(asNum)} likes`
+    : raw;
+  const color = tokenColor(tokens, t.colorToken);
+  return (
+    <div style={{ ...scrimStyle(t, tokens, dims), display: 'inline-flex', alignItems: 'center', gap: Math.round(size * 0.4) }}>
+      <svg width={Math.round(size * 1.05)} height={Math.round(size * 1.05)} viewBox="0 0 24 24" style={{ display: 'block' }}>
+        <path d="M12 21s-7.5-4.6-9.6-9.5C.9 7.6 3.5 4 7 4c2 0 3.5 1 5 2.7C13.5 5 15 4 17 4c3.5 0 6.1 3.6 4.6 7.5C19.5 16.4 12 21 12 21z" fill={color} />
+      </svg>
+      <span style={{ fontFamily: fontFamilyCss(font), fontWeight: t.weight, fontSize: size, color, textShadow: TEXT_SHADOWS.soft }}>
+        {applyCasing(label, t.casing)}
+      </span>
+    </div>
+  );
+};
+
+// Review count — formats a raw number as "N reviews". Passes through
+// prewrapped strings ("128 reviews" already fine).
+export const ReviewCountSlot = ({ slot, content, tokens, dims, format }) => {
+  const t = slot.treatment;
+  const size = baseSize('reviewCount', format, t.sizeScale);
+  const font = tokenFont(tokens, t.fontRole);
+  const raw = String(content);
+  const asNum = Number(raw.replace(/[,_\s]/g, ''));
+  const label = Number.isFinite(asNum) && asNum > 0
+    ? `${asNum.toLocaleString('en-US')} review${asNum === 1 ? '' : 's'}`
+    : raw;
+  return (
+    <div style={{ ...scrimStyle(t, tokens, dims), display: 'inline-block' }}>
+      <span style={{ fontFamily: fontFamilyCss(font), fontWeight: t.weight, fontSize: size, color: tokenColor(tokens, t.colorToken), textShadow: TEXT_SHADOWS.soft }}>
+        {applyCasing(label, t.casing)}
+      </span>
+    </div>
+  );
+};
+
+// Multi-value badges — array of short strings rendered as pills, bullet
+// list, or plain text. `itemLayout` controls stack/row/grid; `itemDelaySec`
+// staggers per-item entrance (progress-aware; each item appears at its
+// own offset). Reuses the badge Pill style for `itemStyle: 'pill'`.
+export const BadgesSlot = ({ slot, content, tokens, dims, format, progress }) => {
+  return renderMultiValue({ slot, content, tokens, dims, format, progress, sizeKey: 'badges' });
+};
+
+// Multi-value benefits — same renderer as badges, but the treatment
+// defaults to `itemLayout: 'stack'` and `itemStyle: 'bullet'` (validator
+// sets these per slot key). Splits into its own export for future
+// divergence (e.g., check-mark bullets, custom benefit icons).
+export const BenefitsSlot = ({ slot, content, tokens, dims, format, progress }) => {
+  return renderMultiValue({ slot, content, tokens, dims, format, progress, sizeKey: 'benefits' });
+};
+
+function renderMultiValue({ slot, content, tokens, dims, format, progress, sizeKey }) {
+  const t = slot.treatment;
+  const size = baseSize(sizeKey, format, t.sizeScale);
+  const items = Array.isArray(content) ? content : [content];
+  const layout = t.itemLayout || 'row';
+  const style  = t.itemStyle  || 'plain';
+  const delay  = t.itemDelaySec || 0;
+  const gap    = Math.round(Math.min(dims.width, dims.height) * (t.itemGap || 0.012));
+  const font   = tokenFont(tokens, t.fontRole);
+  const fg     = tokenColor(tokens, t.colorToken);
+
+  // Container layout — grid uses a 2-column auto-fit; row is inline-flex; stack is column.
+  const containerStyle = layout === 'grid'
+    ? { display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap }
+    : layout === 'row'
+      ? { display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap }
+      : { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap };
+
+  return (
+    <div style={{ ...scrimStyle(t, tokens, dims), ...containerStyle }}>
+      {items.map((raw, i) => {
+        // Per-item envelope — items appear in sequence when `delay` > 0.
+        // `progress` is the slot's 0..1 visible window; scaling it by
+        // (items × delay + entrance) gives each item its own reveal.
+        const itemOnset = Math.min(0.999, i * delay / Math.max(0.001, (items.length * delay + 0.4)));
+        const itemP = Math.max(0, Math.min(1, (progress - itemOnset) / (1 - itemOnset)));
+        const opacity = itemP > 0 ? Math.min(1, itemP * 3) : 0;
+        const translate = (1 - Math.min(1, itemP * 2.5)) * 8;
+        const label = applyCasing(String(raw), t.casing === 'none' ? (style === 'pill' ? 'upper' : 'none') : t.casing);
+
+        const commonSpan = { opacity, transform: `translateY(${translate}px)` };
+        if (style === 'pill' || style === 'chip') {
+          return (
+            <div key={i} style={{ ...commonSpan, fontFamily: fontFamilyCss(font) }}>
+              <Pill
+                bg={style === 'chip' ? 'transparent' : hexToRgba(tokenColor(tokens, 'badgeBg'), 0.96)}
+                text={style === 'chip' ? fg : tokenColor(tokens, 'badgeText')}
+                stroke={style === 'chip' ? hexToRgba(fg, 0.9) : null}
+                dims={dims}
+                size={size}
+                tracking={t.trackingPx || 1}
+              >
+                {label}
+              </Pill>
+            </div>
+          );
+        }
+        if (style === 'bullet') {
+          return (
+            <div key={i} style={{ ...commonSpan, display: 'inline-flex', alignItems: 'baseline', gap: Math.round(size * 0.4), fontFamily: fontFamilyCss(font) }}>
+              <span style={{ width: Math.round(size * 0.4), height: Math.round(size * 0.4), borderRadius: '50%', backgroundColor: fg, display: 'inline-block', alignSelf: 'center' }} />
+              <span style={{ fontSize: size, fontWeight: t.weight, color: fg, textShadow: TEXT_SHADOWS.soft }}>{label}</span>
+            </div>
+          );
+        }
+        // plain
+        return (
+          <span key={i} style={{ ...commonSpan, fontSize: size, fontWeight: t.weight, color: fg, fontFamily: fontFamilyCss(font), textShadow: TEXT_SHADOWS.soft }}>
+            {label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+// Image slots — <Img> with fit + size + radius. Content is a URL string
+// (asset-server URL — the render browser has no external egress, so URLs
+// must resolve inside the local network).
+export const ProductImageSlot = ({ slot, content, tokens, dims }) => {
+  return renderImage({ slot, content, tokens, dims });
+};
+export const BrandLogoSlot = ({ slot, content, tokens, dims }) => {
+  return renderImage({ slot, content, tokens, dims });
+};
+
+function renderImage({ slot, content, tokens, dims }) {
+  const t = slot.treatment;
+  const short = Math.min(dims.width, dims.height);
+  const size  = Math.round(short * (t.sizePct || 0.35));
+  const radius = Math.round(size * (t.radiusPct || 0));
+  const border = Math.round(short * (t.borderWidthPct || 0));
+  return (
+    <Img
+      src={content}
+      alt=""
+      pauseWhenLoading
+      style={{
+        width: size,
+        height: size,
+        objectFit: t.fit || 'contain',
+        borderRadius: radius,
+        boxShadow: BOX_SHADOWS[t.shadow === 'none' ? 'none' : 'soft'],
+        border: border > 0 ? `${border}px solid ${tokenColor(tokens, t.borderColorToken || 'accent')}` : 'none',
+      }}
+    />
+  );
+}
+
+// Helper — compact number formatter (1200 → "1.2k") for likes/similar.
+function formatCount(n) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (n >= 1000)      return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return String(n);
+}
+
 export const SLOT_RENDERERS = {
   headline: TextSlot,
   quote: TextSlot,
@@ -420,4 +607,15 @@ export const SLOT_RENDERERS = {
   promo: PromoSlot,
   deliveryLine: DeliverySlot,
   price: PriceSlot,
+  // Added text slots — same TextSlot renderer, different BASE_SIZE keys.
+  productDescription: ProductDescriptionSlot,
+  tagline: TaglineSlot,
+  website: WebsiteSlot,
+  likes: LikesSlot,
+  reviewCount: ReviewCountSlot,
+  // Multi-value + image slots.
+  badges: BadgesSlot,
+  benefits: BenefitsSlot,
+  productImage: ProductImageSlot,
+  brandLogo: BrandLogoSlot,
 };

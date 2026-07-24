@@ -741,6 +741,12 @@ async function buildMetaForAd(ad, brand) {
     quoteSnippet,
     promoText,
     productOnlyImageUrl,
+    // Alias for the Remotion titling engine's `productImage` slot bind
+    // chain. The remotion render service downloads this URL to the
+    // per-job asset server and overwrites it in place (same pattern as
+    // brandLogoUrl) so the render browser fetches from the local
+    // network only. Canvas engine ignores this field.
+    productImageUrl: productOnlyImageUrl,
 
     // ── DR-v1 brand-mode fields ────────────────────────────────────
     // Populated for all campaigns (product ads ignore them). endcardMode

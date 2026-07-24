@@ -1241,16 +1241,19 @@ router.get('/:id/title-spec', async (req, res) => {
     const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).lean();
     if (!brand) return res.status(404).json({ error: 'brand not found' });
 
-    const { resolveSpecForBrand, buildBrandTokens, PRESET_DIR } = require('../services/titleSpecService');
+    const { resolveSpecForBrand, buildBrandTokens, hydrateAllSlotKeys, PRESET_DIR } = require('../services/titleSpecService');
     const resolved = {};
     for (const format of ['vertical', 'feed', 'landscape']) {
       try {
         const { spec, source } = resolveSpecForBrand(brand, format);
-        // Per-format fonts resolved WITH the spec's own overrides so the
-        // operator preview matches what production renders.
+        // Hydrate stub entries for every SLOT_KEYS not present so the
+        // Title Studio dropdown surfaces every available slot (all
+        // visible: false — operator flips them on as needed). Doesn't
+        // affect what renders.
+        const hydrated = hydrateAllSlotKeys(spec);
         const fmtTokens = await buildBrandTokens(brand, { specFontOverrides: spec.tokenOverrides?.fonts || {} });
         const fonts = Object.fromEntries(Object.entries(fmtTokens.fonts).map(([r, f]) => [r, { family: f.family, weight: f.weight, source: f.source, url: f.remoteUrl || null, fallback: f.fallback }]));
-        resolved[format] = { spec, source, fonts };
+        resolved[format] = { spec: hydrated, source, fonts };
       } catch (e) {
         resolved[format] = { spec: null, source: `error: ${e.message}` };
       }
@@ -1308,9 +1311,40 @@ function reapSpecJob(jobId) {
 }
 
 // Compact schema reference the LLM edits against — generated from the
-// validator's own vocabulary so prompt and validation can't drift.
+// validator's own vocabulary so prompt and validation can't drift. Slot
+// semantic descriptions (below) let the LLM understand what each key
+// represents so operators can write natural-language requests like
+// "show the badges in a cascade" or "reveal the product image at 5s".
 function titleSpecSchemaPrompt() {
   const V = require('../services/titleSpecValidator');
+  const SLOT_DOCS = {
+    // Existing text
+    headline:           'text — the ad\'s hook headline (bound from meta.headline)',
+    quote:              'text — customer quote snippet (bound from meta.quoteSnippet → quote)',
+    reviewer:           'text — attribution line under the quote (meta.reviewer)',
+    rating:             'composite — 5-star row + rating value + review count (no bind chain)',
+    badge:              'text — the primary product badge, e.g. "Bestseller" (meta.badgeText)',
+    brandPill:          'text|image — brand mark: renders logo image when available, text pill otherwise (meta.brandName + meta.brandLogoUrl)',
+    productName:        'text — the product title (meta.productName)',
+    price:              'text — product price, currency-prefixed if bare number (meta.price)',
+    deliveryLine:       'text — shipping / offer callout (meta.deliveryLine)',
+    cta:                'text — call-to-action button label (meta.ctaText)',
+    promo:              'text — promotional pill, e.g. "FREE SHIPPING" (meta.promoText — null skips the pill)',
+    // Added text slots
+    productDescription: 'text — 1–2-sentence product summary (meta.productDescription)',
+    tagline:            'text — brand tagline / hero line (meta.brandTagline)',
+    website:            'text — brand website domain compact form, e.g. "brand.com" (meta.brandWebsiteDomain)',
+    likes:              'text — engagement count, formatted with heart icon, e.g. "1.2k likes" (meta.likes)',
+    reviewCount:        'text — review count formatted, e.g. "128 reviews" (meta.reviewCount)',
+    // Multi-value slots
+    badges:             'multi — the full badges array; renders each as a pill/chip/bullet in a row/stack/grid; supports staggered cascade entrance (meta.badges[])',
+    benefits:           'multi — short product benefits array, e.g. ["Vegan", "SPF 30", "Fragrance-free"]; typically bullet stack (meta.benefits[])',
+    // Image slots
+    productImage:       'image — the product-only catalog image, rendered as <img> with fit/size/radius (meta.productImageUrl)',
+    brandLogo:          'image — the brand logo as a standalone slot (meta.brandLogoUrl)',
+  };
+  const slotSummary = V.SLOT_KEYS.map((k) => `  ${k}: ${SLOT_DOCS[k] || 'text'}`).join('\n');
+
   return [
     'TITLE STYLE SPEC SCHEMA (v1) — a per-format JSON document:',
     '{ "version": 1,',
@@ -1320,9 +1354,12 @@ function titleSpecSchemaPrompt() {
     `    "colors": { <${V.TOKEN_COLOR_KEYS.join('|')}>: "#RRGGBB" },`,
     '    "fonts": { "heading"|"body"|"quote": { "family": str, "weight": 100-900 } } },',
     '  "slots": [{',
-    `    "key": ${V.SLOT_KEYS.join('|')},                            // unique per spec`,
-    '    "visible": bool,',
-    `    "bind": [meta fields: ${V.BINDABLE_META_FIELDS.join(', ')}], // content source, first non-empty wins`,
+    `    "key": one of the SLOT KEYS listed below,               // unique per spec`,
+    '    "visible": bool,                                            // set false to keep the slot in the spec but not render it',
+    `    "bind": [meta fields — TEXT slots use ${V.BINDABLE_META_FIELDS.join(', ')};`,
+    `                            MULTI slots use ${V.BINDABLE_MULTI_META_FIELDS.join(', ')};`,
+    `                            IMAGE slots use ${V.BINDABLE_IMAGE_META_FIELDS.join(', ')};`,
+    '                            first non-empty value in the chain wins]',
     '    "phase": str,                                               // must reference a phase key',
     `    "position": { "anchor": ${V.ANCHORS.join('|')}, "align": ${V.ALIGNS.join('|')},`,
     '                  "offsetX": -0.25..0.25, "offsetY": -0.25..0.25, "maxWidthPct": 0.2..1, "row": str|null },',
@@ -1331,11 +1368,22 @@ function titleSpecSchemaPrompt() {
     `    "treatment": { "scrim": ${V.SCRIMS.join('|')}, "scrimOpacity": 0..1, "scrimColorToken": color token,`,
     `                   "shadow": ${V.SHADOWS.join('|')}, "casing": ${V.CASINGS.join('|')}, "fontRole": heading|body|quote,`,
     '                   "weight": 100-900, "sizeScale": 0.5..2, "maxLines": 1-4, "trackingPx": 0..8,',
-    '                   "colorToken": color token, "accent": { "type": underline|bar|none, "colorToken": color token, "animate": bool } }',
+    '                   "colorToken": color token, "accent": { "type": underline|bar|none, "colorToken": color token, "animate": bool },',
+    `                   // MULTI slots only: "itemLayout": ${V.ITEM_LAYOUTS.join('|')}, "itemStyle": ${V.ITEM_STYLES.join('|')}, "itemDelaySec": 0..2 (stagger between items), "itemGap": 0..0.05, "maxItems": 1..8`,
+    `                   // IMAGE slots only: "fit": ${V.IMAGE_FITS.join('|')}, "sizePct": 0.05..0.9 (fraction of canvas short edge), "radiusPct": 0..0.5, "borderWidthPct": 0..0.02, "borderColorToken": color token`,
+    '                 }',
     '  }]',
     '}',
-    'Slots sharing (phase, anchor) stack top-to-bottom in array order; a shared position.row renders side by side.',
-    'Positions are safe-zone clamped at render time. Slots whose bound meta field is empty are skipped automatically.',
+    '',
+    'SLOT KEYS (semantic reference — bind chain, type, and content source):',
+    slotSummary,
+    '',
+    'RENDERING RULES:',
+    '- Slots sharing (phase, anchor) stack top-to-bottom in array order; a shared position.row renders side by side.',
+    '- Positions are safe-zone clamped at render time. Slots whose bound meta value is empty (or null / empty array) are skipped automatically.',
+    '- MULTI slots iterate their bound array; use itemDelaySec > 0 to cascade item entrances one after the other.',
+    '- IMAGE slots draw a single <img> — sizePct is a fraction of the canvas short edge; radiusPct rounds the corners.',
+    '- Set visible:true to enable a slot the current spec has hidden; the operator may reference any slot key from the SLOT KEYS list.',
   ].join('\n');
 }
 
@@ -1432,8 +1480,14 @@ router.post('/:id/title-spec/modify', express.json(), async (req, res) => {
       return res.status(400).json({ error: `unknown format '${rawFormat}'` });
     }
 
-    const { resolveSpecForBrand } = require('../services/titleSpecService');
-    const { spec: currentSpec, source } = resolveSpecForBrand(brand, rawFormat);
+    const { resolveSpecForBrand, hydrateAllSlotKeys } = require('../services/titleSpecService');
+    const { spec: baseSpec, source } = resolveSpecForBrand(brand, rawFormat);
+    // Hydrate the spec so the LLM sees every possible slot in CURRENT
+    // SPEC. Requests like "cascade the badges" now work even when the
+    // brand's saved spec doesn't yet include a `badges` slot — the stub
+    // (visible:false) is in the current-spec payload, and Claude can
+    // flip visible + tune the timing.
+    const currentSpec = hydrateAllSlotKeys(baseSpec);
 
     const crypto = require('crypto');
     const jobId = crypto.randomBytes(6).toString('hex');
