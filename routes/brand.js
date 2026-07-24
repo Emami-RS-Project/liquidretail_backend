@@ -1458,7 +1458,26 @@ function titleSpecSchemaPrompt() {
   ].join('\n');
 }
 
-async function runModifyTitleSpec(jobId, brand, { format, currentSpec, request }) {
+// Format the client-provided chat history for the LLM prompt. History is
+// an ordered array of { role: 'user'|'assistant', content: string } — we
+// compact it into a plain-text block prefixed to the current user
+// message so the LLM has multi-turn continuity ("earlier the operator
+// asked X, you did Y") without needing atlasTextService's messages API.
+// Capped at the last 10 turns to bound token spend on long sessions.
+function formatChatHistoryForPrompt(history) {
+  if (!Array.isArray(history) || history.length === 0) return '';
+  const capped = history.slice(-10);
+  const lines = ['CONVERSATION HISTORY (oldest first, most recent last):'];
+  for (const turn of capped) {
+    if (!turn || typeof turn !== 'object') continue;
+    const role = turn.role === 'user' ? 'Operator' : 'You';
+    const content = String(turn.content || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    if (content) lines.push(`- ${role}: ${content}`);
+  }
+  return lines.length > 1 ? lines.join('\n') : '';
+}
+
+async function runModifyTitleSpec(jobId, brand, { format, currentSpec, request, history = [] }) {
   const { validateTitleSpec } = require('../services/titleSpecValidator');
   const { buildBrandTokens } = require('../services/titleSpecService');
   const { generate } = require('../services/atlasTextService');
@@ -1466,30 +1485,49 @@ async function runModifyTitleSpec(jobId, brand, { format, currentSpec, request }
     const tokens = await buildBrandTokens(brand, {});
     const system = [
       'You are a video-ad title stylist. You edit a declarative "title style spec" that a rendering engine consumes.',
-      'Apply the operator\'s requested modifications to the CURRENT SPEC and return the COMPLETE updated spec as raw JSON.',
-      'Rules: return ONLY the JSON document (no markdown fences, no commentary). Keep every part of the current spec the',
-      'operator did not ask to change. Stay strictly inside the schema and its bounds. Colors are #RRGGBB. Fonts should be',
-      'Google Fonts families or the brand\'s ingested families. The clip is nominally 8 seconds.',
+      'Apply the operator\'s requested modifications to the CURRENT SPEC and return the result as raw JSON.',
+      '',
+      'RESPONSE SHAPE — return a single JSON object with exactly these keys:',
+      '  {',
+      '    "spec":    <the COMPLETE updated title style spec>,',
+      '    "summary": "<one short sentence (≤160 chars) describing what you changed in plain English>"',
+      '  }',
+      'Rules: return ONLY the JSON object (no markdown fences, no commentary outside the object). Keep every part of',
+      'the current spec the operator did not ask to change. Stay strictly inside the schema and its bounds. Colors are',
+      '#RRGGBB. Fonts should be Google Fonts families or the brand\'s ingested families. The clip is nominally 8 seconds.',
+      'Summary examples: "Enabled the badges slot as a cascade row at 3s with 4 items." · "Warmed accent color to',
+      '#E89258; kept the CTA text unchanged."',
       '',
       titleSpecSchemaPrompt(),
     ].join('\n');
+    const historyBlock = formatChatHistoryForPrompt(history);
     const userMsg = (extra) => [
       `FORMAT: ${format}`,
       `BRAND TOKENS (defaults the spec inherits — override via tokenOverrides only when asked): ${JSON.stringify({ colors: tokens.colors, fonts: Object.fromEntries(Object.entries(tokens.fonts).map(([r, f]) => [r, f.family])) })}`,
+      historyBlock,   // empty string when no history — filter(Boolean) below drops it
       `CURRENT SPEC:\n${JSON.stringify(currentSpec, null, 2)}`,
       `OPERATOR REQUEST: ${request}`,
       extra || '',
-    ].join('\n\n');
+    ].filter(Boolean).join('\n\n');
 
-    const parseSpec = (text) => {
+    // Parse the LLM response into { spec, summary }. Tolerant to both the
+    // new envelope shape and the legacy bare-spec response, so a temporary
+    // regression in the LLM's format compliance doesn't break the flow.
+    const parseResponse = (text) => {
       const cleaned = String(text).replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
-      try {
-        return JSON.parse(cleaned);
-      } catch {
+      let obj;
+      try { obj = JSON.parse(cleaned); }
+      catch {
         const m = cleaned.match(/\{[\s\S]*\}/);
         if (!m) throw new Error('no JSON object in response');
-        return require('json5').parse(m[0]);
+        obj = require('json5').parse(m[0]);
       }
+      // New envelope: { spec, summary }
+      if (obj && typeof obj === 'object' && obj.spec && typeof obj.spec === 'object' && !Array.isArray(obj.spec)) {
+        return { spec: obj.spec, summary: typeof obj.summary === 'string' ? obj.summary.slice(0, 400) : null };
+      }
+      // Legacy bare spec — infer.
+      return { spec: obj, summary: null };
     };
 
     let lastErrors = null;
@@ -1498,27 +1536,28 @@ async function runModifyTitleSpec(jobId, brand, { format, currentSpec, request }
         ? `YOUR PREVIOUS ATTEMPT FAILED VALIDATION with these errors — fix them and return the corrected full spec:\n${lastErrors.join('\n')}`
         : '';
       const result = await generate({ system, user: userMsg(extra), temperature: 0.3, maxTokens: 8000 });
-      let candidate;
+      let parsed;
       try {
-        candidate = parseSpec(result.text);
+        parsed = parseResponse(result.text);
       } catch (e) {
         lastErrors = [`response was not parseable JSON: ${e.message}`];
         continue;
       }
-      const check = validateTitleSpec(candidate, { format });
+      const check = validateTitleSpec(parsed.spec, { format });
       if (check.ok) {
         const prev = specJobs.get(jobId) || {};
         specJobs.set(jobId, {
           ...prev,
           status: 'done',
           spec: check.normalized,
+          summary: parsed.summary,
           model: result.model,
           usage: result.usage,
           attempts: attempt,
           completedAt: Date.now(),
         });
         reapSpecJob(jobId);
-        console.log(`🎨 modify-title-spec[${jobId}]: DONE (attempt ${attempt})`);
+        console.log(`🎨 modify-title-spec[${jobId}]: DONE (attempt ${attempt}) summary="${(parsed.summary || '').slice(0, 60)}"`);
         return;
       }
       lastErrors = check.errors.slice(0, 10);
@@ -1550,9 +1589,33 @@ router.post('/:id/title-spec/modify', express.json(), async (req, res) => {
     if (!['vertical', 'feed', 'landscape'].includes(rawFormat)) {
       return res.status(400).json({ error: `unknown format '${rawFormat}'` });
     }
+    // Optional chat history for multi-turn context. Client-side chats
+    // pass their prior turns here so the LLM sees the running thread.
+    // Sanitized: only role + content survive, and only 'user'/'assistant'
+    // roles are honored — anything else is dropped rather than errored.
+    const rawHistory = Array.isArray(req.body?.history) ? req.body.history : [];
+    const history = rawHistory
+      .filter((t) => t && typeof t === 'object' && (t.role === 'user' || t.role === 'assistant'))
+      .map((t) => ({ role: t.role, content: String(t.content || '').slice(0, 1000) }))
+      .filter((t) => t.content);
 
+    // Optional client-supplied base spec — lets the chat resume from a
+    // reverted turn's snapshot instead of the brand's currently-saved
+    // spec. Falls back to the resolved brand cascade when absent.
+    // Validated + hydrated the same way as the resolver output.
     const { resolveSpecForBrand, hydrateAllSlotKeys } = require('../services/titleSpecService');
-    const { spec: baseSpec, source } = resolveSpecForBrand(brand, rawFormat);
+    const { validateTitleSpec } = require('../services/titleSpecValidator');
+    let baseSpec, source;
+    if (req.body?.baseSpec && typeof req.body.baseSpec === 'object' && !Array.isArray(req.body.baseSpec)) {
+      const check = validateTitleSpec(req.body.baseSpec, { format: rawFormat });
+      if (!check.ok) return res.status(400).json({ error: `baseSpec invalid: ${check.errors.slice(0, 3).join('; ')}` });
+      baseSpec = check.normalized;
+      source = 'client';
+    } else {
+      const resolved = resolveSpecForBrand(brand, rawFormat);
+      baseSpec = resolved.spec;
+      source = resolved.source;
+    }
     // Hydrate the spec so the LLM sees every possible slot in CURRENT
     // SPEC. Requests like "cascade the badges" now work even when the
     // brand's saved spec doesn't yet include a `badges` slot — the stub
@@ -1563,9 +1626,9 @@ router.post('/:id/title-spec/modify', express.json(), async (req, res) => {
     const crypto = require('crypto');
     const jobId = crypto.randomBytes(6).toString('hex');
     specJobs.set(jobId, { status: 'pending', startedAt: Date.now(), brand: String(brand._id), format: rawFormat, baseSource: source });
-    console.log(`🎨 modify-title-spec[${jobId}]: brand="${brand.name}" format=${rawFormat} base=${source} request="${request.slice(0, 80)}"`);
+    console.log(`🎨 modify-title-spec[${jobId}]: brand="${brand.name}" format=${rawFormat} base=${source} history=${history.length} request="${request.slice(0, 80)}"`);
 
-    runModifyTitleSpec(jobId, brand, { format: rawFormat, currentSpec, request });
+    runModifyTitleSpec(jobId, brand, { format: rawFormat, currentSpec, request, history });
     res.status(202).json({ ok: true, jobId, status: 'pending', format: rawFormat, baseSource: source });
   } catch (err) {
     console.error('modify-title-spec kick failed:', err);
@@ -1590,6 +1653,7 @@ router.get('/:id/title-spec/modify/:jobId', async (req, res) => {
     format: job.format,
     baseSource: job.baseSource,
     spec: job.spec,
+    summary: job.summary,           // one-sentence AI explanation of the change (chat panel display)
     error: job.error,
     model: job.model,
     usage: job.usage,
