@@ -564,14 +564,18 @@ function hexToRgb(hex) {
 // pipeline (routes/ads.js Veo path) and the manual trigger endpoint
 // (routes/brand.js) so meta shape stays consistent.
 async function buildMetaForAd(ad, brand) {
+  // Load raw context docs. Every non-derived meta field is resolved
+  // downstream by the cascade engine (services/metaCascadeResolver.js)
+  // against these docs + any Brand.metaCascades overrides. Brands
+  // without overrides produce byte-identical output to the prior
+  // hardcoded logic (each cascade in metaCascadeConfig.js mirrors the
+  // exact priority order that used to live inline here).
   let layoutInput = null;
   try {
     const LayoutInputArtifact = require('../models/LayoutInputArtifact');
     layoutInput = await LayoutInputArtifact.findOne({ mediaId: ad.mediaId }).sort({ createdAt: -1 }).lean();
   } catch { /* optional */ }
 
-  // CatalogProduct fallback lookup for product-level fields not
-  // captured on Ad.copy. Cheap when Ad has a productId.
   let catalogProduct = null;
   if (ad.productId) {
     try {
@@ -580,195 +584,105 @@ async function buildMetaForAd(ad, brand) {
     } catch { /* optional */ }
   }
 
-  // Catalog media list — used by pickProductOnlyUrl to resolve the
-  // product-only image for the endcard overlay. Same shape the
-  // atlasVideoService pulls when building Grok references.
-  let productOnlyImageUrl = null;
+  // Catalog media list — the productOnlyImageUrl cascade reads from
+  // the pre-picked `catalogMediaProductOnly` context doc (first Media
+  // with classification.shotType === 'product_only'). buildContext
+  // does the picking, so the cascade config stays declarative.
+  let catalogMedias = [];
   if (ad.productId) {
     try {
       const Media = require('../models/Media');
-      const catalogMedias = await Media.find({
+      catalogMedias = await Media.find({
         source: 'catalog-product',
         'metadata.catalogProductId': ad.productId
       }).select('_id fileUrl classification metadata').lean();
-      const { pickProductOnlyUrl } = require('./atlasVideoService');
-      productOnlyImageUrl = pickProductOnlyUrl(catalogMedias, catalogProduct);
     } catch { /* optional — endcard degrades to text-only */ }
   }
 
-  // LayoutInputArtifact wraps its data under `.input` (that's what
-  // layoutInputService.assembleInput persists). Every read below MUST
-  // go through this alias, not layoutInput directly, or nothing lands.
-  const li = layoutInput?.input || null;
-
-  // Rating + reviewCount cascade — extended to fall through to
-  // brand-level review aggregates so product ads never render with a
-  // blank proof bar when we have brand sentiment on file. Historically
-  // the artifact only fell back to brand-level for outcome='brand_match'
-  // ads, so many product-outcome artifacts had rating_value=undefined
-  // even when the brand had a well-populated brandReviews record.
-  // Cascade: LayoutInput (artifact) → CatalogProduct → Brand aggregate → null.
-  const brandReviews = brand?.brandReviews || null;
-  const rating =
-       li?.social_proof?.rating_value
-    ?? catalogProduct?.rating
-    ?? (typeof brandReviews?.rating === 'number' ? brandReviews.rating : null);
-  const reviewCount =
-       li?.social_proof?.review_count
-    ?? catalogProduct?.reviewCount
-    ?? (typeof brandReviews?.reviewCount === 'number' ? brandReviews.reviewCount : null);
-
-  const ctaText = ad.copy?.cta_text || li?.cta?.text || li?.copy?.cta_text || 'SHOP NOW';
-
-  // Reviewer attribution — read from the winning quote's author_name
-  // (that's what layoutInputService writes).
-  const reviewer = li?.social_proof?.primary_quote?.author_name
-                || li?.social_proof?.primary_quote?.author
-                || 'Verified customer';
-
-  // Delivery line — versatile "promotional callout" slot.
-  // Priority: promotional offer text > secondary badge > brand tagline.
-  const badges = li?.product?.badges || [];
-  const deliveryLine =
-       ad.copy?.offer_text
-    || li?.cta?.offer_text
-    || badges[1]
-    || brand?.tagline
-    || 'Ships free';
-
-  const badgeText = badges[0] || 'Bestseller';
-
-  // Promo callout — DR-v1 endcard's optional pill at 0:06-0:08. Uses
-  // the same priority ladder as deliveryLine but leaves it null (not
-  // "Ships free") when no promotional signal exists, so the canonical
-  // renderer can skip the pill entirely.
-  const promoText =
-       ad.copy?.offer_text
-    || li?.cta?.offer_text
-    || li?.copy?.highlight_text
-    || null;
-
-  // Punchy ≤50-char quote snippet extracted upstream by quoteSnippetService.
-  // Falls back to the full quote text when no snippet exists (older
-  // artifacts pre-snippet, or the winning quote was already short).
-  const quoteSnippet =
-       li?.social_proof?.primary_quote?.snippet
-    || li?.social_proof?.primary_quote?.text
-    || null;
-
-  // Endcard dispatch (canonical_dr_v1_vertical.script.js). Brand
-  // campaigns (no productId) render a brand-identity endcard —
-  // logo + tagline + optional social-proof line + website — instead
-  // of the product endcard's image + name + rating + promo. The
-  // canonical script branches on meta.endcardMode.
-  const endcardMode = ad.productId ? 'product' : 'brand';
-
-  // Headline cascade — product ads and brand ads share the same ladder
-  // now. Ad.copy.headline is the ideal per-concept LLM output; the
-  // artifact's copy.headline is the pre-computed alternative per seed;
-  // brand.tagline is the safety net so any ad with no derived headline
-  // still renders something meaningful (previously product-mode ads
-  // fell through to null and rendered no hook overlay at all).
-  const headline = ad.copy?.headline
-                || li?.copy?.headline
-                || brand?.tagline
-                || null;
-
-  // Brand name fallback ladder — when Brand.name is empty (rare, but
-  // possible for auto-created stubs), fall back to the connected IG
-  // handle so the endcard still identifies who the ad is from. Sales
-  // demo brands don't have OAuth credentials — they carry the scraped
-  // IG handle on Brand.apifyDemo.igHandle. Handle prefixed with '@' so
-  // scripts render it as a social-media mention style identifier.
-  let brandNameResolved = brand?.name || null;
-  if (!brandNameResolved && brand?._id) {
+  // IG credential — only queried when the brand name is missing, so
+  // the extra Mongo read is skipped for the common case. Loaded once
+  // here so the cascade doesn't have to know about async lookups.
+  let igCredential = null;
+  if (!brand?.name && brand?._id) {
     try {
       const IntegrationCredential = require('../models/IntegrationCredential');
-      const igCred = await IntegrationCredential
+      igCredential = await IntegrationCredential
         .findOne({ brandId: brand._id, type: 'instagram', status: 'active' })
         .select('igUsername')
         .lean();
-      if (igCred?.igUsername) brandNameResolved = `@${igCred.igUsername}`;
     } catch { /* optional */ }
   }
-  if (!brandNameResolved && brand?.apifyDemo?.igHandle) {
-    brandNameResolved = `@${brand.apifyDemo.igHandle}`;
-  }
+
+  // Cascade resolution — merge the shipped defaults with any brand-
+  // authored overrides (Brand.metaCascades) and resolve every field
+  // against the loaded context.
+  const {
+    resolveMeta, mergeCascades, buildContext,
+    DEFAULT_META_CASCADES,
+  } = require('./metaCascadeResolver');
+  const context = buildContext({ ad, brand, catalogProduct, layoutInput, catalogMedias, igCredential });
+  const merged  = mergeCascades(DEFAULT_META_CASCADES, brand?.metaCascades || null);
+  const cascaded = resolveMeta(merged, context);
+
+  // Derived fields — not cascadeable because they depend on other
+  // resolved meta or on ad-level state that isn't a data source.
+  // endcardMode routes the canonical scripts' brand vs product endcard
+  // branch. reviewsText is a formatted string built from reviewCount.
+  const endcardMode = ad.productId ? 'product' : 'brand';
+  const rc = cascaded.reviewCount;
+  const reviewsText = rc != null
+    ? `${rc} review${rc === 1 ? '' : 's'}`
+    : '53 reviews';
 
   return {
-    // ── Text used by the canonical renderer + most custom scripts ──
-    brandName:          brandNameResolved,
-    badgeText,
-    // Product name — canonical catalog record wins. LLMs occasionally
-    // rephrase product names in ad.copy (e.g., truncating or restyling
-    // for the hook); the actual catalog title should still label the
-    // product on the endcard. LayoutInput is a snapshot of the catalog
-    // at assembly time; useful as a fallback when the catalog record
-    // was deleted after the artifact was written.
-    productName:        catalogProduct?.title || li?.product?.name    || ad.copy?.productName  || null,
-    productDescription: li?.product?.description || catalogProduct?.description || null,
-    // Price — canonical catalog record wins for the same reason as
-    // productName. LLM snapshots and artifact snapshots can go stale
-    // when a Shopify sync updates the current price; endcards should
-    // show what the customer will actually be charged.
-    price:              catalogProduct?.price || li?.product?.price    || ad.copy?.productPrice || null,
-    benefits:           li?.product?.short_benefits || li?.product?.benefits || [],
-    badges,
-    headline,
-    // primary_quote is an OBJECT { text, author_name, source, verified } —
-    // pull .text so meta.quote is a string the canvas script can render.
-    quote:              ad.copy?.quote       || li?.social_proof?.primary_quote?.text || null,
-    reviewer,
-    deliveryLine,
-    ctaText,
-    cta:                ctaText, // legacy alias — some scripts still read meta.cta
-    // Structured review data — scripts render a star bar + count.
-    rating,
-    reviewCount,
-    // Preformatted string kept for scripts that don't want to lay out
-    // stars themselves — always populated.
-    reviewsText:        reviewCount != null ? `${reviewCount} review${reviewCount === 1 ? '' : 's'}`
-                       : '53 reviews',
-    likes:              li?.performance?.engagement?.likes || 572,
+    // Cascaded fields — every one of these can be re-pointed via
+    // Brand.metaCascades[<field>] without a code change. Undefined
+    // entries (no source produced a value) fall through as `null`
+    // to preserve the shape callers expect.
+    brandName:          cascaded.brandName          ?? null,
+    badgeText:          cascaded.badgeText          ?? null,
+    productName:        cascaded.productName        ?? null,
+    productDescription: cascaded.productDescription ?? null,
+    price:              cascaded.price              ?? null,
+    benefits:           cascaded.benefits           ?? [],
+    badges:             cascaded.badges             ?? [],
+    headline:           cascaded.headline           ?? null,
+    quote:              cascaded.quote              ?? null,
+    reviewer:           cascaded.reviewer           ?? null,
+    deliveryLine:       cascaded.deliveryLine       ?? null,
+    ctaText:            cascaded.ctaText            ?? null,
+    cta:                cascaded.ctaText            ?? null,   // legacy alias for older scripts reading meta.cta
+    rating:             cascaded.rating             ?? null,
+    reviewCount:        cascaded.reviewCount        ?? null,
+    likes:              cascaded.likes              ?? null,
+    quoteSnippet:       cascaded.quoteSnippet       ?? null,
+    promoText:          cascaded.promoText          ?? null,   // null lets the renderer skip the promo pill
+    productOnlyImageUrl: cascaded.productOnlyImageUrl ?? null,
 
-    // ── DR-v1 template fields (canonical_dr_v1_vertical.script.js) ─
-    // quoteSnippet is a punchy ≤50-char version of `quote` for the
-    // 3-second proof overlay. productOnlyImageUrl is the endcard
-    // image the parent downloads to a local file and re-exposes as
-    // productOnlyImagePath before spawning the child. promoText is
-    // null when no promotional signal exists — the canonical script
-    // skips the pill entirely in that case.
-    quoteSnippet,
-    promoText,
-    productOnlyImageUrl,
     // Alias for the Remotion titling engine's `productImage` slot bind
-    // chain. The remotion render service downloads this URL to the
-    // per-job asset server and overwrites it in place (same pattern as
-    // brandLogoUrl) so the render browser fetches from the local
-    // network only. Canvas engine ignores this field.
-    productImageUrl: productOnlyImageUrl,
+    // chain. Same value as productOnlyImageUrl; the remotion render
+    // service downloads it to the per-job asset server and overwrites
+    // in place (same pattern as brandLogoUrl).
+    productImageUrl:    cascaded.productOnlyImageUrl ?? null,
 
-    // ── DR-v1 brand-mode fields ────────────────────────────────────
-    // Populated for all campaigns (product ads ignore them). endcardMode
-    // is 'brand' when there's no productId to feature. brandLogoUrl
-    // gets downloaded by the parent to tempDir and re-exposed as
-    // brandLogoPath before spawning the child renderer, mirroring the
-    // productOnlyImageUrl → productOnlyImagePath flow.
+    // Brand-level pass-throughs (also cascadeable — brands can point
+    // these at LI-derived fields via Brand.metaCascades).
+    brandLogoUrl:       cascaded.brandLogoUrl    ?? null,
+    brandTagline:       cascaded.brandTagline    ?? null,
+    brandWebsiteUrl:    cascaded.brandWebsiteUrl ?? null,
+
+    // Derived / non-cascadeable fields.
     endcardMode,
-    brandLogoUrl:       brand?.logoUrl     || null,
-    brandTagline:       brand?.tagline     || null,
-    brandWebsiteUrl:    brand?.websiteUrl  || null,
+    reviewsText,
 
     // ── Theme (canonical path) ─────────────────────────────────────
     // Derived from three sources in priority order (higher wins):
     //   1. Brand.styleTheme (operator-curated canonical script keys)
     //   2. Brand.primaryColor / accentColor / secondaryColor / fontFamily
-    //      (brand-level fields set at onboarding)
-    //   3. LayoutInputArtifact.input.brand.* (LLM-derived per-artifact,
-    //      backed by media palette when Brand fields are empty)
-    // Canonical scripts have sensible defaults for every field they
-    // read, so any subset of the above is enough to render.
-    theme:              deriveTheme(brand, li)
+    //   3. LayoutInputArtifact.input.brand.* (LLM-derived per-artifact)
+    // Not part of the cascade engine — theme is a color/font blob,
+    // not a text-value ladder. Kept as its own resolver.
+    theme:              deriveTheme(brand, layoutInput?.input || null),
   };
 }
 

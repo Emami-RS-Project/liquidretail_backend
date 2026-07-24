@@ -232,6 +232,14 @@ const brandSchema = new mongoose.Schema({
   // field — route handlers must markModified('videoSettings') on writes.
   videoSettings: { type: mongoose.Schema.Types.Mixed, default: null },
 
+  // Per-brand overrides of the meta-field cascades (services/metaCascadeConfig.js).
+  // Sparse map of `field → source[]`. A field present here REPLACES the
+  // default cascade for that field entirely (simpler mental model than
+  // merge semantics). Fields absent from this object inherit the shipped
+  // default. Validated on PATCH via metaCascadeResolver.validateBrandOverrides.
+  // Mixed — route handlers must markModified('metaCascades') on writes.
+  metaCascades: { type: mongoose.Schema.Types.Mixed, default: null },
+
   // Sales demo brand. Owned by the "Sales Demos" Advertiser and
   // populated via Apify scraping (public IG posts + Shopify products)
   // instead of OAuth ingest. Filtered out of normal customer-facing

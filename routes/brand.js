@@ -250,7 +250,8 @@ router.patch('/:id', express.json(), async (req, res) => {
                       'fontFamily', 'tone', 'hashtags', 'tags', 'demographics',
                       'brandSafety', 'styleOverrides', 'styleScript',
                       'styleScriptVertical', 'styleScriptLandscape', 'styleTheme',
-                      'videoSettings', 'titleStyleSpec', 'titleStylePreset'];
+                      'videoSettings', 'titleStyleSpec', 'titleStylePreset',
+                      'metaCascades'];
 
     // videoSettings carries model slugs consumed at render time — reject
     // unknown slugs here (nicer UX than the render-time warn-and-fall-
@@ -276,6 +277,17 @@ router.patch('/:id', express.json(), async (req, res) => {
       if (!loadPresetFile(req.body.titleStylePreset)) {
         return res.status(400).json({ error: `unknown titleStylePreset '${req.body.titleStylePreset}'` });
       }
+    }
+
+    // metaCascades: brand-level overrides of the meta-field resolver's
+    // default cascades. Validated + normalized before persist so a
+    // typo'd doc name or malformed source can't corrupt render-time
+    // meta. See services/metaCascadeResolver.validateBrandOverrides.
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'metaCascades') && req.body.metaCascades != null) {
+      const { validateBrandOverrides } = require('../services/metaCascadeResolver');
+      const check = validateBrandOverrides(req.body.metaCascades);
+      if (!check.ok) return res.status(400).json({ error: `metaCascades invalid: ${check.errors.slice(0, 5).join('; ')}` });
+      req.body.metaCascades = check.normalized;
     }
 
     // websiteBackground: normalize to '#RRGGBB' when non-empty; invalid → 400.
@@ -317,7 +329,7 @@ router.patch('/:id', express.json(), async (req, res) => {
     // markModified is required to guarantee the change persists,
     // ESPECIALLY when clearing to null. Applies to any field the
     // Brand schema declares as mongoose.Schema.Types.Mixed.
-    const MIXED_FIELDS = new Set(['styleOverrides', 'styleTheme', 'brandSafety', 'videoSettings', 'titleStyleSpec']);
+    const MIXED_FIELDS = new Set(['styleOverrides', 'styleTheme', 'brandSafety', 'videoSettings', 'titleStyleSpec', 'metaCascades']);
 
     for (const k of editable) {
       if (Object.prototype.hasOwnProperty.call(req.body || {}, k)) {
@@ -1243,6 +1255,51 @@ router.post('/:id/ingest-fonts', express.json(), async (req, res) => {
   } catch (err) {
     console.error('ingest-fonts failed:', err.message);
     res.status(err.status || 500).json({ error: err.message || 'font ingest failed' });
+  }
+});
+
+// GET /api/brand/:id/meta-cascades — every meta field the titling
+// engine consumes, with its effective source cascade (brand overrides
+// merged over shipped defaults) and a human label for each field.
+// Feeds the operator UI's cascade editor: shows what the value would
+// resolve from, in order, for the current brand + a chosen fixture.
+// PATCH /api/brand/:id { metaCascades: { <field>: source[] } } to save
+// a per-field override.
+router.get('/:id/meta-cascades', async (req, res) => {
+  try {
+    const brand = await Brand.findOne(tenantFilter(req, { _id: req.params.id })).select('metaCascades').lean();
+    if (!brand) return res.status(404).json({ error: 'brand not found' });
+    const {
+      DEFAULT_META_CASCADES,
+      mergeCascades,
+    } = require('../services/metaCascadeResolver');
+    const {
+      CASCADED_FIELDS,
+      CONTEXT_DOC_NAMES,
+      FIELD_LABELS,
+    } = require('../services/metaCascadeConfig');
+    const brandOverrides = brand.metaCascades || {};
+    const effective = mergeCascades(DEFAULT_META_CASCADES, brandOverrides);
+    // Per-field payload: label, effective cascade (merged), default
+    // cascade (for "reset" affordance), and whether the brand has
+    // overridden this field (drives the UI's "customized" indicator).
+    const fields = CASCADED_FIELDS.map((field) => ({
+      field,
+      label:        FIELD_LABELS[field] || field,
+      effective:    effective[field] || [],
+      default:      DEFAULT_META_CASCADES[field] || [],
+      isOverridden: Array.isArray(brandOverrides[field]) && brandOverrides[field].length > 0,
+    }));
+    res.json({
+      fields,
+      // Enum-ish helpers so the UI can populate its dropdowns without
+      // duplicating the vocabulary. contextDocs are the whitelisted
+      // `doc` names a doc-typed source can point at.
+      contextDocs: [...CONTEXT_DOC_NAMES],
+    });
+  } catch (err) {
+    console.error('meta-cascades lookup failed:', err);
+    res.status(err.status || 500).json({ error: err.message || 'meta-cascades lookup failed' });
   }
 });
 
