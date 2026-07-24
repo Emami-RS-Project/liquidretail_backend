@@ -819,6 +819,12 @@ async function runPreviewRender(jobId, brand, opts) {
 // Representative sample meta for previews — every slot fed so operators
 // see the full composition. themeForPreview only matters to the canvas
 // engine (meta.theme); the Remotion engine styles via tokens/spec.
+//
+// Multi-value fields (badges, benefits) get realistic populated arrays
+// so a generated script referencing `meta.badges[]` shows something in
+// preview instead of a hollow layout. Image URLs (productImageUrl,
+// brandLogoUrl) point at brand assets when available so image slots
+// and canvas endcard imagery render.
 function buildPreviewSampleMeta(brand, themeForPreview) {
   return {
     brandName:          brand.name,
@@ -833,9 +839,13 @@ function buildPreviewSampleMeta(brand, themeForPreview) {
     quoteSnippet:       'Highly rated for comfort and style',
     reviewer:           'Verified customer',
     deliveryLine:       'Ships free — arrives in 2-3 days',
-    promoText:          null,
-    benefits:           [],
-    badges:             [],
+    promoText:          'FREE SHIPPING',
+    // Populated arrays so multi-value slots (badges, benefits) preview
+    // realistically. Empty arrays would make BadgesSlot / BenefitsSlot
+    // skip rendering, hiding whatever the operator's script is trying
+    // to demonstrate.
+    badges:             ['Bestseller', 'Free shipping', 'New arrival', 'Editor\'s pick'],
+    benefits:           ['Premium materials', 'Made to last', 'Fits true to size', 'Machine washable'],
     rating:             4.6,
     reviewCount:        128,
     reviewsText:        '128 reviews',
@@ -844,6 +854,10 @@ function buildPreviewSampleMeta(brand, themeForPreview) {
     brandTagline:       brand.tagline || null,
     brandWebsiteUrl:    brand.websiteUrl || null,
     brandLogoUrl:       brand.logoUrl || null,
+    // productImageUrl alias — same as productOnlyImageUrl (populated by
+    // buildMetaForAd at real render time). Left null in preview; the
+    // preview route fills it in from the brand's picked lifestyle plate.
+    productImageUrl:    null,
     theme:              themeForPreview || {}
   };
 }
@@ -1752,15 +1766,21 @@ async function runGenerateFullScript(jobId, brand, direction, format, baseScript
       '',
       'META SHAPE (all fields optional — always guard for null/undefined):',
       '  brandName, badgeText, productName, productDescription, price,',
-      '  benefits[], badges[],',
       '  headline, quote, quoteSnippet, reviewer, deliveryLine,',
       '  ctaText / cta,',
-      '  rating (float), reviewCount (int), reviewsText, likes,',
+      '  rating (float), reviewCount (int), reviewsText, likes (number),',
       '  promoText (nullable — skip pill when null),',
       '  endcardMode ("product" | "brand"),',
-      '  productOnlyImagePath  — local file path (may be undefined; load lazily),',
-      '  brandLogoPath         — local file path for brand-mode endcards,',
       '  brandTagline, brandWebsiteUrl,',
+      '  // Multi-value arrays — iterate to render pills / bullets / cascades.',
+      '  //   Any empty/missing → skip that section entirely.',
+      '  badges: string[]     — trust signals (e.g. "Bestseller", "Free shipping"). Typical usage: pill row with per-item stagger, e.g. cascade in 4 across 0.6s.',
+      '  benefits: string[]   — short product benefit phrases (e.g. "Vegan formula", "SPF 30"). Typical usage: bullet stack on the endcard.',
+      '  // Local image file paths — call canvas.loadImage(path) to draw.',
+      '  //   Cache the returned promise across frames; both are undefined',
+      '  //   for brands without imagery, so always null-guard.',
+      '  productOnlyImagePath  — the product-only catalog image (product endcard hero),',
+      '  brandLogoPath         — the brand logo (brand endcard hero, footer marks),',
       '  theme: {',
       '    textPrimary [R,G,B], textSecondary [R,G,B], textMuted [R,G,B],',
       '    scrimColor [R,G,B], endcardBgColor [R,G,B],',
@@ -1832,6 +1852,16 @@ async function runGenerateFullScript(jobId, brand, direction, format, baseScript
       endcardMode: 'product',
       brandTagline: brand.tagline || 'Made better.',
       brandWebsiteUrl: brand.websiteUrl || 'brand.com',
+      // Realistic array values so scripts referencing meta.badges / meta.benefits
+      // demonstrate correctly in preview. Runtime arrays are typically 3-4 items;
+      // scripts should cap their own item count (Math.min(meta.badges.length, 4)).
+      badges: ['Bestseller', 'Free shipping', 'New arrival', 'Editor\'s pick'],
+      benefits: ['Premium materials', 'Made to last', 'Fits true to size', 'Machine washable'],
+      // Present as sample paths (won't exist on disk in preview — the
+      // preview endpoint fills real paths in when it can). Scripts must
+      // null-guard before calling canvas.loadImage.
+      productOnlyImagePath: null,
+      brandLogoPath: null,
       theme: {
         textPrimary: [255, 255, 255],
         textSecondary: [220, 220, 220],
