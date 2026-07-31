@@ -1137,6 +1137,32 @@ router.post('/:id/preview-script', express.json(), async (req, res) => {
       ? 'canvas'
       : bodyEngine || resolveTitlingEngine(brand, fakeAd).engine;
 
+    // SECURITY (GEN-1) — canvas previews execute a brand script through
+    // vm.compileFunction (brandScriptRunner.child.js:130-143) with NO parsingContext,
+    // so the compiled body resolves free identifiers against the live V8 global and
+    // `globalThis.process.mainModule.require('child_process')` is one expression away.
+    // The child is spawned same-uid with only a shallow env scrub
+    // (brandScriptExecutor.js:285-293), so /proc/<ppid>/environ still yields MONGODB_URI,
+    // ATLAS_API_KEY, JWT_SECRET and every Cloudinary credential (GEN-2). Tenant scoping
+    // does not help: the attacker supplies the script for a brand they own.
+    //
+    // THREE doors reached that, not one:
+    //   1. body.script            -> forced 'canvas' directly above
+    //   2. body.engine:'canvas'   -> the bodyEngine escape hatch, which short-circuits
+    //                                BEFORE resolveTitlingEngine is consulted
+    //   3. a styleScript* persisted earlier via PATCH /api/brand/:id (:264-267 allow-lists
+    //      all three fields with no validation), then previewed with {engine:'canvas'}
+    // Guarding the engine closes all three, and stays closed if resolveTitlingEngine is
+    // ever un-hardwired. Canvas titling is already dead on the render path
+    // (brandScriptExecutor resolveTitlingEngine returns 'remotion' unconditionally), and
+    // the only UI caller of this route — StyleOverridesCard.tsx — is commented out of
+    // Brand/index.tsx, so nothing live loses a feature.
+    if (engine !== 'remotion') {
+      return res.status(400).json({
+        error: 'canvas script previews are disabled — brand script source is not executable'
+      });
+    }
+
     let requestPlacement = null;
     if (req.body?.placementMode != null && String(req.body.placementMode).trim() !== '') {
       requestPlacement = String(req.body.placementMode).trim();
