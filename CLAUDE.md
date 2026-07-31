@@ -45,9 +45,18 @@ Verified 2026-07-29. Each looks live; none is.
   while rendering with remotion. All of `services/brandScripts/*.script.js`,
   `brandScriptRunner.child.js`, and the `sharp.resize(fit:'cover')` calls at
   `brandScriptExecutor.js:387-388`/`:488-489` are dead. See `docs/TITLING.md` §0.
-  **Exception:** `POST /api/brand/:id/preview-script` forces `engine='canvas'`,
-  bypassing the switch — the only route reaching the `vm.compileFunction` escape
-  (`ARCHITECTURE_REVIEW.md` GEN-1).
+  **The former exception is now CLOSED.** `POST /api/brand/:id/preview-script` used to
+  reach the `vm.compileFunction` escape via **three** doors — `body.script`, the
+  `body.engine:'canvas'` hatch (which short-circuits before `resolveTitlingEngine` is
+  consulted), and a `styleScript*` persisted through the unvalidated
+  `PATCH /api/brand/:id` allow-list (`routes/brand.js:264-267`). An
+  `engine !== 'remotion'` guard, immediately after the engine resolution at
+  `routes/brand.js:1136-1138`, now 400s all three, so **no HTTP route reaches
+  `runChild`**. `scripts/testBrandScript.js` still does, by design — which is why
+  `brandScriptRunner.child.js` cannot simply be deleted. Pinned by
+  `scripts/verifyPreviewScriptGuard.js` (8 checks, revert-proven). See
+  `ARCHITECTURE_REVIEW.md` GEN-1, and note its *original* prescribed fix (delete the
+  `bodyScript` branch alone) was insufficient — it left a two-request exploit.
 - **`renderViaSpec` + the whole `frontend/client/` tree.** `renderService.js:791`
   fetches `${FRONTEND_URL}/ads.html`, but the frontend's `netlify.toml` publishes only
   `frontend/app/dist` and its `/*` fallback swallows everything else. Probed live:

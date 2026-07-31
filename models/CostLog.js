@@ -50,7 +50,26 @@ const costLogSchema = new mongoose.Schema({
   durationMs:   { type: Number, default: 0 },
 
   // Outcome
-  status:       { type: String, enum: ['ok', 'error', 'timeout'], default: 'ok' },
+  //
+  // MUST list every value any caller actually passes. persistCost swallows its own
+  // errors (costTracker.js) so an unlisted value does not surface as a failure — the
+  // row is silently DROPPED and the spend goes unledgered. That regression shipped
+  // in f60c1c7: the video charge point began sending 'submitted' against an enum of
+  // ok/error/timeout, so every Atlas video generation recorded nothing at all.
+  //
+  //   ok | error | timeout   trackLlmCall (costTracker.js) — token-priced calls
+  //   submitted              atlasVideoService charge point — billable POST accepted,
+  //                          outcome not yet known. Spend is committed regardless.
+  //   failed                 atlasImageService — submit failed, $0, kept for rate/error rollups
+  //   charged-no-output      atlasImageService — Atlas billed but returned no asset
+  //
+  // scripts/verifyCostLogStatuses.js discovers the literals from source and asserts
+  // each one validates, so adding a caller status without widening this fails the suite.
+  status:       {
+    type: String,
+    enum: ['ok', 'error', 'timeout', 'submitted', 'failed', 'charged-no-output'],
+    default: 'ok'
+  },
   errorMessage: { type: String, default: null },
 
   createdAt:    { type: Date, default: Date.now, index: true }
