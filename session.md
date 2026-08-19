@@ -5,6 +5,158 @@ lines of chronological accretion; it is now organised by *what is true* rather t
 *what happened when*. History is compressed at the bottom — anything not listed there
 was judged superseded and dropped **deliberately**, not lost.
 
+## 2026-08-18 (later) — RPD v2: static ads, DB seeds, auto-eval, nightly loop, org brain
+
+Branch `claude/rpd-harness-v2` (stacks on `claude/rpd-harness` / PR #210), PR #211.
+Verify suite **`scripts/verifyRpdHarness.js` 49/49**, revert-proven on 15 mutations.
+Owner asked for "all deferred work plus anything that makes it more useful", and answered four
+decisions: static ads YES, org-brain in a NEW repo, galleries behind org login, nightly loop at
+$2/night.
+
+**What v2 adds** (all in `scripts/rpd/`, no deploy anywhere):
+- **STATIC (image) cells.** `spec.static` alongside (or instead of) the video section, one budget
+  gate over both. Baseline is production-identical `staticAdIntents.buildPrompt`. Levers: `raw`
+  (= `Ad.imagePromptRaw`), `patch`, and **`blocks`** — whole-block substitution of
+  `PRODUCT_FIDELITY` / `SCENE_PRESERVE` / `SCENE_PRESERVE_EDGE_EXTEND`. **Why not video's
+  `directives`:** those are objects, so patching a property mutates the binding the builder reads;
+  the static blocks are module-scope `const` STRINGS read lexically (`staticAdIntents.js:1333`), so
+  assigning to the export changes NOTHING the builder sees and the cell would silently render the
+  baseline while reporting `lever: blocks`. Exact substitution instead, erroring loudly when the
+  block is absent (a flag can route to the legacy paragraph).
+- **Intent downgrades are surfaced.** `resolveIntent` silently falls back when an intent's data is
+  missing (measured: `social_proof_led` with no rating → `product_first_lifestyle`). Recorded,
+  printed in the dry run, badged in the gallery — an arm labelled with the requested intent that
+  rendered a different one is a broken comparison.
+- **DB seed mode** (`seed.productId`): resolves the merchant-feed primary + 2 refs by the LIVE rule
+  (inline copy of `firstCatalogMediaForProduct`'s two-tier cascade — NOT
+  `deriveFirstCatalogMediaId`, which is the superseded static-regen hero/createdAt rule), stamps
+  them into the manifest so `resume`/`gallery` never need the DB. **Validated against production:**
+  resolved "Womens VaporTek Hd - Lionfish Turtle" + 2 feed-order refs + brand hex.
+- **Reference-to-video cells** when `seed.videoUrl` is set, plus an ffprobe guard refusing a >30s
+  source that production does not check (a flat $1.60 per r2v submit).
+- **Auto-eval** (`rpd eval`): statics reuse the production judge (`adVisionQcService.judgeRender`)
+  so verdicts are comparable with production QC; video grades 4 ffmpeg frames through the same
+  `ad-vision-qc` role. Advisory only — badged auto-notes, never overwriting a human note. Own cap
+  (`--eval-max-usd`).
+- **`rpd stats`**, `--upload` (Cloudinary mirror), Slack-on-publish, gallery `▶ play row`
+  sync-play, and **static orphan recovery in `resume`** (a plate whose poll crashed is PAID; a free
+  `peekImagePrediction` recovers it).
+- **Nightly loop** (`scripts/rpd/loop/`): $2 cap, **idempotent per day via a stamp claimed BEFORE
+  spending** (launchd re-fires missed jobs on wake; "catch up" must never mean "generate twice").
+  `nightly-spec.json` IS the queue — add a variant by PR and tonight tests it. launchd installed
+  (`com.reachsocial.rpd-nightly`, 02:17); credentials in `~/.rpd-nightly.env` (600).
+
+**New repo `Emami-RS-Project/claude-org-brain`** — cross-repo knowledge as an installable plugin:
+`org-conventions`, `vendor-gotchas`, a thin `rpd-experiments` pointer, and **`scout/`**: a weekly
+job (launchd `com.reachsocial.scout`, Mon 07:07) that collects an Atlas catalog diff + grounded
+Gemini search + Grok X/web signal + our own LEARNINGS/stats, then has **Fable** consolidate it into
+`skills/model-intel/references/*`. README carries the PROMOTION RULE: learnings arrive by PR, never
+a free-write shared store — an unreviewed shared brain propagates one session's wrong claim to
+everyone (this repo's own 62KB `session.md` went stale and misled a later session).
+Baseline snapshot captured: **313 media models** (190 video, 123 image).
+
+**Two live-verified traps worth keeping:**
+1. **The scout's Atlas parse silently returned ZERO models** on the first attempt — the id field is
+   `model` (not `id`/`name`/`slug`) and the kind field is `type`. Zero models reads exactly like "a
+   quiet week", the worst failure mode for an intel feed, so an empty parse now THROWS.
+2. **`bufferCommands` gated on `MONGODB_URI` was wrong twice** — the repo `.env` almost always has
+   a URI so the guard never fired on a normal run, and DB seed mode genuinely connects and NEEDS
+   buffering. Now unconditional in the CLI with `dbSeed` restoring it before connecting.
+
+**Adversarial review (Grok, high effort) found 7 real defects in code that was already
+49-checks-green — including THREE OF MY OWN CHECKS THAT COULD NOT FAIL.** All fixed and
+revert-proven: price estimates ignored `quality`/size (a `quality:'high'` cell was authorised at the
+medium figure and could settle several times over the cap AFTER the POST — the table is now only
+consulted for measured arms); a legitimate `predictionFailed` resubmit kept ONE estimate for N
+receipts, hiding a second billable task (cost now scales per receipt); the eval ceiling could be
+blown by repointing `ATLAS_MODEL_AD_VISION_QC` (now resolves and records the EFFECTIVE model and
+refuses an uncalibrated one); `blocks: {}` was a silent baseline; static receipt-persist failure was
+swallowed while video aborts. The test-quality findings matter most: **S1 matched
+`allowFallback: false` in a COMMENT** (deleting the real literal passed), **S3/S4 used
+`persist: () => {}`** and proved only in-memory state while claiming "reaches manifest.json", and
+**S5 asserted only "is finite"** so the measured table could be replaced with the catalog's ~7x-low
+0.01. Added `codeOnly()` so every "must not mention X" scan reads comment-stripped source — twice a
+comment EXPLAINING an invariant tripped the check enforcing it.
+
+**Open / next:**
+- **Cloudflare Access needs ONE human click** — the API returns `access.api.error.not_enabled`;
+  Zero Trust → "Enable Access" cannot be done by any token. Click-path is in
+  `scripts/rpd/README.md`. Until then gallery URLs are unlisted-but-public.
+- The nightly launchd job points at `liquidretail_backend` (the shared checkout), so it no-ops
+  gracefully until v2 merges.
+- **Static validation (live, all four price points measured):** `static-fidelity-block-ab`,
+  **$0.2168 settled** under a $0.30 cap — `gpt-image-2/edit` $0.072272 x2 (table said $0.0718),
+  `-developer/edit` $0.036136 / $0.04 (table $0.0359). Submit+poll 58-62s. Auto-eval graded 4/4
+  PASS (10/10 product fidelity + text) for ~$0.16, agreeing with the human frame read. Gallery:
+  https://1fec1243.rs-rpd.pages.dev — verified live in a browser (4 plates, auto-eval badges,
+  intent chips, settled chips, timings panels all rendering).
+  **Experimental result: NULL at n=1/arm** — the tightened PRODUCT_FIDELITY block did not beat the
+  canonical one on this product. Logged as a null result in LEARNINGS.md.
+- The `bufferCommands` fix was observed working live during eval: `costTracker.persist failed:
+  Cannot call costlogs.insertOne() before initial connection is complete` — the ledger write failing
+  FAST into the existing catch instead of hanging 10s per call.
+- Video-cell auto-eval and `--upload` remain code-complete but not exercised live.
+
+## 2026-08-18 — RPD harness: model × prompt A/B outside the Ad pipeline (`scripts/rpd/`)
+
+Branch `claude/rpd-harness`, PR #210. Owner asked for a "rapid product development harness": build
+test ads on the real pipeline primitives, race video models against each other, iterate prompt
+changes (system values / intent prompts) **without a redeploy**, optionally title with the
+production defaults, and publish a gallery with notes to Cloudflare Pages. Agents should be able
+to run it in a bounded loop.
+
+**What landed.** `scripts/rpd/` (CLI + 8 lib modules + example specs + README),
+`scripts/verifyRpdHarness.js` (29 checks, revert-proven ×6), a one-symbol export addition in
+`atlasVideoService` (`submitGeneration` — so the harness bills through the PRODUCTION submit path:
+`pacedModelSubmit`, structured-429-only retry, `maxRedirects:0`), and `.gitignore` for `rpd-runs/`.
+Cells = spec.models × spec.variants. Levers map 1:1 to production: `guidance` (=
+`videoPromptGuidance` prepend), `raw` (= `videoPromptRaw` full replace), `directives`
+(patch-build-restore of `OMNI/GROK/PMAX/LIFESTYLE_DIRECTIVES` — measure a directive change BEFORE
+it is committed), `patch` (find-once string surgery). Baseline is byte-identical to
+`buildVeoPrompt` for the same fixture (pinned). Per-cell telemetry for time forecasting:
+promptBuild, **Cloudinary transform probes** (cold derivation vs warm cache per reference URL —
+the same fetch Atlas pays on the production path), submit round-trip incl. pacing,
+queue→terminal, Atlas's own `executionTime`/`timings`, download ms/bytes, titling stage timings.
+
+**Money model (all pinned).** Dry-run default; `--live` requires `--max-usd`; Σ floor-grade
+estimates ≤ cap before ANY submit; non-finite estimate = unpriced = refused; requested resolution
+must be in the model's enum (a "4K" typo used to be PRICED at the 720p fallback and SUBMITTED
+verbatim); receipts flushed OUTSIDE the submit catch so a persistence failure can never
+reclassify a billed submit as failed (it aborts loudly with the receipt printed); `rpd resume`
+finishes runs free and is structurally incapable of spending; settled Atlas `price` is the
+reported spend. UNVERIFIED `MODEL_CAPS` rates (Grok 1.5/1.0, Veo 3.1) run with a loud warning —
+the README no longer claims they are refused.
+
+**Adversarial review (Grok, high effort) paid for itself again** — 4 money findings in code that
+was already hand-written + 25-checks green: NaN-estimate cap bypass, resolution-typo underpricing,
+two receipt-loss windows (kill between submit-return and flush; persist-throw clobbering a billed
+cell to `failed` where resume ignores it), and a README claim ("unverified pricing is refused")
+the code did not implement. All fixed; `submitCells` was refactored with injectable submit/persist
+so the receipt invariants are FUNCTIONALLY tested, not regex-scanned. Known residual (same as
+prod): an axios timeout after Atlas accepted the POST leaves no id anywhere — unrecoverable at
+this layer.
+
+**Validation run (live, measured).** `rpd-validation-crossfade-ab`: Omni developer i2v, 4s 1080p
+9:16, baseline vs "hard cuts" transitions patch, black RestoMods tee seed. Both cells settled at **$0.45**
+($0.90 total under a $1.50 cap; formula said $0.60 — ~25% over at 4s, same direction as the
+known 10s figure). Telemetry: cold Cloudinary transform 1044ms; submit 76ms vs 1182ms (pacing
+wait visible in the number); queue→terminal 91–122s; downloads ~120ms for 5.9/7.7MB; Atlas
+publishes executionTime=0 on this model (provider-side timings unusable — use queueToTerminalMs).
+MEASURED RESULT: the transitions directive is live-effective — baseline shows mid-crossfade
+ghosting at ~1.2s/~2.5s; the one-line hard-cuts patch removed it in every sampled frame. Both
+arms hallucinated a neck-tag view absent from the seed. Titling chrome validated via the resume
+pass; the titling fixture's placeholder quote/rating defaults were REMOVED the same day (a
+defaulted quote is a fabricated testimonial — proof fields render only when supplied; pinned E8).
+Gallery published: https://94a4fbb8.rs-rpd.pages.dev (project rs-rpd.pages.dev; log: scripts/rpd/LEARNINGS.md)
+
+**When is a cell finished under resume?** Same as run: receipt → terminal-ok → master on disk →
+titling pass (resume runs the same free titling pass; failure keeps the master + records
+`titlingError`). Settled price may lag (`costSource:'estimated'`) without blocking `done`.
+
+**Open / deferred:** DB seed mode (pull a product's real feed-primary seed + refs by productId);
+video-seeded (r2v) cells (skipped honestly today); Cloudinary upload of outputs (Pages serves
+local files fine, ≤25MB/file); wiring `rpd` into a scheduled agent loop.
+
 ## 2026-08-17 — `verifyAgentRegistry` GREEN. Five capabilities were DEAD, not dangerous.
 
 Branch `claude/gallant-almeida-a7fb96`. The red harness on main is fixed; suite is **133 / 0**.
