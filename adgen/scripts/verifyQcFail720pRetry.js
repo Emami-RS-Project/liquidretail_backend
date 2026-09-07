@@ -1634,6 +1634,189 @@ await checkAsync('E5b wrapper returns settle:\'unsettled\' (not a raw verdict) s
   } finally { h.restore(); }
 });
 
+check('E6-struct atomic claim $set does not copy preRetry* from the caller\'s in-memory masterAd', () => {
+  const start = RETRY_SVC_SRC.indexOf('const claim = await Ad.findOneAndUpdate(');
+  const end = RETRY_SVC_SRC.indexOf('if (!claim) return null;');
+  assert.ok(start > 0 && end > start, 'claim write not found');
+  const block = RETRY_SVC_SRC.slice(start, end);
+  assert.ok(!/preRetryStatus\s*:\s*masterAd\.status/.test(block),
+    'atomic claim must not source preRetryStatus from masterAd.status (stale in-memory)');
+  assert.ok(!/preRetryRenderError:.*masterAd/.test(block),
+    'atomic claim must not source preRetryRenderError from masterAd');
+  assert.ok(!/preRetryBasePlate:.*masterAd/.test(block),
+    'atomic claim must not source preRetryBasePlate from masterAd');
+  assert.ok(/snapshotsFromDbRow\(claim\)/.test(RETRY_SVC_SRC) || /preRetryStatus': snapshots\.preRetryStatus/.test(RETRY_SVC_SRC),
+    'follow-up persist must write preRetry* from the claim query result');
+});
+
+check('E6-struct2 terminalStatusForRestore logic is unchanged (restore preRetryStatus; rendering+no-receipt → failed)', () => {
+  const start = RETRY_SVC_SRC.indexOf('function terminalStatusForRestore');
+  const end = RETRY_SVC_SRC.indexOf('function masterHadDistinctTitledRenderUrl');
+  assert.ok(start > 0 && end > start, 'terminalStatusForRestore not found');
+  const fn = RETRY_SVC_SRC.slice(start, end);
+  assert.ok(/if \(restored === 'rendering' && !hasRetryReceipt\) return 'failed';/.test(fn),
+    'no-receipt rendering restore must still force failed');
+  assert.ok(/return restored;/.test(fn),
+    'with a receipt, restore must still return preRetryStatus unchanged — correct INPUT is what makes the master-triggered path land at failed');
+});
+
+await checkAsync('E6 [MONEY] master-triggered retry snapshots DB post-QC status (failed), not caller\'s stale in-memory rendering — ordinary throw with predictionId restores to failed; caller promote cannot ship as draft', async () => {
+  const h = setupHarness(RETRY_SVC_PATH);
+  try {
+    // Exact round-5 repro: renderer/titler read the row at status:'rendering'
+    // BEFORE qcAndStampVideoAd. The QC stub writes status:'failed' to the
+    // DB; the in-memory `ad` handed to maybeRetry is still 'rendering'.
+    const master = freshMasterDoc({
+      status: 'rendering',
+      claimedByWorker: HARNESS_WORKER_ID,
+      claimedAt: new Date(),
+      renderError: null
+    });
+    h.adStore.seed(master);
+    h.setVerdict(OLD_MASTER_URL, makeVerdict(false, ['text_defects']));
+    h.setVideoRouterBehavior(async () => {
+      const err = new Error('gemini video: rate rejected after accept');
+      err.code = 'GEMINI_RATE_REJECTED_AFTER_ACCEPT';
+      err.predictionId = 'pred-retry-2';
+      throw err;
+    });
+    const qc = await h.freshModule.qcAndStampVideoAdWithRetry({
+      ad: master,
+      deliveredUrl: OLD_MASTER_URL,
+      brandName: 'TestBrand',
+      campaignRunId: 'run1'
+    });
+    assert.strictEqual(qc.settle, 'terminal',
+      'ordinary (non-unsettled) throw is settle:terminal — caller will run the promote filter');
+    const afterRetry = h.adStore.get(master._id);
+    assert.strictEqual(afterRetry.videoQcRetry.preRetryStatus, 'failed',
+      `preRetryStatus must be the DB post-QC value 'failed', not the caller\'s stale '${master.status}'`);
+    assert.strictEqual(afterRetry.status, 'failed',
+      'ordinary throw with a retry receipt must restore to failed (correct preRetryStatus), not rendering');
+    assert.strictEqual(afterRetry.videoQcRetry.outcome, 'error');
+    assert.strictEqual(afterRetry.videoQcRetry.predictionId, 'pred-retry-2');
+    assert.ok(afterRetry.visionQc && afterRetry.visionQc.passed === false,
+      'attempt-1 QC fail verdict must still be on the row');
+    assert.ok(afterRetry.renderError, 'QC renderError must be restored, not left null from the rendering flip');
+
+    const promo = await h.adStore.model.updateOne(
+      { _id: master._id, status: { $in: ['rendering', 'draft'] } },
+      { $set: { status: 'draft', claimedByWorker: null, claimedAt: null } }
+    );
+    assert.strictEqual(promo.matchedCount, 0,
+      'caller promote must miss — a QC-failed master must not ship as draft / count succeeded');
+    const final = h.adStore.get(master._id);
+    assert.strictEqual(final.status, 'failed');
+    assert.ok(final.visionQc && final.visionQc.passed === false);
+  } finally { h.restore(); }
+});
+
+await checkAsync('E6b [MONEY] derive-triggered retry whose resubmit throws with predictionId still lands the MASTER at failed', async () => {
+  const h = setupHarness(RETRY_SVC_PATH);
+  try {
+    const MASTER_FMT = 'meta_stories_9_16';
+    const master = freshMasterDoc({
+      platformFormat: MASTER_FMT,
+      status: 'failed',
+      claimedByWorker: null,
+      renderError: { message: 'video ad failed vision QC (no regeneration): fake', stage: 'vision-qc', at: new Date(), charged: true }
+    });
+    const derive = deriveDoc(MASTER_FMT, {
+      status: 'failed',
+      claimedByWorker: HARNESS_WORKER_ID
+    });
+    h.adStore.seed(master);
+    h.adStore.seed(derive);
+    h.setFindSiblingMasterAd(async () => h.adStore.get(master._id));
+    h.setVideoRouterBehavior(async () => {
+      const err = new Error('gemini video: generation failed');
+      err.code = 'GEMINI_GENERATION_FAILED';
+      err.predictionId = 'pred-retry-2';
+      throw err;
+    });
+    const result = await h.freshModule.maybeRetryVideoQcFailureAt720p({
+      ad: derive,
+      visionQc: makeVerdict(false, ['text_defects']).visionQc,
+      brandName: 'TestBrand',
+      campaignRunId: 'run1'
+    });
+    assert.strictEqual(result, null);
+    const after = h.adStore.get(master._id);
+    assert.strictEqual(after.videoQcRetry.preRetryStatus, 'failed');
+    assert.strictEqual(after.status, 'failed',
+      'derive-triggered ordinary throw must restore the master to failed, not rendering');
+    assert.strictEqual(after.claimedByWorker, null,
+      'derive-triggered restore releases the claim this process took');
+    assert.strictEqual(wouldClaimOneMatch(after), false);
+    const derivePromo = await h.adStore.model.updateOne(
+      { _id: derive._id, status: { $in: ['rendering', 'draft'] } },
+      { $set: { status: 'draft' } }
+    );
+    assert.strictEqual(derivePromo.matchedCount, 0,
+      'derive row stays failed (attempt-1 QC already stamped it); caller promote must miss');
+    assert.strictEqual(h.adStore.get(derive._id).status, 'failed');
+  } finally { h.restore(); }
+});
+
+await checkAsync('E7 [MONEY] abandonUnsettledRetry on a master-triggered parked retry restores to failed — claimOne cannot re-take, sweep cannot re-alert forever', async () => {
+  const h = setupHarness(RETRY_SVC_PATH);
+  try {
+    const master = freshMasterDoc({
+      status: 'rendering',
+      claimedByWorker: HARNESS_WORKER_ID,
+      claimedAt: new Date(),
+      renderError: null
+    });
+    h.adStore.seed(master);
+    h.setVerdict(OLD_MASTER_URL, makeVerdict(false, ['text_defects']));
+    h.setVideoRouterBehavior(async () => {
+      const err = new Error('gemini video: unsettled at timeout after 600s (receipt kept)');
+      err.code = 'GEMINI_UNSETTLED_AT_TIMEOUT';
+      err.unsettledAtTimeout = true;
+      err.predictionId = 'pred-retry-2';
+      throw err;
+    });
+    const qc = await h.freshModule.qcAndStampVideoAdWithRetry({
+      ad: master, deliveredUrl: OLD_MASTER_URL, campaignRunId: 'run1'
+    });
+    assert.strictEqual(qc.settle, 'unsettled');
+    const parked = h.adStore.get(master._id);
+    assert.strictEqual(parked.status, 'rendering');
+    assert.strictEqual(parked.videoQcRetry.preRetryStatus, 'failed',
+      'parked row must already hold the DB post-QC snapshot, not stale rendering');
+    assert.strictEqual(parked.claimedByWorker, HARNESS_WORKER_ID);
+
+    // Review repro: process died, claim cleared, row sits rendering+unclaimed.
+    const now = new Date();
+    const stale = new Date(now.getTime() - 30 * 60 * 1000);
+    await h.adStore.model.updateOne(
+      { _id: master._id },
+      { $set: { updatedAt: stale, claimedAt: stale, claimedByWorker: null } }
+    );
+    const beforeGiveUp = h.adStore.get(master._id);
+    assert.strictEqual(wouldClaimOneMatch(beforeGiveUp), true,
+      'sanity: the review\'s rendering + claimedByWorker:null shape DOES match claimOne before abandon');
+
+    const res = await h.freshModule.abandonUnsettledRetry(beforeGiveUp, {
+      error: 'human give-up after stuck alert',
+      now,
+      staleMinutes: 5,
+      claimStaleMinutes: 15
+    });
+    assert.strictEqual(res.matchedCount, 1, 'abandonUnsettledRetry must match a stale unclaimed parked row');
+    const after = h.adStore.get(master._id);
+    assert.strictEqual(after.status, 'failed',
+      'give-up must restore the real post-QC status (failed), not the stale in-memory rendering');
+    assert.strictEqual(after.claimedByWorker, null);
+    assert.strictEqual(after.videoQcRetry.outcome, 'error');
+    assert.strictEqual(wouldClaimOneMatch(after), false,
+      'failed + unclaimed must not match renderer.claimOne (status:rendering)');
+    const sweepFilter = h.freshModule.buildQcRetryRecoveryFilter({ now, staleMinutes: 5, claimStaleMinutes: 15 });
+    assert.strictEqual(matches(after, sweepFilter), false,
+      'must not remain a QC-retry-sweep candidate  — that was the permanent-realerting arm');
+  } finally { h.restore(); }
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // SECTION F — REVERT-PROOF: mutate the hard cap (the atomic claim's
 // `videoQcRetry: null` filter condition) out of a SCRATCH copy of the real
@@ -2468,6 +2651,115 @@ check('R9 titler reclaim exclusion is still present (stuck rows sit until a huma
   const block = stripCommentsAndStrings(src.slice(rec, rec + 2200));
   assert.ok(/qcRetryGenericSweepExclusion\s*\(/.test(block),
     'reclaim must still exclude in-flight/unsettled QC-retry claims now that they wait for a human');
+});
+
+check('R10-struct alertStuckQcRetry debounce $set does not bump updatedAt', () => {
+  const src = fs.readFileSync(path.join(SRC, 'services', 'videoQcRetryService.js'), 'utf8');
+  const start = src.indexOf('async function alertStuckQcRetry');
+  const end = src.indexOf('async function peekRetryProvider');
+  assert.ok(start > 0 && end > start, 'alertStuckQcRetry not found');
+  const body = src.slice(start, end);
+  assert.ok(/'videoQcRetry\.lastAlertedAt':\s*clocks\.now/.test(body),
+    'must still stamp lastAlertedAt');
+  assert.ok(!/updatedAt:\s*new Date\(\)/.test(body),
+    'debounce write must not bump updatedAt — that defeats claim-awareness for abandonUnsettledRetry');
+});
+
+check('R11 Gemini completed runbook names extractVideoUri / downloadOutputToBuffer / uploadMirroredMaster before completeUnsettledRetry', () => {
+  const src = fs.readFileSync(path.join(SRC, 'services', 'videoQcRetryService.js'), 'utf8');
+  const start = src.indexOf('async function alertStuckQcRetry');
+  const end = src.indexOf('async function peekRetryProvider');
+  const body = src.slice(start, end);
+  assert.ok(/extractVideoUri/.test(body), 'Gemini runbook must name gemini.extractVideoUri');
+  assert.ok(/downloadOutputToBuffer/.test(body), 'Gemini runbook must name gemini.downloadOutputToBuffer');
+  assert.ok(/uploadMirroredMaster/.test(body), 'Gemini runbook must name gemini.uploadMirroredMaster');
+  assert.ok(/completeUnsettledRetry/.test(body), 'runbook must still name completeUnsettledRetry');
+  assert.ok(/If Atlas completed/.test(body), 'Atlas completed path (durable URL from peek) must stay in the runbook');
+});
+
+await checkAsync('R10 alert debounce does NOT bump updatedAt — a human abandon immediately after the alert can still match', async () => {
+  const h = setupHarness(RETRY_SVC_PATH);
+  const alerts = installAlertStub();
+  const unstub = installProviderStubs({ atlas: atlasCompletedPeek });
+  try {
+    const now = new Date();
+    const master = parkedRetryDoc({ veoProvider: 'atlas' });
+    const updatedAtBefore = new Date(master.updatedAt).getTime();
+    h.adStore.seed(master);
+    const out = await h.freshModule.resumeUnsettledQcRetries({
+      now, staleMinutes: 5, claimStaleMinutes: 15
+    });
+    assert.ok(out.alerted >= 1, `expected alerted>=1, got ${JSON.stringify(out)}`);
+    const afterAlert = h.adStore.get(master._id);
+    assert.ok(afterAlert.videoQcRetry.lastAlertedAt, 'must still stamp lastAlertedAt');
+    assert.strictEqual(new Date(afterAlert.updatedAt).getTime(), updatedAtBefore,
+      'alert debounce must stamp lastAlertedAt ONLY — bumping updatedAt makes claim-awareness miss for claimStaleMinutes');
+    assert.strictEqual(afterAlert.status, 'rendering');
+
+    const res = await h.freshModule.abandonUnsettledRetry(h.adStore.get(master._id), {
+      error: 'human give-up immediately after Slack',
+      now,
+      staleMinutes: 5,
+      claimStaleMinutes: 15
+    });
+    assert.strictEqual(res.matchedCount, 1,
+      'human abandon immediately after the alert must match; a bumped updatedAt is the bug');
+    const after = h.adStore.get(master._id);
+    assert.strictEqual(after.status, 'failed');
+    assert.strictEqual(wouldClaimOneMatch(after), false);
+  } finally { unstub(); alerts.restore(); h.restore(); }
+});
+
+await checkAsync('R11b Gemini completed alert detail tells a human to extract/download/mirror before completeUnsettledRetry', async () => {
+  const h = setupHarness(RETRY_SVC_PATH);
+  const alerts = installAlertStub();
+  const unstub = installProviderStubs({ gemini: geminiCompletedPeek, atlas: atlasCompletedPeek });
+  try {
+    const now = new Date();
+    const master = parkedRetryDoc({ veoProvider: 'gemini' });
+    master.videoQcRetry.triggeredByAdId = master._id;
+    h.adStore.seed(master);
+    await h.freshModule.resumeUnsettledQcRetries({
+      now, staleMinutes: 5, claimStaleMinutes: 15
+    });
+    assert.strictEqual(alerts.sent.length, 1);
+    const detail = String(alerts.sent[0].detail || '');
+    assert.ok(/extractVideoUri/.test(detail), `Gemini runbook missing extractVideoUri: ${detail}`);
+    assert.ok(/downloadOutputToBuffer/.test(detail), 'Gemini runbook missing downloadOutputToBuffer');
+    assert.ok(/uploadMirroredMaster/.test(detail), 'Gemini runbook missing uploadMirroredMaster');
+    assert.ok(/completeUnsettledRetry/.test(detail));
+    assert.ok(/If Atlas completed/.test(detail), 'Atlas durable-URL path must remain in the same runbook');
+  } finally { unstub(); alerts.restore(); h.restore(); }
+});
+
+await checkAsync('R12 Gemini rate_rejected peek is reported as rate_rejected, not processing', async () => {
+  const h = setupHarness(RETRY_SVC_PATH);
+  const alerts = installAlertStub();
+  const unstub = installProviderStubs({
+    gemini: {
+      resumeForAd: async () => ({
+        resumed: true,
+        state: 'rate_rejected',
+        body: { error: { code: 'too_many_requests' } }
+      })
+    }
+  });
+  try {
+    const now = new Date();
+    const master = parkedRetryDoc({ veoProvider: 'gemini' });
+    h.adStore.seed(master);
+    const out = await h.freshModule.resumeUnsettledQcRetries({
+      now, staleMinutes: 5, claimStaleMinutes: 15
+    });
+    assert.strictEqual(alerts.sent.length, 1);
+    assert.strictEqual(alerts.sent[0].fields.peek, 'rate_rejected',
+      `rate_rejected must not be folded into processing (got peek=${alerts.sent[0].fields.peek})`);
+    assert.ok(out.failed >= 1, `terminal rate_rejected should count as failed, got ${JSON.stringify(out)}`);
+    assert.strictEqual(out.stillRunning, 0,
+      'must not count a terminal, possibly-billed rate_rejected as still processing');
+    assert.strictEqual(h.adStore.get(master._id).status, 'rendering',
+      'alert-only sweep must not auto-abandon a rate_rejected peek');
+  } finally { unstub(); alerts.restore(); h.restore(); }
 });
 
 console.log('');
