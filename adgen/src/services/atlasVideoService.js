@@ -5052,7 +5052,7 @@ function submittedImageUrls(imageUrls, caps) {
   }
 }
 
-function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl = null, durationSec = null, seed = null }) {
+function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl = null, durationSec = null, seed = null, resolutionOverride = null }) {
   switch (caps.paramShape) {
     case 'gemini-omni':
       // duration MUST be sent explicitly (Atlas enum 4|6|8|10). Brand-script
@@ -5070,13 +5070,18 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, vide
       // A/B'ing prompt text. NOT verified for any other paramShape
       // (grok/veo/r2v) — do not copy this into those branches without
       // fetching and checking their own schemas first.
+      //
+      // resolutionOverride (feat/qc-fail-720p-retry): when a caller passes
+      // a resolution explicitly (today only the QC-fail 720p retry), it
+      // wins over BOTH the env default and caps.defaultResolution. Every
+      // other call site omits this and is byte-identical to before.
       return {
         model,
         prompt,
         images: submittedImageUrls(imageUrls, caps),
         duration: durationSec || caps.defaultDuration || PROVIDER_DEFAULT_DURATION_SEC,
         aspect_ratio: aspectRatio,
-        resolution: process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p',
+        resolution: resolutionOverride || process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p',
         ...(Number.isInteger(seed) ? { seed } : {})
       };
     case 'gemini-omni-r2v': {
@@ -5093,7 +5098,7 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, vide
         images: submittedImageUrls(imageUrls, caps),
         duration,
         aspect_ratio: aspectRatio,
-        resolution: process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p'
+        resolution: resolutionOverride || process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p'
       };
     }
     case 'grok':
@@ -5102,7 +5107,7 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, vide
         prompt,
         image_urls: submittedImageUrls(imageUrls, caps),
         duration: Math.min(caps.maxDuration, durationSec || PROVIDER_DEFAULT_DURATION_SEC),
-        resolution: '720p',
+        resolution: resolutionOverride || '720p',
         aspect_ratio: aspectRatio
       };
     case 'grok-i2v':
@@ -5115,7 +5120,7 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, vide
         prompt,
         image_url: submittedImageUrls(imageUrls, caps)[0],
         duration: durationSec || caps.defaultDuration || PROVIDER_DEFAULT_DURATION_SEC,
-        resolution: caps.defaultResolution || '720p',
+        resolution: resolutionOverride || caps.defaultResolution || '720p',
         aspect_ratio: aspectRatio
       };
     case 'veo':
@@ -5134,8 +5139,8 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, vide
   }
 }
 
-async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl = null, durationSec = null, seed = null }) {
-  const body = buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec, seed });
+async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl = null, durationSec = null, seed = null, resolutionOverride = null }) {
+  const body = buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec, seed, resolutionOverride });
 
   // refs= reports what the model RECEIVES, and names the assembled count too
   // when the shape takes fewer. Reading "refs=3" for a 1-reference model was
@@ -5437,7 +5442,25 @@ async function generateForAd({
   // genuinely wants a fresh submit regardless of any existing receipt
   // (adRegenerateService.js: an operator explicitly asked for a new video)
   // must say so explicitly.
-  allowResume = true
+  allowResume = true,
+  // retryOverride (feat/qc-fail-720p-retry): { prompt, referenceImages,
+  // model, aspectRatio, resolution }. Present ONLY for the one-shot
+  // QC-failure resubmission (see retryVideoAt720pAfterQcFailure below,
+  // and services/videoQcRetryService.js for the policy that decides when
+  // to call it). When set, this function SKIPS resolveModelAndAspect, the
+  // buildVeoPrompt cascade, and buildReferenceImages entirely, and reuses
+  // the four override values VERBATIM instead — the whole point of the
+  // retry is "same seeds, same prompt, same model/aspect, only the
+  // requested resolution changes", and re-deriving any of those from
+  // current Brand/Product/CatalogProduct state would (a) risk a
+  // byte-different prompt or a different reference stack if that state
+  // changed between attempt 1 and the retry, and (b) for references
+  // specifically, re-invoke buildReferenceImages' reframe/outpaint logic,
+  // which can itself be a SEPARATE billable Atlas call
+  // (REFRAME_OUTPAINT_MODEL) — a hidden second charge beyond the ~$0.90
+  // Omni resubmit this retry is already spending. Every other caller
+  // omits this parameter and is byte-for-byte unaffected.
+  retryOverride = null
 }) {
   if (!enabled()) return { skipped: true, reason: 'VIDEO_PROVIDER != atlas or ATLAS_API_KEY missing' };
 
@@ -5483,11 +5506,25 @@ async function generateForAd({
   // per-run override, the r2v video-seed degrade, and the Omni → Grok
   // aspect fallback (shared with prepareStoryboard).
   const platformAspect = aspectRatioForPlatformFormat(ad.platformFormat) || ad.aspectRatio || '9:16';
-  const { model, caps, renderAspect, targetAspect, aspectRatio, fallback } = resolveModelAndAspect({
-    brand, product, categories, canvasKeys: [ad.platformFormat, platformAspect],
-    platformAspect, modelOverride, hasVideoSeed: media.fileType === 'video'
-  });
-  logResolution(ad._id, model, renderAspect, targetAspect, fallback);
+  let model, caps, renderAspect, targetAspect, aspectRatio, fallback;
+  if (retryOverride) {
+    // QC-retry: pin to EXACTLY what attempt 1 used — no re-resolution, no
+    // fallback logic, so a brand/product config change between attempts
+    // cannot silently move the retry onto a different model or aspect.
+    model = retryOverride.model;
+    caps = capsFor(model);
+    aspectRatio = retryOverride.aspectRatio;
+    renderAspect = aspectRatio;
+    targetAspect = aspectRatio;
+    fallback = false;
+    console.log(`🔁 atlasVideo[ad=${ad._id}]: QC-retry resubmit — model=${model} aspect=${aspectRatio} (attempt-1 values, unchanged) resolution→${retryOverride.resolution}`);
+  } else {
+    ({ model, caps, renderAspect, targetAspect, aspectRatio, fallback } = resolveModelAndAspect({
+      brand, product, categories, canvasKeys: [ad.platformFormat, platformAspect],
+      platformAspect, modelOverride, hasVideoSeed: media.fileType === 'video'
+    }));
+    logResolution(ad._id, model, renderAspect, targetAspect, fallback);
+  }
   // Per-ad render length — wizard-stamped Ad.videoDurationSec, else
   // META_VIDEO_DURATION_SEC (10s standard; kill switch → provider 8s),
   // then clamped/enum-snapped to the resolved model's caps.
@@ -5515,12 +5552,6 @@ async function generateForAd({
   // the derived layout describes chrome sized to the final canvas, not
   // the raw video render aspect. Non-fatal on failure.
   let layoutInput = layoutInputInitial;
-  layoutInput = await refreshStaleLayoutInput({
-    layoutInput, ad, media, brand, product, categories, campaign, targetAspect, campaignRunId
-  });
-
-  const lpInput    = layoutInput?.input || null;
-  const lpSrcMedia = lpInput?.source_media || null;
 
   // Storyboard retired on the Atlas path — the Ken Burns prompt fully
   // specifies camera + timeline, so nothing is generated here. A
@@ -5529,159 +5560,188 @@ async function generateForAd({
   // prompt builder ignores it.
   const storyboard = precomputedStoryboard || null;
 
-  // Build the reference stack first so buildVeoPrompt knows whether a
-  // product-fidelity anchor actually landed (rare gap: no product_only
-  // catalog Media AND no CatalogProduct.imageUrl). Capped at the
-  // operator-selected reference count (default 3) AND the model's
-  // maxReferenceImages, so hasProductAnchor is truthful for every
-  // paramShape — including 1-ref models where nothing beyond the seed
-  // is actually transmitted.
-  //
-  // Phase 3 — when ad.referenceMediaIds is non-empty, load those Media
-  // in exact pick order and pass as orderedReferenceMedia (skips the
-  // default seed+catalog assembly). ad.mediaId already equals
-  // referenceMediaIds[0], so no double-add.
-  let orderedReferenceMedia = null;
-  if (Array.isArray(ad.referenceMediaIds) && ad.referenceMediaIds.length) {
-    const orderedIds = ad.referenceMediaIds.map(String);
-    const docs = await Media.find({ _id: { $in: ad.referenceMediaIds } }).lean();
-    const byId = new Map(docs.map(d => [String(d._id), d]));
-    orderedReferenceMedia = orderedIds
-      .map(id => byId.get(id))
-      .filter(Boolean);
-    if (orderedReferenceMedia.length < orderedIds.length) {
+  // resolvedRefPrompt: a plain capture object rather than pre-declared
+  // outer `imageUrls`/`prompt` bindings, so the NORMAL (non-retry) branch
+  // below stays byte-identical to before retryOverride existed.
+  const resolvedRefPrompt = {};
+  if (retryOverride) {
+    // ── QC-RETRY: reuse attempt 1's exact reference stack + prompt ──────
+    // Deliberately skips refreshStaleLayoutInput, buildReferenceImages
+    // (reframe/outpaint — its own possible billable call) and the whole
+    // buildVeoPrompt cascade. See this function's retryOverride param doc
+    // above for why re-deriving either would violate "same seeds, same
+    // prompt".
+    resolvedRefPrompt.imageUrls = Array.isArray(retryOverride.referenceImages) ? retryOverride.referenceImages.slice() : [];
+    resolvedRefPrompt.prompt = retryOverride.prompt;
+    console.log(
+      `🔁 atlasVideo[ad=${ad._id}]: QC-retry — reusing ${resolvedRefPrompt.imageUrls.length} attempt-1 reference image(s) ` +
+      `and the attempt-1 prompt verbatim (${resolvedRefPrompt.prompt ? resolvedRefPrompt.prompt.length : 0} chars), skipping buildReferenceImages`
+    );
+  } else {
+    layoutInput = await refreshStaleLayoutInput({
+      layoutInput, ad, media, brand, product, categories, campaign, targetAspect, campaignRunId
+    });
+
+    const lpInput    = layoutInput?.input || null;
+    const lpSrcMedia = lpInput?.source_media || null;
+
+    // Build the reference stack first so buildVeoPrompt knows whether a
+    // product-fidelity anchor actually landed (rare gap: no product_only
+    // catalog Media AND no CatalogProduct.imageUrl). Capped at the
+    // operator-selected reference count (default 3) AND the model's
+    // maxReferenceImages, so hasProductAnchor is truthful for every
+    // paramShape — including 1-ref models where nothing beyond the seed
+    // is actually transmitted.
+    //
+    // Phase 3 — when ad.referenceMediaIds is non-empty, load those Media
+    // in exact pick order and pass as orderedReferenceMedia (skips the
+    // default seed+catalog assembly). ad.mediaId already equals
+    // referenceMediaIds[0], so no double-add.
+    let orderedReferenceMedia = null;
+    if (Array.isArray(ad.referenceMediaIds) && ad.referenceMediaIds.length) {
+      const orderedIds = ad.referenceMediaIds.map(String);
+      const docs = await Media.find({ _id: { $in: ad.referenceMediaIds } }).lean();
+      const byId = new Map(docs.map(d => [String(d._id), d]));
+      orderedReferenceMedia = orderedIds
+        .map(id => byId.get(id))
+        .filter(Boolean);
+      if (orderedReferenceMedia.length < orderedIds.length) {
+        console.warn(
+          `⚠️  atlasVideo[ad=${ad._id}]: referenceMediaIds missing ` +
+          `${orderedIds.length - orderedReferenceMedia.length} Media doc(s) — using ${orderedReferenceMedia.length} found`
+        );
+      }
+    }
+    // Lifestyle video (VIDEO_LIFESTYLE_PROMPT): one seed reference only —
+    // multi-ref is a packshot fidelity device and melts people under motion.
+    // Trigger matches static preserve: lifestyle seed OR ugc variantKind.
+    // Flag-off / non-lifestyle product_image ⇒ today's resolveReferenceImageCount.
+    // Plan is the single source of effective ref count — do not re-derive.
+    const { resolveSeedStyle } = require('./imageShotHeuristicService');
+    const seedStyle = resolveSeedStyle(media);
+    const baseReferenceCount = resolveReferenceImageCount({ brand, product });
+    const lifestylePlan = resolveLifestyleVideoRefPlan({
+      baseReferenceCount,
+      seedStyle,
+      variantKind: ad.variantKind || null
+    });
+    const lifestyleVideo = lifestylePlan.lifestyleVideo;
+    const referenceCount = lifestylePlan.referenceCount;
+    // Operator ordered stacks on lifestyle still get capped to 1 distinct ref
+    // by buildReferenceImages(referenceCount=1); log when we discard extras.
+    if (lifestylePlan.forceSeedOnly && Array.isArray(orderedReferenceMedia) && orderedReferenceMedia.length > 1) {
       console.warn(
-        `⚠️  atlasVideo[ad=${ad._id}]: referenceMediaIds missing ` +
-        `${orderedIds.length - orderedReferenceMedia.length} Media doc(s) — using ${orderedReferenceMedia.length} found`
+        `⚠️  atlasVideo[ad=${ad._id}]: lifestyle video path caps references to 1 ` +
+        `(seed only; ${orderedReferenceMedia.length} operator picks reduced)`
       );
     }
-  }
-  // Lifestyle video (VIDEO_LIFESTYLE_PROMPT): one seed reference only —
-  // multi-ref is a packshot fidelity device and melts people under motion.
-  // Trigger matches static preserve: lifestyle seed OR ugc variantKind.
-  // Flag-off / non-lifestyle product_image ⇒ today's resolveReferenceImageCount.
-  // Plan is the single source of effective ref count — do not re-derive.
-  const { resolveSeedStyle } = require('./imageShotHeuristicService');
-  const seedStyle = resolveSeedStyle(media);
-  const baseReferenceCount = resolveReferenceImageCount({ brand, product });
-  const lifestylePlan = resolveLifestyleVideoRefPlan({
-    baseReferenceCount,
-    seedStyle,
-    variantKind: ad.variantKind || null
-  });
-  const lifestyleVideo = lifestylePlan.lifestyleVideo;
-  const referenceCount = lifestylePlan.referenceCount;
-  // Operator ordered stacks on lifestyle still get capped to 1 distinct ref
-  // by buildReferenceImages(referenceCount=1); log when we discard extras.
-  if (lifestylePlan.forceSeedOnly && Array.isArray(orderedReferenceMedia) && orderedReferenceMedia.length > 1) {
-    console.warn(
-      `⚠️  atlasVideo[ad=${ad._id}]: lifestyle video path caps references to 1 ` +
-      `(seed only; ${orderedReferenceMedia.length} operator picks reduced)`
-    );
-  }
-  adStage(ad._id, `reference reframe (${aspectRatio})`);
-  const imageUrls = await buildReferenceImages({
-    media, product, catalogMedias, aspectRatio, caps,
-    // Effective count from the plan — never pass baseReferenceCount here.
-    referenceCount,
-    brand,
-    // Lifestyle: ignore multi-pick ordered stacks — seed only (media at pos 0).
-    orderedReferenceMedia: lifestylePlan.forceSeedOnly ? null : orderedReferenceMedia,
-    brandId: ad.brandId || media.brandId || null,
-    productId: ad.productId || product?._id || null,
-    adId: ad._id || null,
-    campaignRunId: campaignRunId || null
-  });
-  if (!imageUrls.length) throw new Error(`atlasVideo[ad=${ad._id}]: no reference images available`);
+    adStage(ad._id, `reference reframe (${aspectRatio})`);
+    const imageUrls = await buildReferenceImages({
+      media, product, catalogMedias, aspectRatio, caps,
+      // Effective count from the plan — never pass baseReferenceCount here.
+      referenceCount,
+      brand,
+      // Lifestyle: ignore multi-pick ordered stacks — seed only (media at pos 0).
+      orderedReferenceMedia: lifestylePlan.forceSeedOnly ? null : orderedReferenceMedia,
+      brandId: ad.brandId || media.brandId || null,
+      productId: ad.productId || product?._id || null,
+      adId: ad._id || null,
+      campaignRunId: campaignRunId || null
+    });
+    if (!imageUrls.length) throw new Error(`atlasVideo[ad=${ad._id}]: no reference images available`);
 
-  // Does the stack actually contain CATALOG imagery for this product, beyond
-  // just having more than one image?
-  //
-  // WHY THIS IS NOT `imageUrls.length >= 2` ANY MORE (2026-08-05). That count
-  // was a safe proxy only because the operator-pick path GUARANTEED a catalog
-  // image: when none of the picks was a catalog mirror, expandDeterministicVideo
-  // appended one. VIDEO_OPERATOR_STACK_ONLY removed that append at owner
-  // instruction, so an operator can now ship three lifestyle/UGC picks and the
-  // count proxy would still say "product anchor present".
-  //
-  // That matters because hasProductReference gates a prompt sentence asserting
-  // "All supplied images show the exact catalog SKU — the rest are additional
-  // views of the same product" (veoPromptBuilder). On an all-UGC stack that is
-  // simply FALSE, and it is asserted to the model as the source of truth for
-  // shape, colour and label on a billable render. The honest branch (seed-only
-  // fidelity wording) is the correct one there.
-  //
-  // Auto-assembly is unaffected: refs 1..n are catalog mirrors by construction,
-  // so this still resolves true exactly as the count did.
-  const productOidStr = ad.productId ? String(ad.productId) : null;
-  const isCatalogRefFor = (doc) => {
-    const direct = doc?.metadata?.catalogProductId;
-    return productOidStr != null && direct != null && String(direct) === productOidStr;
-  };
-  const stackHasCatalogRef = Array.isArray(orderedReferenceMedia) && orderedReferenceMedia.length
-    // Operator-ordered stack: only what they actually picked is in it.
-    ? orderedReferenceMedia.some(isCatalogRefFor)
-    // Auto assembly: seed + this product's catalog mirrors.
-    : true;
-  const hasProductAnchor = imageUrls.length >= 2 && stackHasCatalogRef;
-  if (!hasProductAnchor) {
-    console.warn(
-      `⚠️  atlasVideo[ad=${ad._id}]: no product reference beyond the seed ` +
-      `(refs=${imageUrls.length}, catalogRefInStack=${stackHasCatalogRef}; ` +
-      `product imageUrl/additionalImages missing, model caps at 1 ref, or an ` +
-      `operator stack with no catalog image) — shipping seed-only fidelity wording`
-    );
-  }
-  console.log(
-    `🎬 atlasVideo[ad=${ad._id}]: model=${model} aspect=${aspectRatio} ` +
-    `refs=${imageUrls.length} (seed${hasProductAnchor ? ' + product refs' : ', no product anchor'}) submitting...`
-  );
-
-  // Camera-only prompt — the canonical brand-script overlay composites
-  // all on-screen text downstream from ad.copy + LayoutInputArtifact.
-  // Priority: (1) explicit operatorPrompt param (regenerate) → buildVeoPrompt
-  // prepend; (2) ad.videoPromptRaw → full replacement, bypass buildVeoPrompt;
-  // (3) guidance cascade → buildVeoPrompt prepend.
-  const promptArgs = {
-    brand, product, media,
-    layoutInput:  lpInput,
-    sourceMedia:  lpSrcMedia,
-    aspectRatio,
-    // Lifestyle path always ships 1 ref → seed-only fidelity wording.
-    hasProductReference: lifestylePlan.forceSeedOnly ? false : hasProductAnchor,
-    storyboard,
-    caps,
-    durationSec,
-    // Destination for prompt-profile selection (PMax → PMAX_DIRECTIVES).
-    // Meta / absent → Omni/Grok path unchanged (byte-identical).
-    platformFormat: ad.platformFormat || null,
-    // Lifestyle sibling directive set (VIDEO_LIFESTYLE_PROMPT). Absent /
-    // non-lifestyle leaves the packshot path byte-identical (B14).
-    // variantKind matches static preserve trigger (ugc OR lifestyle seed).
-    seedStyle,
-    variantKind: ad.variantKind || null
-  };
-  // Whitespace-only operatorPrompt must NOT count as an override — trim-gate
-  // branch 1 so it falls through to raw/guidance like an empty refinement.
-  const opTrim = typeof operatorPrompt === 'string' ? operatorPrompt.trim() : null;
-  let prompt;
-  if (opTrim) {
-    prompt = buildVeoPrompt({ ...promptArgs, operatorPrompt: opTrim });
-  } else if (typeof ad.videoPromptRaw === 'string' && ad.videoPromptRaw.trim()) {
-    prompt = enforceRawByteCap(ad.videoPromptRaw, caps);
-    console.warn(`⚠️ atlasVideo[ad=${ad._id}]: RAW prompt override — canonical directives bypassed`);
-  } else {
-    let effectiveGuidance = resolvePromptGuidance({ ad, product, categories, brand });
-    // Lifestyle Director creative room: when the cascade is empty, inject
-    // the intent×lifestyle snippet so mood/pacing can shape the animation
-    // without contradicting LIFESTYLE_DIRECTIVES. Never invents copy/offers
-    // (titling stays Remotion from ad.copy — untouched here).
-    if (!effectiveGuidance && lifestyleVideo) {
-      const intentKey = lifestyleIntentFromTemplate(ad.template);
-      effectiveGuidance = lifestyleVideoGuidanceForIntent(intentKey);
+    // Does the stack actually contain CATALOG imagery for this product, beyond
+    // just having more than one image?
+    //
+    // WHY THIS IS NOT `imageUrls.length >= 2` ANY MORE (2026-08-05). That count
+    // was a safe proxy only because the operator-pick path GUARANTEED a catalog
+    // image: when none of the picks was a catalog mirror, expandDeterministicVideo
+    // appended one. VIDEO_OPERATOR_STACK_ONLY removed that append at owner
+    // instruction, so an operator can now ship three lifestyle/UGC picks and the
+    // count proxy would still say "product anchor present".
+    //
+    // That matters because hasProductReference gates a prompt sentence asserting
+    // "All supplied images show the exact catalog SKU — the rest are additional
+    // views of the same product" (veoPromptBuilder). On an all-UGC stack that is
+    // simply FALSE, and it is asserted to the model as the source of truth for
+    // shape, colour and label on a billable render. The honest branch (seed-only
+    // fidelity wording) is the correct one there.
+    //
+    // Auto-assembly is unaffected: refs 1..n are catalog mirrors by construction,
+    // so this still resolves true exactly as the count did.
+    const productOidStr = ad.productId ? String(ad.productId) : null;
+    const isCatalogRefFor = (doc) => {
+      const direct = doc?.metadata?.catalogProductId;
+      return productOidStr != null && direct != null && String(direct) === productOidStr;
+    };
+    const stackHasCatalogRef = Array.isArray(orderedReferenceMedia) && orderedReferenceMedia.length
+      // Operator-ordered stack: only what they actually picked is in it.
+      ? orderedReferenceMedia.some(isCatalogRefFor)
+      // Auto assembly: seed + this product's catalog mirrors.
+      : true;
+    const hasProductAnchor = imageUrls.length >= 2 && stackHasCatalogRef;
+    if (!hasProductAnchor) {
+      console.warn(
+        `⚠️  atlasVideo[ad=${ad._id}]: no product reference beyond the seed ` +
+        `(refs=${imageUrls.length}, catalogRefInStack=${stackHasCatalogRef}; ` +
+        `product imageUrl/additionalImages missing, model caps at 1 ref, or an ` +
+        `operator stack with no catalog image) — shipping seed-only fidelity wording`
+      );
     }
-    prompt = buildVeoPrompt({ ...promptArgs, operatorPrompt: effectiveGuidance });
+    console.log(
+      `🎬 atlasVideo[ad=${ad._id}]: model=${model} aspect=${aspectRatio} ` +
+      `refs=${imageUrls.length} (seed${hasProductAnchor ? ' + product refs' : ', no product anchor'}) submitting...`
+    );
+
+    // Camera-only prompt — the canonical brand-script overlay composites
+    // all on-screen text downstream from ad.copy + LayoutInputArtifact.
+    // Priority: (1) explicit operatorPrompt param (regenerate) → buildVeoPrompt
+    // prepend; (2) ad.videoPromptRaw → full replacement, bypass buildVeoPrompt;
+    // (3) guidance cascade → buildVeoPrompt prepend.
+    const promptArgs = {
+      brand, product, media,
+      layoutInput:  lpInput,
+      sourceMedia:  lpSrcMedia,
+      aspectRatio,
+      // Lifestyle path always ships 1 ref → seed-only fidelity wording.
+      hasProductReference: lifestylePlan.forceSeedOnly ? false : hasProductAnchor,
+      storyboard,
+      caps,
+      durationSec,
+      // Destination for prompt-profile selection (PMax → PMAX_DIRECTIVES).
+      // Meta / absent → Omni/Grok path unchanged (byte-identical).
+      platformFormat: ad.platformFormat || null,
+      // Lifestyle sibling directive set (VIDEO_LIFESTYLE_PROMPT). Absent /
+      // non-lifestyle leaves the packshot path byte-identical (B14).
+      // variantKind matches static preserve trigger (ugc OR lifestyle seed).
+      seedStyle,
+      variantKind: ad.variantKind || null
+    };
+    // Whitespace-only operatorPrompt must NOT count as an override — trim-gate
+    // branch 1 so it falls through to raw/guidance like an empty refinement.
+    const opTrim = typeof operatorPrompt === 'string' ? operatorPrompt.trim() : null;
+    let prompt;
+    if (opTrim) {
+      prompt = buildVeoPrompt({ ...promptArgs, operatorPrompt: opTrim });
+    } else if (typeof ad.videoPromptRaw === 'string' && ad.videoPromptRaw.trim()) {
+      prompt = enforceRawByteCap(ad.videoPromptRaw, caps);
+      console.warn(`⚠️ atlasVideo[ad=${ad._id}]: RAW prompt override — canonical directives bypassed`);
+    } else {
+      let effectiveGuidance = resolvePromptGuidance({ ad, product, categories, brand });
+      // Lifestyle Director creative room: when the cascade is empty, inject
+      // the intent×lifestyle snippet so mood/pacing can shape the animation
+      // without contradicting LIFESTYLE_DIRECTIVES. Never invents copy/offers
+      // (titling stays Remotion from ad.copy — untouched here).
+      if (!effectiveGuidance && lifestyleVideo) {
+        const intentKey = lifestyleIntentFromTemplate(ad.template);
+        effectiveGuidance = lifestyleVideoGuidanceForIntent(intentKey);
+      }
+      prompt = buildVeoPrompt({ ...promptArgs, operatorPrompt: effectiveGuidance });
+    }
+    resolvedRefPrompt.imageUrls = imageUrls;
+    resolvedRefPrompt.prompt = prompt;
   }
+  const { imageUrls, prompt } = resolvedRefPrompt;
 
   // Omni reference-to-video consumes the seed VIDEO itself (trimmed to
   // the render window via the existing Cloudinary segment builder);
@@ -5692,9 +5752,12 @@ async function generateForAd({
 
   // Resolution the submission body will actually request — computed BEFORE the submit
   // because the cost estimate is now ledgered at the charge point, not on success.
-  const renderResolution = String(caps.paramShape || '').startsWith('gemini-omni')
+  // retryOverride.resolution (when present) wins over BOTH the env default and
+  // caps.defaultResolution — see buildSubmissionBody's resolutionOverride doc.
+  const resolutionOverride = retryOverride ? (retryOverride.resolution || null) : null;
+  const renderResolution = resolutionOverride || (String(caps.paramShape || '').startsWith('gemini-omni')
     ? (process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p')
-    : (caps.defaultResolution || '720p');
+    : (caps.defaultResolution || '720p'));
   const costUsd = estimateRenderCostUsd({ model, durationSec, resolution: renderResolution });
 
   const t0 = Date.now();
@@ -5754,7 +5817,7 @@ async function generateForAd({
       const submitT0 = Date.now();
       // Fire-and-forget stage: never awaited on this billable path.
       adStage(ad._id, `master video submit (${aspectRatio})${attempt > 1 ? ` — retry ${attempt - 1}` : ''}`);
-      predictionId = await submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec });
+      predictionId = await submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec, resolutionOverride });
       const submitMs = Date.now() - submitT0;
       console.log(`🎬 atlasVideo[ad=${ad._id}]: prediction=${predictionId} polling...`);
 
@@ -6125,8 +6188,71 @@ async function generateForAd({
     elapsedMs,
     model,
     modelFallback:      fallback,
-    costUsd
+    costUsd,
+    // Resolution actually requested (feat/qc-fail-720p-retry — feeds
+    // Ad.veoResolution). Not persisted anywhere before this field existed;
+    // callers that don't care are free to ignore it.
+    resolution:         renderResolution,
+    // True only when this call carried a retryOverride — lets a caller
+    // confirm the resubmission actually took the retry path rather than
+    // silently falling through to a normal generation.
+    isQcRetry:          !!retryOverride
   };
+}
+
+/**
+ * QC-triggered 720p retry — the ONE extra attempt this codebase makes when
+ * a delivered video fails post-render vision QC on product_fidelity or
+ * text_defects (see services/videoQcRetryService.js's
+ * maybeRetryVideoQcFailureAt720p, the single call site). Reuses attempt 1's
+ * EXACT prompt, reference stack, model and aspect ratio — verbatim, off the
+ * already-persisted Ad fields — and forces resolution:'720p' regardless of
+ * what attempt 1 used.
+ *
+ * `ad` MUST be the row that OWNS the Omni submission (a true master) — the
+ * caller is responsible for resolving a derive to its sibling master first
+ * (campaignAdsGenerationService.resolveDeriveFromMaster + findSiblingMasterAd)
+ * and for the atomic Ad.videoQcRetry claim. This function does not check
+ * either — it is a thin, reusable resubmission primitive, not the policy.
+ *
+ * allowResume:false is NOT optional here, unlike backend's sibling of this
+ * function (which has no resume concept at all). adgen's generateForAd
+ * added shouldResumeAttempt/isResuming on top of backend's version: `ad`
+ * (the just-claimed master) still carries attempt 1's OWN veoPredictionId,
+ * and shouldResumeAttempt's default (allowResume===true, attempt===1, a
+ * non-empty existingPredictionId) would otherwise RESUME — GET-poll — that
+ * same already-QC-failed prediction instead of submitting a genuinely new
+ * 720p one. Forcing allowResume:false is what makes this a real resubmit.
+ *
+ * Throws if attempt 1's veoPrompt/veoReferenceImages/veoModel/veoAspectRatio
+ * are missing — there is nothing safe to reproduce, and silently falling
+ * back to a fresh re-derivation would violate "same seeds, same prompt".
+ */
+async function retryVideoAt720pAfterQcFailure({ ad, campaignRunId = null }) {
+  if (!ad || !ad.veoPrompt || typeof ad.veoPrompt !== 'string') {
+    throw new Error(`atlasVideo: cannot QC-retry ad=${ad && ad._id} — no veoPrompt captured from attempt 1`);
+  }
+  if (!Array.isArray(ad.veoReferenceImages) || !ad.veoReferenceImages.length) {
+    throw new Error(`atlasVideo: cannot QC-retry ad=${ad && ad._id} — no veoReferenceImages captured from attempt 1`);
+  }
+  if (!ad.veoModel || typeof ad.veoModel !== 'string') {
+    throw new Error(`atlasVideo: cannot QC-retry ad=${ad && ad._id} — no veoModel captured from attempt 1`);
+  }
+  if (!ad.veoAspectRatio || typeof ad.veoAspectRatio !== 'string') {
+    throw new Error(`atlasVideo: cannot QC-retry ad=${ad && ad._id} — no veoAspectRatio captured from attempt 1`);
+  }
+  return generateForAd({
+    ad,
+    campaignRunId,
+    allowResume: false,
+    retryOverride: {
+      prompt: ad.veoPrompt,
+      referenceImages: ad.veoReferenceImages,
+      model: ad.veoModel,
+      aspectRatio: ad.veoAspectRatio,
+      resolution: '720p'
+    }
+  });
 }
 
 async function downloadToBuffer(url) {
@@ -6208,6 +6334,10 @@ async function buildPromptScaffold({
 
 module.exports = {
   generateForAd,
+  // QC-triggered 720p retry (feat/qc-fail-720p-retry) — exported for
+  // videoRouter.js's provider-dispatch wrapper and
+  // scripts/verifyQcFail720pRetry.js.
+  retryVideoAt720pAfterQcFailure,
   // Reframe hold constants — exposed so scripts/verifyReframeHoldBounded.js can
   // assert the hold-vs-lease inequality against the REAL values rather than
   // re-deriving them from source text.

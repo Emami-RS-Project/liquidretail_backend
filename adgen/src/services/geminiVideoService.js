@@ -54,7 +54,7 @@ const { adStage } = require('./adStage');
 const { uploadBufferToCloudinary } = require('./cloudinaryService');
 const { resolveGeminiVideoApiKey } = require('./geminiVideoKey');
 const lease = require('./geminiVideoLease');
-const { assembleReferences } = require('./geminiReferenceAssembly');
+const { assembleReferences, fetchAndEncodeReferenceUrls } = require('./geminiReferenceAssembly');
 const { buildVeoPrompt } = require('./veoPromptBuilder');
 const { shouldResumeAttempt } = require('./spendReceipt');
 
@@ -523,8 +523,12 @@ function extractVideoUri(body) {
  * a silent $1 loss: bootRecoveryService finds the receipt and collects the
  * master with a free GET.
  */
-async function generateForAd({ ad, prompt = null, images = null, aspectRatio, durationSec, operatorPrompt = null, allowResume = true, campaignRunId = null, modelOverride = null }) {
-  const resolution = DEFAULT_RESOLUTION;
+async function generateForAd({ ad, prompt = null, images = null, aspectRatio, durationSec, operatorPrompt = null, allowResume = true, campaignRunId = null, modelOverride = null, resolutionOverride = null }) {
+  // resolutionOverride (feat/qc-fail-720p-retry): forces the requested
+  // resolution for THIS call only — today only
+  // retryVideoAt720pAfterQcFailure passes it. Every other call site omits
+  // it and is byte-identical to before (DEFAULT_RESOLUTION, unchanged).
+  const resolution = resolutionOverride || DEFAULT_RESOLUTION;
   const secs = Number(durationSec) > 0 ? Number(durationSec) : 10;
   const resolvedModel = resolveGeminiModel(modelOverride);
   if (modelOverride && resolvedModel === MODEL && String(modelOverride).trim() !== MODEL) {
@@ -986,9 +990,110 @@ async function generateForAd({ ad, prompt = null, images = null, aspectRatio, du
   }
 }
 
+/**
+ * QC-triggered 720p retry (feat/qc-fail-720p-retry) — the Gemini sibling of
+ * atlasVideoService.retryVideoAt720pAfterQcFailure. Same call shape
+ * ({ ad, campaignRunId }) and same return contract (generateForAd's normal
+ * `{videoUrl, cloudinaryPublicId, resolution, ...}` shape, or
+ * `{skipped, ...}`) so videoRouter.js's retryVideoAt720pAfterQcFailure
+ * wrapper can dispatch to either provider symmetrically, and
+ * services/videoQcRetryService.js's consumption of `retryResult` works
+ * unchanged regardless of which provider actually ran.
+ *
+ * `ad` MUST be the row that OWNS the Gemini submission (a true master) —
+ * the caller resolves a derive to its sibling master and holds the atomic
+ * Ad.videoQcRetry claim; this function is a thin, reusable resubmission
+ * primitive, not the policy.
+ *
+ * WHY THIS IS NOT SYMMETRIC WITH THE ATLAS SIDE, despite the same call
+ * shape — read before "simplifying" this to match atlasVideoService:
+ *
+ *   1. References. Ad.veoReferenceImages is a list of URL STRINGS (what
+ *      both providers persist as the receipt). Atlas's own retryOverride
+ *      passes those URLs straight back into its submission body — Atlas
+ *      video endpoints take reference URLs. Gemini's /interactions endpoint
+ *      takes base64 BYTES (see buildRequestBody / geminiReferenceAssembly's
+ *      file header), so the URLs must be fetched and encoded first. Reusing
+ *      fetchAndEncodeReferenceUrls (geminiReferenceAssembly.js) — the exact
+ *      helper assembleReferences' own fresh-submit path already calls —
+ *      gets the identical content-type validation and MAX_TOTAL_B64_BYTES
+ *      refusal a fresh submit gets, against the FIXED attempt-1 URL list
+ *      (same seeds), rather than re-deriving a fresh stack from the ad's
+ *      CURRENT state or reimplementing fetch/validate from scratch.
+ *   2. Resume. generateForAd here has its OWN isResuming/shouldResumeAttempt
+ *      gate (unlike atlasVideoService's retryOverride branch, which needs no
+ *      such override because that gate does not exist on the Atlas side).
+ *      `ad` still carries attempt 1's OWN veoPredictionId at this point, so
+ *      the DEFAULT allowResume:true would make shouldResumeAttempt return
+ *      true and this call would GET-poll the OLD, already-QC-failed
+ *      interaction instead of submitting a genuinely new 720p one.
+ *      allowResume:false is what forces a real resubmit — same reasoning as
+ *      atlasVideoService's sibling function, stated there because adgen's
+ *      Atlas path independently grew the identical resume mechanism.
+ *   3. Everything else — the charge-point order (submit → stamp
+ *      veoPredictionId/veoProvider/etc BEFORE poll → cost ledger → poll →
+ *      settle → download+mirror → release lease) — is untouched: this
+ *      function calls the real generateForAd (with prompt/images/aspectRatio/
+ *      durationSec/resolutionOverride set to attempt 1's values) and lets it
+ *      do all of that unchanged, exactly like the Atlas-side retryOverride
+ *      branch reuses the SAME charge-point code rather than duplicating it.
+ *      The lease is still acquired through the normal FRESH branch inside
+ *      generateForAd (isResuming is forced false), so this retry still
+ *      competes fairly for the same 8-slot cap as any other submission.
+ *
+ * Throws if attempt 1's veoPrompt/veoReferenceImages/veoAspectRatio are
+ * missing — there is nothing safe to reproduce, and silently falling back
+ * to a fresh re-derivation would violate "same seeds, same prompt". veoModel
+ * falls back to the configured default (matching resolveGeminiModel's own
+ * fallback) rather than refusing outright, since Gemini has exactly one
+ * production model today and an older receipt may predate the veoModel
+ * stamp on this schema.
+ */
+async function retryVideoAt720pAfterQcFailure({ ad, campaignRunId = null }) {
+  if (!ad || !ad.veoPrompt || typeof ad.veoPrompt !== 'string') {
+    throw new Error(`gemini video: cannot QC-retry ad=${ad && ad._id} — no veoPrompt captured from attempt 1`);
+  }
+  if (!Array.isArray(ad.veoReferenceImages) || !ad.veoReferenceImages.length) {
+    throw new Error(`gemini video: cannot QC-retry ad=${ad && ad._id} — no veoReferenceImages captured from attempt 1`);
+  }
+  if (!ad.veoAspectRatio || typeof ad.veoAspectRatio !== 'string') {
+    throw new Error(`gemini video: cannot QC-retry ad=${ad && ad._id} — no veoAspectRatio captured from attempt 1`);
+  }
+  const modelOverride = (typeof ad.veoModel === 'string' && ad.veoModel.trim()) ? ad.veoModel : null;
+
+  console.log(
+    `🔁 gemini video[ad=${ad._id}]: QC-retry resubmit — reusing attempt-1 prompt/references/model/aspect ` +
+    `verbatim, resolution→720p`
+  );
+
+  // Same fetch+validate+encode path a fresh submit's assembleReferences
+  // already uses — against the FIXED attempt-1 URL list, not a re-derived
+  // current-state stack. See this function's doc comment, point 1.
+  const images = await fetchAndEncodeReferenceUrls(ad.veoReferenceImages);
+
+  return generateForAd({
+    ad,
+    campaignRunId,
+    prompt: ad.veoPrompt,
+    images,
+    aspectRatio: ad.veoAspectRatio,
+    // Same expression videoRouter.js's fresh dispatch uses — a static Ad
+    // field, not re-derived state, so it reproduces attempt 1's duration
+    // deterministically without needing its own override.
+    durationSec: ad.videoDurationSec || 10,
+    modelOverride,
+    allowResume: false,
+    resolutionOverride: '720p'
+  });
+}
+
 module.exports = {
   isEnabled,
   generateForAd,
+  // QC-triggered 720p retry (feat/qc-fail-720p-retry) — exported for
+  // videoRouter.js's provider-dispatch wrapper and
+  // scripts/verifyQcFail720pRetry.js.
+  retryVideoAt720pAfterQcFailure,
   PROVIDER,
   MODEL,
   COST_STAGE,

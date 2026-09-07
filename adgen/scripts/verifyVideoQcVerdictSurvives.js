@@ -376,16 +376,44 @@ check('F2 [THE FIX] each if (brandDoc) block has an else-arm', () => {
     'video ad ships with zero Ad.visionQc, not even a skipped/disabled stub.');
 });
 
-check('F3 [ANTI-DECOY] each else-arm actually CALLS qcAndStampVideoAd — not a string that mentions it', () => {
+check('F3 [ANTI-DECOY] each else-arm actually CALLS qcAndStampVideoAdWithRetry — the retry-capable drop-in, not the plain qcAndStampVideoAd', () => {
   for (const { elseBlock, elseOffset } of brandDocArms) {
     if (!elseBlock) continue; // already failed by F2
-    const CALL_RE = /qcAndStampVideoAd\s*\(/g;
+    // Production must run the retry-capable wrapper
+    // (services/videoQcRetryService.js). A regex that also accepted the
+    // plain `qcAndStampVideoAd(` name would stay green after a revert of
+    // the wiring, silently dropping the 720p retry on every no-brand
+    // video path.
+    const CALL_RE = /qcAndStampVideoAdWithRetry\s*\(/g;
     let found = false, cm;
     while ((cm = CALL_RE.exec(elseBlock))) {
       if (!isInsideAString(renderVideoStrings, elseOffset + cm.index)) { found = true; break; }
     }
-    assert.ok(found, 'no REAL (non-string-decoy) call to qcAndStampVideoAd found in the else-arm');
+    assert.ok(found, 'no REAL (non-string-decoy) call to qcAndStampVideoAdWithRetry found in the else-arm — the retry-capable path must be wired here');
+    const BARE_RE = /qcAndStampVideoAd(?!WithRetry)\s*\(/g;
+    let bare = false;
+    while ((cm = BARE_RE.exec(elseBlock))) {
+      if (!isInsideAString(renderVideoStrings, elseOffset + cm.index)) { bare = true; break; }
+    }
+    assert.ok(!bare, 'else-arm must not also call the plain qcAndStampVideoAd — that would mean the retry-capable wiring was reverted or duplicated incorrectly');
   }
+});
+
+check('F3b titler.js no-brand path calls qcAndStampVideoAdWithRetry (not the plain qcAndStampVideoAd)', () => {
+  const titlerRaw = fs.readFileSync(path.join(ROOT, 'src/services/titler.js'), 'utf8');
+  const { stripped: titlerSrc, stringSpans: titlerSpans } = analyzeSource(titlerRaw);
+  const CALL_RE = /qcAndStampVideoAdWithRetry\s*\(/g;
+  let found = false, cm;
+  while ((cm = CALL_RE.exec(titlerSrc))) {
+    if (!isInsideAString(titlerSpans, cm.index)) { found = true; break; }
+  }
+  assert.ok(found, 'titler.js has no REAL call to qcAndStampVideoAdWithRetry — production QC/retry runs here when ADGEN_TITLER_ENABLED=true');
+  const BARE_RE = /qcAndStampVideoAd(?!WithRetry)\s*\(/g;
+  let bare = false;
+  while ((cm = BARE_RE.exec(titlerSrc))) {
+    if (!isInsideAString(titlerSpans, cm.index)) { bare = true; break; }
+  }
+  assert.ok(!bare, 'titler.js must not call the plain qcAndStampVideoAd at a live site — reverting the WithRetry wiring silently drops the 720p retry');
 });
 
 /** Split the interior of a balanced "{...}" object literal on TOP-LEVEL
@@ -430,7 +458,9 @@ function objectLiteralEntries(objLiteralText) {
  *  others verified. */
 function findRealQcCalls(elseBlock, elseOffset) {
   const found = [];
-  const CALL_RE = /qcAndStampVideoAd\s*\(/g;
+  // Require the retry-capable name specifically (see F3). Reverting a
+  // call site to the plain qcAndStampVideoAd must fail this check.
+  const CALL_RE = /qcAndStampVideoAdWithRetry\s*\(/g;
   let cm;
   while ((cm = CALL_RE.exec(elseBlock))) {
     if (isInsideAString(renderVideoStrings, elseOffset + cm.index)) continue;

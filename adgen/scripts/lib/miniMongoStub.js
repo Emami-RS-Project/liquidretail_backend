@@ -106,6 +106,11 @@ function matches(doc, filter) {
       if (!Array.isArray(val) || val.length !== cond.length) return false;
       return val.every((v, i) => v === cond[i] || String(v) === String(cond[i]));
     }
+    // Mongo equality: `{ field: null }` matches both JSON null AND a missing
+    // path. Without this, a QC-retry exclusion `{ videoQcRetry: null }` (and
+    // any other null-equality conjunct) silently misses pre-field rows in
+    // this stub while matching them in production.
+    if (cond === null) return val === null || val === undefined;
     return val === cond;
   });
 }
