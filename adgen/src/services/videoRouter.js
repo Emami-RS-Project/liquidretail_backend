@@ -80,14 +80,19 @@ async function generateForAd({
   // Threaded through to atlasVideoService.generateForAd — see that
   // function's shouldResumeAttempt doc comment. Default true matches the
   // normal render path; adRegenerateService passes false explicitly.
-  allowResume = true
+  allowResume = true,
+  // resolutionOverride (manual regenerate-at-720p): a bare string like
+  // '720p'. Additive default-null so renderer.js and videoQcRetryService.js
+  // (which never pass it) are byte-for-byte unaffected. Distinct from
+  // atlasVideoService's retryOverride object (QC-retry verbatim resubmit).
+  resolutionOverride = null
 }) {
   const provider = activeProvider();
   const t0 = Date.now();
 
   let result;
   if (provider === 'atlas') {
-    result = await atlasVideoService.generateForAd({ ad, operatorPrompt, storyboard, modelOverride, campaignRunId, allowResume });
+    result = await atlasVideoService.generateForAd({ ad, operatorPrompt, storyboard, modelOverride, campaignRunId, allowResume, resolutionOverride });
   } else if (provider === 'gemini') {
     // Mint (renderer.js) and regenerate (adRegenerateService, aliased as
     // veoService) both call this function. NO `prompt` ARGUMENT — the
@@ -134,7 +139,8 @@ async function generateForAd({
       aspectRatio: ad.aspectRatio || '9:16',
       durationSec: ad.videoDurationSec || 10,
       allowResume,
-      campaignRunId
+      campaignRunId,
+      resolutionOverride
     });
   } else if (provider === 'vertex') {
     // DORMANT-KEEP: aiVideoReferenceService stays required so its boot IIFE

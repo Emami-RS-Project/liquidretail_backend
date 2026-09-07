@@ -833,7 +833,10 @@ async function regenerateAd({
   // same one-shot A/B rule as the video fields above). Routed into the
   // existing promptOverride slot on runImage: resolveImagePromptOverride
   // already accepts a bare string, so no new render-path argument.
-  imagePromptRaw = null
+  imagePromptRaw = null,
+  // Per-call video resolution pin (PASS-THROUGH — not persisted). Literal
+  // '720p' only. Distinct from the automatic QC-retry's retryOverride.
+  videoResolutionOverride = null
 }) {
   const adId      = String(ad._id);
   const kind      = ad.kind || 'image';
@@ -864,6 +867,7 @@ async function regenerateAd({
     (videoModel ? ` videoModel=${videoModel}` : '') +
     (videoPromptRaw ? ' videoPromptRaw=true' : '') +
     (videoPromptGuidance && !videoPromptRaw ? ' videoPromptGuidance=true' : '') +
+    (videoResolutionOverride ? ` videoResolutionOverride=${videoResolutionOverride}` : '') +
     (imagePromptRaw ? ' imagePromptRaw=true' : '') +
     // Flags only — never the override text. imagePromptRaw runs ~8k chars and
     // the refinement may legitimately be empty when raw carries the intent.
@@ -912,7 +916,8 @@ async function regenerateAd({
     if (kind === 'video') {
       videoOutcome = await runVideoFull(adId, prompt, progressRun, videoModel, {
         videoPromptRaw,
-        videoPromptGuidance
+        videoPromptGuidance,
+        resolutionOverride: videoResolutionOverride || null
       });
     } else {
       // imagePromptRaw and promptOverride are mutually exclusive at the route
@@ -1370,7 +1375,8 @@ async function runClaimedRegeneration(ad, req = {}) {
     if (kind === 'video') {
       videoOutcome = await runVideoFull(adId, prompt, progressRun, req.videoModel || null, {
         videoPromptRaw:      req.videoPromptRaw || null,
-        videoPromptGuidance: req.videoPromptGuidance || null
+        videoPromptGuidance: req.videoPromptGuidance || null,
+        resolutionOverride:  req.videoResolutionOverride || null
       });
     } else {
       const imagePromptRaw = req.imagePromptRaw || null;
@@ -1618,6 +1624,10 @@ async function loadBrand(adId) {
 // branches fire:
 //   raw     → ad.videoPromptRaw path (logs "canonical directives bypassed")
 //   prepend → operatorPrompt → buildVeoPrompt OPERATOR REFINEMENT header
+// videoOpts.resolutionOverride is likewise per-call only (manual
+// regenerate-at-720p). It pins the provider resolution on this
+// generateForAd call without touching prompt/model/aspect resolution.
+// Distinct from the automatic QC-retry's retryOverride object.
 // MONEY: still exactly one generateForAd → one billable Omni submit.
 async function runVideoFull(adId, prompt, progressRun = null, videoModel = null, videoOpts = {}) {
   // Stage 1 — context prep (model + aspect resolution, layoutInput
@@ -1637,6 +1647,9 @@ async function runVideoFull(adId, prompt, progressRun = null, videoModel = null,
   });
   if (path === 'raw') {
     console.log(`🔁 regenerate[ad=${adId}]: videoPromptRaw active — canonical directives will be bypassed`);
+  }
+  if (videoOpts.resolutionOverride) {
+    console.log(`🔁 regenerate[ad=${adId}]: resolutionOverride=${videoOpts.resolutionOverride}`);
   }
 
   // UGC-ads Phase 5 — same passthrough gate as the mint-time render path.
@@ -1714,7 +1727,8 @@ async function runVideoFull(adId, prompt, progressRun = null, videoModel = null,
       operatorPrompt,
       storyboard,
       modelOverride: videoModel,
-      allowResume: false
+      allowResume: false,
+      resolutionOverride: videoOpts.resolutionOverride || null
     });
     if (veoResult.skipped) {
       // A Gemini cap-miss is NOT a failure. generateForAd returns
