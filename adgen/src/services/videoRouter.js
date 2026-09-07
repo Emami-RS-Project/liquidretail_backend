@@ -170,8 +170,55 @@ async function generateForAd({
   return result;
 }
 
+// QC-triggered 720p retry (feat/qc-fail-720p-retry). Unlike backend's sibling
+// of this function (Atlas-only — Vertex there has no resolution param to
+// force), adgen ALSO runs a real second video-generation provider in
+// production (VIDEO_PROVIDER=gemini is the live override on adgen-renderer —
+// see the Direct-Gemini cutover in CLAUDE.md).
+//
+// Dispatch keys off the ad's OWN recorded provider (`Ad.veoProvider`), NOT
+// `process.env.VIDEO_PROVIDER`. Production QC/retry actually executes inside
+// the **titler** process (`ADGEN_TITLER_ENABLED=true`), which has no
+// VIDEO_PROVIDER=gemini dashboard override and never carries ATLAS_API_KEY
+// (`config.js`: the titler role must never call Atlas). Env-based dispatch
+// therefore resolved every Gemini-originated master to 'atlas' inside the
+// titler, atlasVideoService returned `{skipped:true}` for the missing key,
+// and videoQcRetryService permanently stamped `videoQcRetry.outcome='skipped'`
+// — consuming the one-shot claim forever. The ad's own provider record is
+// the source of truth; `activeProvider()` is only the fallback for
+// legacy/pre-cutover rows where `ad.veoProvider` is null/undefined.
+//
+//   atlas   → atlasVideoService.retryVideoAt720pAfterQcFailure
+//   gemini  → geminiVideoService.retryVideoAt720pAfterQcFailure
+//   vertex / anything else → { skipped:true, reason }
+//
+// The resolved `provider` string is included on EVERY return value so
+// videoQcRetryService can stamp `Ad.veoProvider` on the asset-swap write
+// (atlasVideoService never writes the field itself — a pre-existing gap
+// this port is not licensed to fix inside that file).
+//
+// Never silently no-op and never submit to the wrong provider's API shape —
+// the caller (services/videoQcRetryService.js's
+// maybeRetryVideoQcFailureAt720p) treats a `skipped` result exactly like a
+// retry that could not be attempted and falls back to the normal (attempt-1)
+// fail-closed verdict, the same contract generateForAd's own provider arms
+// already rely on above.
+async function retryVideoAt720pAfterQcFailure({ ad, campaignRunId = null }) {
+  const provider = ad.veoProvider || activeProvider();
+  if (provider === 'atlas') {
+    const result = await atlasVideoService.retryVideoAt720pAfterQcFailure({ ad, campaignRunId });
+    return { ...result, provider };
+  }
+  if (provider === 'gemini') {
+    const result = await geminiVideoService.retryVideoAt720pAfterQcFailure({ ad, campaignRunId });
+    return { ...result, provider };
+  }
+  return { skipped: true, reason: `QC-triggered 720p retry is not supported for provider=${provider} (only 'atlas' and 'gemini' implement it)`, provider };
+}
+
 module.exports = {
   generateForAd,
   prepareStoryboard,
-  activeProvider
+  activeProvider,
+  retryVideoAt720pAfterQcFailure
 };

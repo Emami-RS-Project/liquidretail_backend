@@ -82,7 +82,23 @@ const { assertBackendRoot } = require('./lib/siblingBackend');
 // ./adCloudinaryCleanup; that file requires ../models/Ad and
 // ./cloudinaryService (lazy, still counted). Measured via this harness
 // itself: 515/515 resolved.
-const FREEZE_N = 515;
+//
+// Bumped (on the feat/qc-fail-720p-retry branch, based off the pre-Cloudinary-
+// hygiene 512) 512 -> 519 -> 533 -> 537 -> 536 across four rounds of the
+// QC-retry feature: the new src/services/videoQcRetryService.js's own
+// requires; ownership/unsettled-redesign requires (../config, ./alertService,
+// ../models/CampaignRun, ./campaignRunGuards, ./bootRecoveryService,
+// ./geminiVideoService, ./atlasVideoService, plus renderer.js/titler.js call
+// sites switching to videoQcRetryService); qcRetrySweepExclusion.js leaf +
+// titler.js's receipt-aware drain require('./spendReceipt'); then -1 when the
+// alert-and-manual crash-recovery simplification dropped
+// resumeUnsettledQcRetries's campaignAdsGenerationService requirement
+// (completeUnsettledRetry still needs it, kept for a human-run script).
+//
+// Merging the two branches' independent bumps from the same 512 base is NOT
+// a sum of the two deltas — re-measured via this harness itself after both
+// sets of changes landed together.
+const FREEZE_N = 539;
 const {
   fileExists,
   dirExists,

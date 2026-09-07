@@ -1367,19 +1367,42 @@ async function renderVideo(ad) {
       // all, reopening the exact CatalogProduct-fallback bug this merge
       // exists to close. Found in a second adversarial (Grok xhigh) round,
       // specifically as "the review comment that would spring it."
-      const { qcAndStampVideoAd } = require('./brandScriptExecutor');
+      // qcAndStampVideoAdWithRetry (feat/qc-fail-720p-retry) — drop-in
+      // replacement for brandScriptExecutor.qcAndStampVideoAd. Runs QC +
+      // persists the verdict exactly as before, and — only on a
+      // product_fidelity/text_defects failure — attempts the one automatic
+      // 720p retry. Pass/skip/disabled/ineligible-failure outcomes are
+      // byte-identical to the direct call this replaces. campaignRunId is
+      // the SAME `runId` this function already resolved from `ad`'s own
+      // campaignRunIds at the top (line ~1176) — the derive's own run, not
+      // the master's; the retry policy re-resolves the master's own most
+      // recent campaignRunIds internally when it needs the master's run.
+      const { qcAndStampVideoAdWithRetry } = require('./videoQcRetryService');
       const beat = startAdHeartbeat(adId);
+      let qc;
       try {
-        await qcAndStampVideoAd({
+        qc = await qcAndStampVideoAdWithRetry({
           ad: {
             ...adFinal,
             veoReferenceImages: master.veoReferenceImages || [],
             videoDurationSec:   master.videoDurationSec || adFinal.videoDurationSec || null
           },
-          deliveredUrl: master.veoVideoUrl
+          deliveredUrl: master.veoVideoUrl,
+          campaignRunId: runId
         });
       } finally {
         beat.stop();
+      }
+      // Unsettled here means the MASTER is parked, not this derive.
+      // Attempt-1 already stamped the derive 'failed'. Do NOT early-return:
+      // the existing promote $in ['rendering','draft'] misses, and
+      // settleNonDraftTerminal + bumpRunCounter('failed') is correct for
+      // the derive. Do not clear the master's claim from here.
+      if (qc && qc.settle === 'unsettled') {
+        console.warn(
+          `renderer[${WORKER_ID}]: VIDEO DERIVE ad=${shortId} — sibling master ${qc.masterAdId} ` +
+          `parked on QC-retry receipt ${qc.predictionId || '(none)'}; derive settles failed`
+        );
       }
     }
 
@@ -1598,12 +1621,39 @@ async function renderVideo(ad) {
     // titling render. adFinal already carries the correct veoReferenceImages
     // here (the persist-write just above wrote them from veoResult before
     // this re-read), unlike the derive path, so no extra merge is needed.
-    const { qcAndStampVideoAd } = require('./brandScriptExecutor');
+    // qcAndStampVideoAdWithRetry (feat/qc-fail-720p-retry) — see the
+    // identical comment on the VIDEO DERIVE no-brand arm above. `runId` is
+    // the SAME local var resolved at the top of this function from `ad`'s
+    // campaignRunIds — `ad` IS the master here, so this is the master's own
+    // run, unlike the derive arm above.
+    const { qcAndStampVideoAdWithRetry, touchCampaignRun } = require('./videoQcRetryService');
     const beat = startAdHeartbeat(adId);
+    let qc;
     try {
-      await qcAndStampVideoAd({ ad: adFinal, deliveredUrl: veoResult.videoUrl });
+      qc = await qcAndStampVideoAdWithRetry({ ad: adFinal, deliveredUrl: veoResult.videoUrl, campaignRunId: runId });
     } finally {
       beat.stop();
+    }
+    if (qc && qc.settle === 'unsettled') {
+      // Do NOT promote. Do NOT settleNonDraftTerminal (it clears claimedByWorker).
+      // Do NOT bump succeeded/failed. processAd sees a normal return, not a throw.
+      console.warn(
+        `renderer[${WORKER_ID}]: VIDEO MASTER ad=${shortId} QC 720p retry unsettled ` +
+        `(receipt ${qc.predictionId || 'absent'}) — leaving status:'rendering' with claim held`
+      );
+      alerts.notifyAsync({
+        level:  'warn',
+        title:  'Video master parked on a QC-retry spend receipt — awaiting free recovery',
+        key:    `video-qc-retry-unsettled:${ad._id}`,
+        fields: {
+          ad:           String(ad._id),
+          run:          runId || null,
+          predictionId: qc.predictionId || null,
+          note:         'claim intentionally held so claimOne cannot re-take; if this process dies the QC-retry sweep peeks (GET) and Slack-alerts a human'
+        }
+      });
+      await touchCampaignRun(ad.campaignRunIds);
+      return;
     }
   }
 
@@ -2504,8 +2554,10 @@ function startBootRecoverySweep() {
     if (stopping || inFlightPass) return;
     if (!isAdgenRendererEnabled()) return;   // backend owns this collection right now
     inFlightPass = true;
-    resumeInFlightAds()
-      .then((out) => {
+    const { resumeUnsettledQcRetries } = require('./videoQcRetryService');
+    (async () => {
+      try {
+        const out = await resumeInFlightAds();
         if (out && (out.recovered || out.failed || out.stillRunning || out.recoverableNotCollected)) {
           console.log(
             `renderer[${WORKER_ID}]: boot recovery — considered=${out.considered} ` +
@@ -2513,8 +2565,25 @@ function startBootRecoverySweep() {
             `recoverableNotCollected=${out.recoverableNotCollected || 0} unknown=${out.unknown || 0}`
           );
         }
-      })
-      .catch(err => console.warn(`renderer[${WORKER_ID}]: boot recovery failed — ${err.message}`))
+      } catch (err) {
+        console.warn(`renderer[${WORKER_ID}]: boot recovery failed — ${err.message}`);
+      }
+      try {
+        const qcOut = await resumeUnsettledQcRetries();
+        if (qcOut && (qcOut.alerted || qcOut.skipped || qcOut.failed || qcOut.stillRunning || qcOut.recoverableNotCollected || qcOut.unknown)) {
+          console.log(
+            `renderer[${WORKER_ID}]: qc-retry sweep — considered=${qcOut.considered} ` +
+            `alerted=${qcOut.alerted || 0} skipped(pre-submit)=${qcOut.skipped || 0} ` +
+            `peekFailed=${qcOut.failed || 0} stillRunning=${qcOut.stillRunning} ` +
+            `completedUncollected=${qcOut.recoverableNotCollected || 0} ` +
+            `unknown=${qcOut.unknown || 0}`
+          );
+        }
+      } catch (err) {
+        console.warn(`renderer[${WORKER_ID}]: qc-retry recovery failed — ${err.message}`);
+      }
+    })()
+      .catch((err) => console.warn(`renderer[${WORKER_ID}]: boot recovery tick failed — ${err.message}`))
       .finally(() => { inFlightPass = false; });
   };
 
@@ -2807,6 +2876,20 @@ async function shutdown() {
     console.log(`renderer[${WORKER_ID}] clean drain in ${drainedMs}ms — no forced release needed`);
   }
 
+  // QC-retry extra-claims (derive-triggered idle masters we owned for the
+  // retry window) are NOT in this process's inFlight set. Restore any that
+  // never reached a billable retry POST; leave post-submit receipts claimed
+  // so a human can resolve the Slack stuck-retry alert. Runs on clean drain too.
+  try {
+    const { releaseUnsubmittedQcRetryOwnership } = require('./videoQcRetryService');
+    const n = await releaseUnsubmittedQcRetryOwnership(WORKER_ID);
+    if (n) {
+      console.warn(`renderer[${WORKER_ID}] restored ${n} unsubmitted QC-retry claim(s) on shutdown`);
+    }
+  } catch (err) {
+    console.warn(`renderer[${WORKER_ID}] QC-retry shutdown release failed: ${err.message}`);
+  }
+
   // Evict any reframe claims THIS process still holds. Without this, a
   // peer renderer that races us on the same media+aspect polls for ~6min
   // (26 attempts × 1s..26s backoff) before giving up and cropping.
@@ -2826,4 +2909,13 @@ async function shutdown() {
   }
 }
 
-module.exports = { run, shutdown };
+module.exports = {
+  run,
+  shutdown,
+  // Exported for services/videoQcRetryService.js (feat/qc-fail-720p-retry),
+  // lazily required there (the same load-time-cycle reason this file's own
+  // comments give for other lazy requires) so the QC-retry policy can
+  // resolve a derive to its sibling master before regenerating it. Pure
+  // read query — see this function's own header comment.
+  findSiblingMasterAd
+};

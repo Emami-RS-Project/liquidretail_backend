@@ -164,6 +164,34 @@ if (body) {
   ok('C the release is still scoped to rendering rows', /status:\s*['"]rendering['"]/.test(body));
 }
 
+// ── E. titler.shutdown must be receipt-aware too (F1). The QC-retry path
+// is a billable submit inside titleAd; SHUTDOWN_DRAIN_MS is 25s and a
+// Gemini retry runs ~20 min, so drain expiry mid-retry is the common case.
+const titlerSrc = fs.readFileSync(path.join(ROOT, 'src/services/titler.js'), 'utf8');
+const titlerShutdown = stripComments(functionBody(titlerSrc, 'async function shutdown(') || '');
+ok('E titler shutdown() found and brace-matched', !!titlerShutdown);
+
+if (titlerShutdown) {
+  ok('E titler drain path does NOT call unguarded releaseClaim on remaining ids',
+     !/remaining\.map\(\s*\(id\)\s*=>\s*releaseClaim\(id/.test(titlerShutdown),
+     'unguarded releaseClaim on drain would orphan a paid 720p retry (F1)');
+  ok('E titler drain path calls forceReleaseClaimsOnDrainTimeout',
+     /forceReleaseClaimsOnDrainTimeout\s*\(/.test(titlerShutdown),
+     'shutdown must route remaining claims through the receipt-aware helper');
+}
+
+const drainHelper = stripComments(functionBody(titlerSrc, 'async function forceReleaseClaimsOnDrainTimeout(') || '');
+ok('E forceReleaseClaimsOnDrainTimeout found', !!drainHelper);
+if (drainHelper) {
+  ok('E titler drain helper applies receiptFree()',
+     /receiptFree\s*\(/.test(drainHelper),
+     'titler drain helper must compose receiptFree — a paid retry claim must not be force-released');
+  ok('E titler drain helper does NOT spread RECEIPT_FREE',
+     !/\.\.\.\s*RECEIPT_FREE/.test(drainHelper));
+  ok('E titler drain helper is scoped to this worker',
+     /claimedByWorker:\s*WORKER_ID/.test(drainHelper));
+}
+
 console.log('');
 if (failed) {
   console.log(`❌ verifyShutdownReleaseReceiptAware: ${failed} FAILED`);

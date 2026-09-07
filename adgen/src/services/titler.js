@@ -46,7 +46,15 @@ const Media       = require('../models/Media');
 const CampaignRun = require('../models/CampaignRun');
 const alerts      = require('./alertService');
 const { adStage } = require('./adStage');
-const { renderBrandScriptAndSave, qcAndStampVideoAd } = require('./brandScriptExecutor');
+const { renderBrandScriptAndSave } = require('./brandScriptExecutor');
+// qcAndStampVideoAdWithRetry (feat/qc-fail-720p-retry) — drop-in
+// replacement for brandScriptExecutor.qcAndStampVideoAd at the no-brand QC
+// call site below. Runs QC + persists the verdict exactly as before, and —
+// only on a product_fidelity/text_defects failure — attempts the one
+// automatic 720p retry. Pass/skip/disabled/ineligible-failure outcomes are
+// byte-identical to calling brandScriptExecutor.qcAndStampVideoAd directly.
+const { qcAndStampVideoAdWithRetry } = require('./videoQcRetryService');
+const { qcRetryGenericSweepExclusion } = require('./qcRetrySweepExclusion');
 const { classifyRunAdOutcome, buildRunReconciliationUpdate } = require('./campaignRunGuards');
 const { startRunHeartbeat } = require('./campaignRunHeartbeat');
 const { renderQueueStats } = require('./remotionRenderService');
@@ -173,6 +181,36 @@ async function releaseClaim(adId, reason = null) {
   } catch (err) {
     warn(`release claim failed for ${adId}: ${err.message}`);
   }
+}
+
+/**
+ * F1: SIGTERM drain force-release. Mirrors renderer.shutdown's
+ * receiptFree() composer. A row holding a live QC-retry receipt (or any
+ * billable receipt) must NOT be force-released — a peer titler re-claiming
+ * would re-QC the stale asset and settle the row, orphaning the paid
+ * retry. The crash-recovery sweep peeks + Slack-alerts a human; it does
+ * not steal. Holding the claim keeps claimOne off the row until then.
+ *
+ * Receipt-FREE claims are released so a peer can pick up unbilled work.
+ * We do not wait out the retry; we just stop blindly dropping a claim
+ * that might be sitting on unrecorded spend.
+ *
+ * Exported for scripts/verifyQcFail720pRetry.js R7 / verifyShutdownReleaseReceiptAware.
+ */
+async function forceReleaseClaimsOnDrainTimeout(adIds) {
+  const ids = (adIds || []).filter(Boolean);
+  if (!ids.length) return { released: 0, held: 0 };
+  const { receiptFree } = require('./spendReceipt');
+  const res = await Ad.updateMany(
+    receiptFree({ _id: { $in: ids }, claimedByWorker: WORKER_ID }),
+    { $set: { claimedByWorker: null, claimedAt: null } }
+  );
+  const released = res.modifiedCount || res.nModified || 0;
+  let held = 0;
+  try {
+    held = await Ad.countDocuments({ _id: { $in: ids }, claimedByWorker: WORKER_ID });
+  } catch (_) { /* countDocuments is telemetry; the receipt guard is the write */ }
+  return { released, held };
 }
 
 // ── per-ad titling heartbeat (DUPLICATE OF renderer.js, see header) ────────
@@ -532,7 +570,25 @@ async function titleAd(ad) {
           }
         : adFinal;
       const deliveredUrl = adFinal.renderUrl || adFinal.veoVideoUrl;
-      await qcAndStampVideoAd({ ad: qcAd, deliveredUrl });
+      // campaignRunId via the same runIdOf(ad) helper this function already
+      // uses below for acquireRunHeartbeat — `ad` is this row's own record,
+      // so this is its own most recent run, matching renderer.js's
+      // equivalent no-brand arms.
+      const qc = await qcAndStampVideoAdWithRetry({ ad: qcAd, deliveredUrl, campaignRunId: runIdOf(ad) });
+      if (qc && qc.settle === 'unsettled' && !isDerive) {
+        warn(
+          `VIDEO ${label} ad=${shortId} QC 720p retry unsettled ` +
+          `(receipt ${qc.predictionId || 'absent'}) — leaving status:'rendering' with claim held`
+        );
+        const { touchCampaignRun } = require('./videoQcRetryService');
+        await touchCampaignRun(ad.campaignRunIds);
+        return { earlyReturn: true, unsettled: true };
+      }
+      if (qc && qc.settle === 'unsettled' && isDerive) {
+        warn(
+          `VIDEO ${label} ad=${shortId} — sibling master ${qc.masterAdId} parked on QC-retry receipt; derive settles failed`
+        );
+      }
     } finally {
       beat.stop();
     }
@@ -799,6 +855,13 @@ async function reclaimStaleTitlerClaims() {
       titlingNeeded:   true,
       claimedByWorker: { $ne: null },
       claimedAt:       { $lt: cutoff },
+      // Defence: do not clear a QC-retry in-flight / unsettled claim
+      // (would recreate F-NEW-2 on a paid receipt). These rows now sit
+      // until a human acts (crash-recovery is alert-only), so this
+      // exclusion is load-bearing for longer, not shorter. Settled
+      // outcomes and rows with no retry object remain reclaimable.
+      // Single source: videoQcRetryService.qcRetryGenericSweepExclusion.
+      ...qcRetryGenericSweepExclusion()
     },
     { $set: { claimedByWorker: null, claimedAt: null } }
   );
@@ -877,13 +940,32 @@ async function shutdown() {
 
   if (state.inFlight.size === 0) {
     log('clean drain in 0ms — no forced release needed');
-    return;
+  } else {
+    // Force-release remaining RECEIPT-FREE claims so a peer titler picks
+    // them up. Receipt-HOLDING claims (including an in-flight QC 720p
+    // retry — titleAd → qcAndStampVideoAdWithRetry → billable submit)
+    // stay claimed so a human can resolve the Slack stuck-retry alert
+    // (the sweep peeks + alerts; it does not steal or auto-complete).
+    // The older comment that "this cannot cause a second billable Atlas
+    // submission" predates the QC-retry feature and is no longer true.
+    const remaining = [...state.inFlight];
+    log(`drain window exhausted — force-releasing ${remaining.length} receipt-free claim(s) for peer pickup`);
+    const drain = await forceReleaseClaimsOnDrainTimeout(remaining);
+    if (drain.held) {
+      log(`kept ${drain.held} receipt-holding claim(s) for human resolution of a stuck QC retry`);
+    }
   }
 
-  // Force-release remaining claims so a peer titler picks them up.
-  const remaining = [...state.inFlight];
-  log(`drain window exhausted — force-releasing ${remaining.length} claim(s) for peer pickup`);
-  await Promise.all(remaining.map((id) => releaseClaim(id, 'sigterm-drain-timeout')));
+  // Derive-triggered QC-retry extra-claims the sibling master, which is
+  // NOT in state.inFlight. Restore unsubmitted ones; leave post-submit
+  // receipts claimed so a human can resolve the Slack stuck-retry alert.
+  try {
+    const { releaseUnsubmittedQcRetryOwnership } = require('./videoQcRetryService');
+    const n = await releaseUnsubmittedQcRetryOwnership(WORKER_ID);
+    if (n) log(`restored ${n} unsubmitted QC-retry claim(s) on shutdown`);
+  } catch (err) {
+    warn(`QC-retry shutdown release failed: ${err.message}`);
+  }
 }
 
 module.exports = {
@@ -900,6 +982,7 @@ module.exports = {
   // scripts/lib/miniMongoStub.js's use in verifyTitlingRecoverability.js),
   // not just a regex over the source.
   reclaimStaleTitlerClaims,
+  forceReleaseClaimsOnDrainTimeout,
   TITLER_CLAIM_STALE_MIN,
   // Exported for scripts/verifyTitlingDualClaim.js — same reason
   // reclaimStaleTitlerClaims is exported above. That harness has to prove

@@ -40,6 +40,12 @@ if (sweepBody) {
     /require\(['"]\.\/bootRecoveryService['"]\)/.test(body));
   check('A3: calls resumeInFlightAds() inside the tick',
     /resumeInFlightAds\(\)/.test(body));
+  check('A3b: tick also CALLS resumeUnsettledQcRetries() (not a comment or log string)',
+    /resumeUnsettledQcRetries\s*\(/.test(
+      body.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+        .replace(/'(?:\\.|[^'\\])*'/g, "''").replace(/"(?:\\.|[^"\\])*"/g, '""')
+        .replace(/`(?:\\.|[^`\\])*`/g, '``')
+    ));
   check('A4: reads BOOT_RECOVERY_INTERVAL_MIN with default 5',
     /BOOT_RECOVERY_INTERVAL_MIN[\s\S]*?\|\|\s*5/.test(body));
   check('A5: gated on isAdgenRendererEnabled() — same pattern as titlingResumeSweep',

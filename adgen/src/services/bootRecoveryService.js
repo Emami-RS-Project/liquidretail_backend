@@ -132,6 +132,7 @@ const {
   TITLING_PENDING,
   fallbackPosterUrl
 } = require('./titlingResumeService');
+const { qcRetryGenericSweepExclusion } = require('./qcRetrySweepExclusion');
 
 // Five missed 60s heartbeats. Lower than REAP_STALE_MIN (15) on purpose: the
 // point is to recover the asset BEFORE the reaper or a re-run gets involved.
@@ -244,7 +245,13 @@ function buildRecoverySweepFilter({
           { titlingNeeded: { $ne: true } },
           { veoVideoUrl:   { $in: [null, ''] } }
         ]
-      }
+      },
+      // ── QC-retry rows: the QC-retry sweep peeks+alerts (it does not
+      // auto-complete). This generic sweep must not take the wrong
+      // (draft+title) completion write. Single source:
+      // qcRetrySweepExclusion.js (settled outcomes + no-retry-object).
+      // Do not duplicate the list here.
+      qcRetryGenericSweepExclusion()
     ]
   };
 }
