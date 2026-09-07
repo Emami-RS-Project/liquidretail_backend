@@ -394,6 +394,11 @@ async function restorePreRetryAndMaybeRelease(masterId, snapshots, {
 }
 
 function snapshotsFromClaim(claim) {
+  // Prefer the persisted preRetry* fields (written from the claim's own
+  // DB row, not the caller's in-memory ad). Falling back to claim.status
+  // / renderError / basePlate covers the crash-between-claim-and-persist
+  // window, when those fields still hold the post-QC values because the
+  // rendering flip has not run yet.
   const retry = (claim && claim.videoQcRetry) || {};
   return {
     preRetryStatus: retry.preRetryStatus != null ? retry.preRetryStatus : claim.status,
@@ -403,6 +408,14 @@ function snapshotsFromClaim(claim) {
     preRetryBasePlate: Object.prototype.hasOwnProperty.call(retry, 'preRetryBasePlate')
       ? retry.preRetryBasePlate
       : (Object.prototype.hasOwnProperty.call(claim, 'basePlate') ? claim.basePlate : null)
+  };
+}
+
+function snapshotsFromDbRow(row) {
+  return {
+    preRetryStatus: row.status,
+    preRetryRenderError: row.renderError ?? null,
+    preRetryBasePlate: row.basePlate ?? null
   };
 }
 
@@ -625,9 +638,13 @@ async function maybeRetryVideoQcFailureAt720p({ ad, visionQc, brandName, campaig
         outcome: null,
         predictionId: null,
         error: null,
-        preRetryStatus: masterAd.status,
-        preRetryRenderError: Object.prototype.hasOwnProperty.call(masterAd, 'renderError') ? masterAd.renderError : null,
-        preRetryBasePlate: Object.prototype.hasOwnProperty.call(masterAd, 'basePlate') ? masterAd.basePlate : null,
+        // preRetryStatus / preRetryRenderError / preRetryBasePlate are
+        // NOT copied from the caller's in-memory masterAd — that object
+        // was read BEFORE qcAndStampVideoAd persisted status:'failed'
+        // and is stale (master-triggered path: in-memory 'rendering').
+        // They are written in the follow-up below from THIS query
+        // result, whose status/renderError/basePlate the $set never
+        // touches.
         attempt1PredictionId: masterAd.veoPredictionId || null,
         attempt1VeoVideoUrl: masterAd.veoVideoUrl || null,
         heldExistingCallerClaim,
@@ -641,7 +658,26 @@ async function maybeRetryVideoQcFailureAt720p({ ad, visionQc, brandName, campaig
   // the claim — all fail closed to "do not retry, keep attempt-1's verdict".
   if (!claim) return null;
 
-  const snapshots = snapshotsFromClaim(claim);
+  // Snapshot from the DB row the claim just observed. Must land BEFORE
+  // the rendering flip below, or a crash would leave snapshotsFromClaim
+  // falling back to status:'rendering'.
+  const snapshots = snapshotsFromDbRow(claim);
+  const snapRes = await Ad.updateOne(
+    { _id: claim._id, 'videoQcRetry.attempted': true },
+    { $set: {
+      'videoQcRetry.preRetryStatus': snapshots.preRetryStatus,
+      'videoQcRetry.preRetryRenderError': snapshots.preRetryRenderError,
+      'videoQcRetry.preRetryBasePlate': snapshots.preRetryBasePlate
+    } }
+  );
+  if (!matched(snapRes)) {
+    warnMissedWrite('preRetry snapshot persist', claim._id, 'claim held but snapshot fields not written — inline restore still uses in-memory snapshots');
+  }
+  if (claim.videoQcRetry) {
+    claim.videoQcRetry.preRetryStatus = snapshots.preRetryStatus;
+    claim.videoQcRetry.preRetryRenderError = snapshots.preRetryRenderError;
+    claim.videoQcRetry.preRetryBasePlate = snapshots.preRetryBasePlate;
+  }
   const held = claim.claimedByWorker === workerId();
 
   if (!claim.veoPrompt || !Array.isArray(claim.veoReferenceImages) || !claim.veoReferenceImages.length
@@ -1311,15 +1347,19 @@ async function alertStuckQcRetry({ ad, retryId, peekState, provider, clocks }) {
         'Manual next steps (from adgen/, ADGEN_ROLE set):',
         '1. Confirm this is POST-submit (veoPredictionId !== videoQcRetry.attempt1PredictionId). Pre-submit deaths self-heal automatically.',
         `2. Peek ${retryId || '<predictionId>'} via ${provider || 'atlas|gemini'}.resumeForAd — GET only, never generateForAd / retryVideoAt720pAfterQcFailure.`,
-        '3. If completed: stamp claimedByWorker to THIS worker, then call completeUnsettledRetry({ mode:\'recovery\', ... }) (kept for this purpose).',
-        '4. If failed / give-up: call abandonUnsettledRetry (claim-awareness restore, no steal).'
+        '3. If Atlas completed: peek already returns a durable videoUrl/cloudinaryPublicId. Stamp claimedByWorker to THIS worker, then call completeUnsettledRetry({ mode:\'recovery\', retryResult:{ videoUrl, cloudinaryPublicId, provider:\'atlas\' }, ... }).',
+        '3b. If Gemini completed: peek does NOT return a durable URL (only {state, provider, peek}). First gemini.extractVideoUri(peek.body) → gemini.downloadOutputToBuffer(uri) → gemini.uploadMirroredMaster(buffer, {…}). THEN stamp claimedByWorker to THIS worker and call completeUnsettledRetry({ mode:\'recovery\', retryResult:{ videoUrl, cloudinaryPublicId, provider:\'gemini\' }, ... }) with the mirrored Cloudinary ids. Do not pass a Google Files-API URI to completeUnsettledRetry.',
+        '4. If failed / rate_rejected / give-up: call abandonUnsettledRetry (claim-awareness restore, no steal). The alert debounce stamps lastAlertedAt only and does not bump updatedAt, so this write can match immediately.'
       ].join('\n')
     });
   } catch (_) { /* alerting must never block the sweep */ }
   try {
+    // Stamp lastAlertedAt ONLY. Do NOT bump updatedAt — claimAwarenessOr
+    // requires a stale updatedAt, so bumping it here would make a human
+    // following step 4 get matchedCount:0 for the next claimStaleMinutes.
     await Ad.updateOne(
       claimAwareRenderingFilter(ad, null, clocks),
-      { $set: { 'videoQcRetry.lastAlertedAt': clocks.now, updatedAt: new Date() } }
+      { $set: { 'videoQcRetry.lastAlertedAt': clocks.now } }
     );
   } catch (_) { /* stamp is debounce only; the Slack call already fired */ }
 }
@@ -1332,6 +1372,7 @@ async function peekRetryProvider(ad, retryId) {
     const peek = await gemini.resumeForAd(shim);
     if (!peek || !peek.resumed) return { state: 'unknown', provider, peek };
     if (peek.state === 'failed') return { state: 'failed', provider, peek };
+    if (peek.state === 'rate_rejected') return { state: 'rate_rejected', provider, peek };
     if (peek.state !== 'completed') return { state: 'processing', provider, peek };
     return { state: 'completed', provider, peek, gemini };
   }
@@ -1412,7 +1453,7 @@ async function resumeUnsettledQcRetries({
       }
 
       if (peekState === 'processing') out.stillRunning += 1;
-      else if (peekState === 'failed') out.failed += 1;
+      else if (peekState === 'failed' || peekState === 'rate_rejected') out.failed += 1;
       else if (peekState === 'completed') out.recoverableNotCollected += 1;
       else out.unknown += 1;
 

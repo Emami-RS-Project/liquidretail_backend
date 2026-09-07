@@ -636,7 +636,10 @@ const adSchema = new mongoose.Schema({
   //                                     // debounce for that alert.
   //     predictionId: String|null,      // the retry's OWN veoPredictionId
   //     error: String|null,             // set on outcome:'error'|'unsettled'
-  //     preRetryStatus / preRetryRenderError / preRetryBasePlate,
+  //     preRetryStatus / preRetryRenderError / preRetryBasePlate
+  //       (sourced from the claim query's own status/renderError/basePlate
+  //        in a follow-up write — never from the caller's in-memory ad,
+  //        which is stale post-qcAndStampVideoAd),
   //     attempt1PredictionId / attempt1VeoVideoUrl,
   //     heldExistingCallerClaim: Boolean,
   //     ownerWorkerId: String }
