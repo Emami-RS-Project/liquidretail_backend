@@ -15,7 +15,7 @@ services:
     dockerContext: ./adgen
     dockerfilePath: ./adgen/Dockerfile
     healthCheckPath: /health
-    autoDeploy: false
+    autoDeploy: true
     envVars:
       - key: ADGEN_ROLE
         value: api
@@ -30,7 +30,7 @@ services:
     plan: starter
     dockerContext: ./adgen
     dockerfilePath: ./adgen/Dockerfile
-    autoDeploy: false
+    autoDeploy: true
     # Singleton by design; distributed lease keeps a 2nd instance from
     # duplicating expansion work. numInstances stays 1 in dashboard.
     envVars:
@@ -71,7 +71,7 @@ services:
     plan: pro_plus
     dockerContext: ./adgen
     dockerfilePath: ./adgen/Dockerfile
-    autoDeploy: false
+    autoDeploy: true
     # Autoscale MUST live in this file, not just the dashboard. A blueprint
     # sync without a scaling: stanza wipes the dashboard config — measured
     # 2026-09-03 16:45 UTC: PR #109's deploy fired an
@@ -115,7 +115,7 @@ services:
     plan: pro_plus
     dockerContext: ./adgen
     dockerfilePath: ./adgen/Dockerfile
-    autoDeploy: false
+    autoDeploy: true
     # Autoscale MUST live in this file — see the adgen-renderer note above
     # for the blueprint-sync-wipes-dashboard mechanism. min=4/max=12 is
     # what was live on the dashboard until PR #109's deploy silently
