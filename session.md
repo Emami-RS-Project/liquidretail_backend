@@ -66,24 +66,46 @@ it clears it back to this placeholder in the same commit that closes it out.)_
 
 ## CURRENT STATE
 
-**2026-09-06: monorepo graft is live. Stages 0–4 done. Stage 5 dashboard-only
-and pending. Stage 6 pending. Freeze still in effect.**
+**2026-09-07: monorepo graft is live. Stages 0–4 done. Stage 6 (autoDeploy
+re-arm) done on all six services. Stage 5 (Blueprint cleanup) is the only
+piece left, dashboard-only, still pending — the freeze is effectively over.**
 
-- Graft merged to `main` as merge commit `e6393912` (PR #402) at 11:26:06Z.
-  `adgen/` is the live renderer. Four adgen Render services already deploy
+- Graft merged to `main` as merge commit `e6393912` (PR #402), 2026-09-06
+  11:26:06Z. `adgen/` is the live renderer. Four adgen Render services deploy
   from this repo, Docker context `./adgen`.
 - Stages 0–4 complete (snapshot, autoDeploy off, graft, Render repoint +
-  one-at-a-time deploys). Stage 5 (unlink old Blueprint / attach
-  `adgen/render.yaml`) is dashboard-only and **not done**. Stage 6
-  (re-arm autoDeploy) is **not done**.
-- `autoDeploy: no` on all six Render services. Blueprint
-  `exs-da4bg861egvs73bnggl0` still `paused` on the old adgen repo.
-  **The freeze is in effect** — no push or PR merge auto-deploys.
+  one-at-a-time deploys).
+- **Stage 6 (re-arm `autoDeploy`) is now DONE on all six services**, in two
+  passes: `adgen-api` / `adgen-orchestrator` were flipped back to `yes`
+  sometime after the 2026-09-06 write-up below (undocumented at the time —
+  caught by a live API re-check, not this file); `adgen-renderer` /
+  `adgen-titler` / both `liquidretail_backend` services were flipped to
+  `yes` on 2026-09-07, owner-directed, **explicitly accepting the
+  known risk**: `max-shutdown-delay` (dashboard-only, no API field exists to
+  read or set it) was never raised above `ATLAS_TIMEOUT_MS` (900000ms) on
+  renderer/titler. Render's default drain (~25s) is far shorter than a live
+  Atlas/Gemini video hold, so an auto-deploy that lands while either service
+  is mid-render can still strand a paid master. **Until the owner sets
+  max-shutdown-delay in the dashboard, treat every push to a branch these
+  services deploy from as needing the same manual idle-gate check** (`GET
+  /v1/services/:id` inflight, or the renderer/titler's own log line) that
+  every deploy got by hand throughout this freeze — auto-deploy no longer
+  waits for that on its own.
+- **Stage 5 (unlink old Blueprint / attach `adgen/render.yaml`) is still
+  NOT done, and is 100% dashboard-only** — confirmed against Render's own
+  OpenAPI spec: the Blueprints API exposes only `GET`/`GET`/`PATCH`, no
+  create or delete endpoint. Blueprint `exs-da4bg861egvs73bnggl0` is still
+  `paused`, still pointed at the dead `Emami-RS-Project/liquidretail_adgen`
+  repo — inert while paused, but a real hazard if anyone ever flips
+  `autoSync` back on (would rewrite all four adgen services back to the old
+  repo with `autoDeploy: true`). No Claude session can complete this step;
+  see the dashboard sequence in the detail doc below.
 - `Emami-RS-Project/liquidretail_adgen` deploys nothing; kept writable as
   the rollback lever.
 
 Detail: `/Volumes/Sayulita/Projects/RS/render-deploy-snapshot-2026-09-06.md`
-(Stage 4 / Stage 5 sections supersede the design doc where they disagree).
+(Stage 4 / Stage 5 sections supersede the design doc where they disagree —
+note its own Stage 5/6 status lines are now stale relative to this entry).
 Narrative: `session.d/2026-09-06_monorepo-graft-landed.md`.
 
 *(Prior CURRENT STATE lives in `session.d/` — most recently
