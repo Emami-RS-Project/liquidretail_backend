@@ -1758,6 +1758,90 @@ await checkAsync('E6b [MONEY] derive-triggered retry whose resubmit throws with 
   } finally { h.restore(); }
 });
 
+await checkAsync('E6c [MONEY] snapshot-persist miss fails closed — no rendering/ownership flip, returns null', async () => {
+  const h = setupHarness(RETRY_SVC_PATH);
+  try {
+    const master = freshMasterDoc({
+      status: 'failed',
+      claimedByWorker: null,
+      renderError: { message: 'video ad failed vision QC (no regeneration): fake', stage: 'vision-qc', at: new Date(), charged: true }
+    });
+    h.adStore.seed(master);
+    const origUpdateOne = h.adStore.model.updateOne.bind(h.adStore.model);
+    let ownershipFlipAttempted = 0;
+    h.adStore.model.updateOne = async (filter, update) => {
+      const set = (update && update.$set) || {};
+      if (Object.prototype.hasOwnProperty.call(set, 'videoQcRetry.preRetryStatus')) {
+        return { matchedCount: 0, modifiedCount: 0 };
+      }
+      if (set.status === 'rendering' && Object.prototype.hasOwnProperty.call(set, 'claimedByWorker')) {
+        ownershipFlipAttempted += 1;
+      }
+      return origUpdateOne(filter, update);
+    };
+    const result = await h.freshModule.maybeRetryVideoQcFailureAt720p({
+      ad: master, visionQc: makeVerdict(false, ['text_defects']).visionQc,
+      brandName: 'TestBrand', campaignRunId: 'run1'
+    });
+    assert.strictEqual(result, null, 'snapshot-persist miss must return null (caller keeps attempt-1 verdict)');
+    assert.strictEqual(h.videoRouterCalls.length, 0, 'must not submit after a snapshot-persist miss');
+    assert.strictEqual(ownershipFlipAttempted, 0,
+      'rendering/ownership flip must never be attempted when the snapshot persist matched 0');
+    const after = h.adStore.get(master._id);
+    assert.strictEqual(after.status, 'failed',
+      'status must stay at the pre-retry value — flipping to rendering without durable preRetryStatus reopens the round-5 hole');
+    assert.ok(after.claimedByWorker == null,
+      'must not stamp claimedByWorker on a retry that never left the claim+snapshot stage');
+    assert.ok(after.videoQcRetry && after.videoQcRetry.attempted === true,
+      'sanity: the atomic claim already landed (this miss is the FOLLOW-UP write)');
+    assert.strictEqual(after.videoQcRetry.preRetryStatus, undefined,
+      'the stubbed miss must not have persisted preRetryStatus');
+    assert.ok(after.videoQcRetry.outcome == null,
+      'must not look like an in-flight/unsettled retry — we never flipped to rendering or submitted');
+  } finally { h.restore(); }
+});
+
+await checkAsync('E6d [MONEY] ownership flip does not overwrite another worker\'s claim that landed after the atomic claim', async () => {
+  const h = setupHarness(RETRY_SVC_PATH);
+  const OTHER_WORKER = 'other-worker-concurrent-claim';
+  try {
+    const master = freshMasterDoc({
+      status: 'failed',
+      claimedByWorker: null,
+      renderError: { message: 'video ad failed vision QC (no regeneration): fake', stage: 'vision-qc', at: new Date(), charged: true }
+    });
+    h.adStore.seed(master);
+    const origUpdateOne = h.adStore.model.updateOne.bind(h.adStore.model);
+    let ownershipMatched = 0;
+    h.adStore.model.updateOne = async (filter, update) => {
+      const set = (update && update.$set) || {};
+      const res = await origUpdateOne(filter, update);
+      if (Object.prototype.hasOwnProperty.call(set, 'videoQcRetry.preRetryStatus')) {
+        h.adStore.patch(master._id, { claimedByWorker: OTHER_WORKER, claimedAt: new Date() });
+      }
+      if (set.status === 'rendering' && Object.prototype.hasOwnProperty.call(set, 'claimedByWorker')) {
+        if (res && Number(res.matchedCount || res.n || 0) > 0) ownershipMatched += 1;
+      }
+      return res;
+    };
+    const result = await h.freshModule.maybeRetryVideoQcFailureAt720p({
+      ad: master, visionQc: makeVerdict(false, ['text_defects']).visionQc,
+      brandName: 'TestBrand', campaignRunId: 'run1'
+    });
+    assert.strictEqual(result, null, 'lost-race on the ownership write must fail closed (return null)');
+    assert.strictEqual(h.videoRouterCalls.length, 0, 'must not submit after losing the ownership race');
+    assert.strictEqual(ownershipMatched, 0,
+      'ownership flip must match 0 when another worker holds claimedByWorker');
+    const after = h.adStore.get(master._id);
+    assert.strictEqual(after.claimedByWorker, OTHER_WORKER,
+      'the other worker\'s claim must survive untouched — overwriting it is the steal');
+    assert.strictEqual(after.status, 'failed',
+      'must not flip status to rendering on a row another worker already owns');
+    assert.strictEqual(after.videoQcRetry.outcome, 'skipped',
+      'existing lost-race path stamps outcome:skipped (same as master left retryable status)');
+  } finally { h.restore(); }
+});
+
 await checkAsync('E7 [MONEY] abandonUnsettledRetry on a master-triggered parked retry restores to failed — claimOne cannot re-take, sweep cannot re-alert forever', async () => {
   const h = setupHarness(RETRY_SVC_PATH);
   try {
@@ -2759,6 +2843,39 @@ await checkAsync('R12 Gemini rate_rejected peek is reported as rate_rejected, no
       'must not count a terminal, possibly-billed rate_rejected as still processing');
     assert.strictEqual(h.adStore.get(master._id).status, 'rendering',
       'alert-only sweep must not auto-abandon a rate_rejected peek');
+  } finally { unstub(); alerts.restore(); h.restore(); }
+});
+
+await checkAsync('R12c rate_rejected alert detail tells the operator to KEEP PEEKING, not abandonUnsettledRetry', async () => {
+  const h = setupHarness(RETRY_SVC_PATH);
+  const alerts = installAlertStub();
+  const unstub = installProviderStubs({
+    gemini: {
+      resumeForAd: async () => ({
+        resumed: true,
+        state: 'rate_rejected',
+        body: { error: { code: 'too_many_requests' } }
+      })
+    }
+  });
+  try {
+    const now = new Date();
+    const master = parkedRetryDoc({ veoProvider: 'gemini' });
+    h.adStore.seed(master);
+    await h.freshModule.resumeUnsettledQcRetries({
+      now, staleMinutes: 5, claimStaleMinutes: 15
+    });
+    assert.strictEqual(alerts.sent.length, 1, 'sanity: rate_rejected still alerts');
+    const detail = String(alerts.sent[0].detail || '');
+    assert.strictEqual(alerts.sent[0].fields.peek, 'rate_rejected');
+    assert.ok(!/If failed \/ rate_rejected/.test(detail),
+      `rate_rejected must not share the failed/give-up abandon line:\n${detail}`);
+    assert.ok(!/If failed \/ give-up: call abandonUnsettledRetry/.test(detail),
+      `rate_rejected peek must not recommend abandonUnsettledRetry (that drops the row out of recovery):\n${detail}`);
+    assert.ok(/KEEP PEEKING/i.test(detail),
+      `rate_rejected runbook must tell the operator to keep peeking:\n${detail}`);
+    assert.ok(/Do NOT call abandonUnsettledRetry/.test(detail),
+      `rate_rejected runbook must explicitly say not to abandon:\n${detail}`);
   } finally { unstub(); alerts.restore(); h.restore(); }
 });
 

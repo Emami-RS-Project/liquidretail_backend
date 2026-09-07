@@ -671,7 +671,12 @@ async function maybeRetryVideoQcFailureAt720p({ ad, visionQc, brandName, campaig
     } }
   );
   if (!matched(snapRes)) {
-    warnMissedWrite('preRetry snapshot persist', claim._id, 'claim held but snapshot fields not written — inline restore still uses in-memory snapshots');
+    // Filter can only miss if the row was deleted between the claim and
+    // this write. Continuing would flip status to 'rendering' without a
+    // durable preRetryStatus, so snapshotsFromClaim would later restore
+    // the flipped value (the round-5 hole, in this one edge case).
+    warnMissedWrite('preRetry snapshot persist', claim._id, 'claim held but snapshot fields not written — failing closed without the rendering/ownership flip');
+    return null;
   }
   if (claim.videoQcRetry) {
     claim.videoQcRetry.preRetryStatus = snapshots.preRetryStatus;
@@ -713,6 +718,9 @@ async function maybeRetryVideoQcFailureAt720p({ ad, visionQc, brandName, campaig
   // Combined so there is no window of status:'rendering' + claimedByWorker
   // null for claimOne to match. claimedAt is refreshed only when we are
   // TAKING a new claim (derive-triggered idle master).
+  // claimedByWorker $in [null, WORKER_ID]: same ownership-awareness as the
+  // atomic claim — do not overwrite another process's claim that landed
+  // in the gap after that claim (the snapshot-persist write sits in it).
   const ownershipSet = {
     status: 'rendering',
     renderError: null,
@@ -725,7 +733,8 @@ async function maybeRetryVideoQcFailureAt720p({ ad, visionQc, brandName, campaig
     {
       _id: masterAd._id,
       status: { $in: RETRY_ELIGIBLE_MASTER_STATUSES },
-      'videoQcRetry.attempted': true
+      'videoQcRetry.attempted': true,
+      claimedByWorker: { $in: [null, workerId()] }
     },
     { $set: ownershipSet }
   );
@@ -1349,7 +1358,9 @@ async function alertStuckQcRetry({ ad, retryId, peekState, provider, clocks }) {
         `2. Peek ${retryId || '<predictionId>'} via ${provider || 'atlas|gemini'}.resumeForAd — GET only, never generateForAd / retryVideoAt720pAfterQcFailure.`,
         '3. If Atlas completed: peek already returns a durable videoUrl/cloudinaryPublicId. Stamp claimedByWorker to THIS worker, then call completeUnsettledRetry({ mode:\'recovery\', retryResult:{ videoUrl, cloudinaryPublicId, provider:\'atlas\' }, ... }).',
         '3b. If Gemini completed: peek does NOT return a durable URL (only {state, provider, peek}). First gemini.extractVideoUri(peek.body) → gemini.downloadOutputToBuffer(uri) → gemini.uploadMirroredMaster(buffer, {…}). THEN stamp claimedByWorker to THIS worker and call completeUnsettledRetry({ mode:\'recovery\', retryResult:{ videoUrl, cloudinaryPublicId, provider:\'gemini\' }, ... }) with the mirrored Cloudinary ids. Do not pass a Google Files-API URI to completeUnsettledRetry.',
-        '4. If failed / rate_rejected / give-up: call abandonUnsettledRetry (claim-awareness restore, no steal). The alert debounce stamps lastAlertedAt only and does not bump updatedAt, so this write can match immediately.'
+        ...(peekState === 'rate_rejected'
+          ? ['4. If rate_rejected: KEEP PEEKING (the receipt may still settle). Do NOT call abandonUnsettledRetry — that restores status:\'failed\' and drops the row out of buildQcRetryRecoveryFilter (requires status:\'rendering\'). GEMINI_RATE_REJECTED_AFTER_ACCEPT is terminal for this attempt and possibly billed; a later free GET can still collect the master.']
+          : ['4. If failed / give-up: call abandonUnsettledRetry (claim-awareness restore, no steal). The alert debounce stamps lastAlertedAt only and does not bump updatedAt, so this write can match immediately.'])
       ].join('\n')
     });
   } catch (_) { /* alerting must never block the sweep */ }
