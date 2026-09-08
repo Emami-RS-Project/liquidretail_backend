@@ -305,10 +305,10 @@
     },
     "remotion/compositions/Canonical.jsx": {
       "backendHash": "557e4564e5878a6298dd13a02e21660dc1d88608c8498325bbe019e855314ef2",
-      "adgenHash": "27ae7d595f21809652e9e696d7d25060ca81011ead1402ca03585039a90d8d88",
+      "adgenHash": "4ac3f5d7cadac1d8bd5b4e9f24d5949a3f585f4aba70b21a5c8742b401d9ce7b",
       "backendSha": "47be257c468e85c3f1d1c562abd087ea8625e98c",
       "status": "unported",
-      "reason": "Re-attest at backend SHA 47be257c. containerStrokeBleedGuard (PR #98 outer-clip fix) still absent from backend's copy -- confirmed via grep, zero occurrences. PR #383 (47be257c) merged the itemLayout/itemGap/maxItems/itemStyle wiring to backend's origin/main, byte-identical to adgen -- that half of the prior debt is now resolved and no longer owed. Remaining gap is containerStrokeBleedGuard only.",
+      "reason": "Same keep-out window-scoping fix as before, PLUS a second correctness fix found by an independent adversarial review (Grok grok-4.6, high effort) of the first pass: bandStateFor's avoid/busy seed was taken from the sample nearest atSec unconditionally, even when that nearest sample falls OUTSIDE the group's own windowSec (possible when atSec is computed from items[0] in spec-array order rather than the group's true earliest enter, or when a short window falls in a gap between plate samples) — which could leak an out-of-window avoid/busy reading back in through the seed even though the loop itself was correctly window-filtered. Fixed by gating the seed on the nearest sample also being in-window (seedInWindow check), falling back to a clean 0/false seed otherwise so the loop alone determines the result. Does not reproduce the originally-measured t=5.5s incident (confirmed by both my own analysis and the adversarial review — canonical's own default timing never hits this path), but is a real gap in the general case. Also corrected a now-stale comment claiming escalation ink is scored 'across the whole clip' (rewritten to reference the group's own visible window). Full adversarial review transcript available in this session; verdict was 'cannot refute the fix for the bug it claims to fix' with this one legitimate residual, which is now closed. Verified: full adgen suite green (109/109 excluding this manifest check), verifyKeepOutWindowScoped.mjs still 18/18 and still revert-proven. Backend's copy has not been ported/tested yet.",
       "portTo": "backend",
       "owedSince": "2026-08-31T23:20:03.277Z"
     },
@@ -322,11 +322,12 @@
     },
     "remotion/lib/plateHints.js": {
       "backendHash": "65da1e50ea8d56c9b5b7b6716f9bf6589a73ed1c3923303c0af21713bd14f14a",
-      "adgenHash": "65da1e50ea8d56c9b5b7b6716f9bf6589a73ed1c3923303c0af21713bd14f14a",
+      "adgenHash": "b60bda2a606f578305273f24a52a4d4c63905b0b1e2a743f091d28d407c55a99",
       "backendSha": "29004514a9de0764579758e82aa97cd53493aa12",
-      "status": "synced",
-      "portTo": null,
-      "owedSince": null
+      "status": "unported",
+      "reason": "Added groupWindowSec() and a backward-compatible optional windowSec parameter to worstCaseInkForBand(), used by Canonical.jsx's keep-out scoring to scope 'worst case across time' reads to a text group's own visible window instead of the whole clip. See the Canonical.jsx vendor-drift reason (same fix, paired file) for the full incident. Backend's copy has not been ported/tested yet.",
+      "portTo": "backend",
+      "owedSince": "2026-09-08T17:15:24.458Z"
     },
     "remotion/lib/priceFormat.js": {
       "backendHash": "0010c580df02ab7114c7c0665c80938180b08904412dd764a4e4a5a32fd8ca77",
@@ -933,11 +934,10 @@
     },
     "services/fontResolverService.js": {
       "backendHash": "f978e12cf5dc6bff90a826205e49b952523904490b18402b7d7982778cd35c0b",
-      "adgenHash": "f978e12cf5dc6bff90a826205e49b952523904490b18402b7d7982778cd35c0b",
+      "adgenHash": "15da026805c3929ae9287facc96d935646aa163961d8c50edbc68e61036a785e",
       "backendSha": "6f5372fbcf7b7b58f4a18bc18cb1c899534f7b3b",
-      "status": "synced",
-      "portTo": null,
-      "owedSince": null
+      "status": "fork",
+      "reason": "resolveLibraryMatch's CSS fallback field now consults LIBRARY_SERIF_FACES (authoritative for the closed curated-face set) instead of the naive name-regex fallbackFor(), which missed the 4 script/handwritten faces (Great Vibes, Dancing Script, Pacifico, Caveat). Applied identically to both trees; still byte-identical."
     },
     "services/handoffContract.js": {
       "backendHash": "de310d4687251963d2fc8a51db6a7d07cf8ec9982c0d9415f0b4d850a62b955b",
