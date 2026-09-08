@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "64da9b29273a6807574cfdcd7d8d0a3ecad2a71f",
-  "generatedAt": "2026-09-08T00:28:29.492Z",
+  "backendHead": "efdcd2de5311c6a45aa431f027450813a9cd7761",
+  "generatedAt": "2026-09-08T01:01:01.899Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "a8d6f60ecc8e0ca4f5bfe8d7a09a242efd5c3c93d603204820cee72a06c19240",
@@ -657,10 +657,10 @@
     },
     "services/adVisionQcService.js": {
       "backendHash": "0458e60a40b7ef253e7e933efd13b041e3535f10bd9251e31ea227e9d3bcb9b0",
-      "adgenHash": "d794f7197e119ee7422dadd09a8411d753ba2635fc99a5855788c073c6b46b0a",
+      "adgenHash": "87a2f9e603d08b3eedc0e63edc782891d35e4751b7ddc1b9584f852ebb247007",
       "backendSha": "2b58cf31766b6ecf9fde711770c87dc2174cbd29",
       "status": "unported",
-      "reason": "COMPETITOR_MARKS_CAVEAT (backend c1d1dc42) is now ported into renderCategoryBlock + summarizeVisionQc + module.exports. Remaining divergence is adgen→backend: TITLING_CATEGORIES/titlingOnlyGate derive ship-gate (adgen fcf3709), occlusion-aware corrective notes, regenerationCount/visionQcMs instrumentation. Adgen deliberately lacks backend's isStaticEnabled/isVideoEnabled sync gates (SystemConfig-only resolvers).",
+      "reason": "COMPETITOR_MARKS_CAVEAT (backend c1d1dc42) is now ported into renderCategoryBlock + summarizeVisionQc + module.exports. Remaining divergence is adgen->backend: TITLING_CATEGORIES/titlingOnlyGate derive ship-gate (adgen fcf3709), occlusion-aware corrective notes, regenerationCount/visionQcMs instrumentation. Adgen deliberately lacks backend's isStaticEnabled/isVideoEnabled sync gates (SystemConfig-only resolvers). NEW 2026-09-07: MAX_QC_REGENERATIONS lowered 1->0 (owner directive, disable QC auto-regen for now) -- adgen-only so far; backend's copy still allows 1 regen. Whether to port this to backend is an open owner call, not decided here.",
       "portTo": "backend",
       "owedSince": "2026-09-05T00:18:02.460Z"
     },

@@ -75,10 +75,15 @@ const { chatCompletion } = require('./atlasLlmService');
 const JSON5 = require('json5');
 
 // ── MONEY INVARIANT ───────────────────────────────────────────────────
-// Exactly one regeneration is allowed after a failed QC pass. This is a
-// hard constant, NOT an env knob — raising it multiplies billable image
-// submits. The harness asserts behavioural count, not just this number.
-const MAX_QC_REGENERATIONS = 1;
+// Regeneration after a failed QC pass is OFF (owner directive, 2026-09-07 —
+// "turn off QC auto regenerate for now", raised alongside a measured
+// regeneration-rate trend of 12%→22%→25% across three sampled batches that
+// was inflating static-ad wall time). A failed QC pass now ships as one
+// generation, uninspected-regen-wise, same as any other single-attempt run.
+// This is a hard constant, NOT an env knob — raising it multiplies billable
+// image submits. The harness asserts behavioural count, not just this
+// number. To restore the single allowed regen, set this back to 1.
+const MAX_QC_REGENERATIONS = 0;
 
 const CATEGORIES = Object.freeze([
   'competitor_marks',
@@ -1554,8 +1559,9 @@ function reportQcVerdict({
  *
  * judgeFn — injectable; production uses judgeRender.
  *
- * HARD BOUND: regenerations never exceed MAX_QC_REGENERATIONS (1).
- * A second QC failure does NOT call generate a third time.
+ * HARD BOUND: regenerations never exceed MAX_QC_REGENERATIONS (currently 0 —
+ * auto-regenerate disabled, owner directive 2026-09-07). A failed QC pass
+ * does NOT call generate a second time while this is 0.
  *
  * `enabled`:
  *   - boolean → used as-is (callers that already resolved the flag)
