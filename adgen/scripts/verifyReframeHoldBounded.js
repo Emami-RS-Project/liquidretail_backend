@@ -488,6 +488,180 @@ async function main() {
   await check('E6 persist emits the closing hold line', () =>
     /claim superseded by persist after/.test(atlasSrc));
 
+  // ── GROUP F ──────────────────────────────────────────────────────────────
+  // Crop-over-outpaint self-heal must NOT use persistReframe's unconditional
+  // $set — that drops `.claim` and can let a third process POST a second
+  // nano-banana while a billed outpaint is in flight.
+  //
+  // F1–F4 EXECUTE persistCropSupersedingOutpaint against a stubbed
+  // Media.updateOne that implements the filter for real. A regex on source
+  // would pass if the function were dead code never called.
+  console.log('\nF. crop-over-outpaint persist is claim-safe (executed, not regex)');
+
+  await check('F5 cache-hit `if` and healCachedOutpaintToCrop share one branch (not two independent mentions)', () => {
+    const needle = 'if (cachedEntry.url && !cachedEntry.stale)';
+    const i = atlasSrc.indexOf(needle);
+    assert(i >= 0, 'initial cache-hit guard missing');
+    const brace = atlasSrc.indexOf('{', i);
+    let depth = 0;
+    let end = -1;
+    for (let j = brace; j < atlasSrc.length; j++) {
+      if (atlasSrc[j] === '{') depth++;
+      else if (atlasSrc[j] === '}') { depth--; if (depth === 0) { end = j; break; } }
+    }
+    assert(end > 0, 'could not extract cache-hit block');
+    const block = atlasSrc.slice(i, end + 1);
+    assert(/healCachedOutpaintToCrop\(/.test(block),
+      'healCachedOutpaintToCrop is not inside the cache-hit guard — a elsewhere-mention would have passed the old F4');
+    assert(/return healed \|\| cachedEntry\.url/.test(block),
+      'cache-hit must return the healed crop or the cached URL, not fall through to outpaint');
+    return true;
+  });
+
+  if (!DEPS_OK || typeof (svc && svc.persistCropSupersedingOutpaint) !== 'function') {
+    console.log('  ℹ️  F1–F4 SKIPPED (persistCrop not loadable in this process)');
+  } else {
+    const Media = require(path.join(ROOT, 'src/models/Media'));
+    const CROP_URL = 'https://res.cloudinary.com/reach-social-prod/image/upload/c_crop,w_1125,h_2000,x_140,y_0/v1/x.jpg';
+    const OUTPAINT_URL = 'https://res.cloudinary.com/reach-social-prod/image/upload/v1/liquidretail/reframes/stale-outpaint.jpg';
+    const MEDIA_ID = 'aaaaaaaaaaaaaaaaaaaaaaaa';
+
+    function getPath(obj, dotted) {
+      return dotted.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
+    }
+    function pathExists(obj, dotted) {
+      let cur = obj;
+      for (const p of dotted.split('.')) {
+        if (cur == null || !Object.prototype.hasOwnProperty.call(cur, p)) return false;
+        cur = cur[p];
+      }
+      return true;
+    }
+    function matchesFilter(doc, filter) {
+      for (const [key, pred] of Object.entries(filter)) {
+        if (key === '_id') {
+          if (String(doc._id) !== String(pred)) return false;
+          continue;
+        }
+        if (pred && typeof pred === 'object' && !Array.isArray(pred)) {
+          if ('$in' in pred) {
+            if (!pred.$in.includes(getPath(doc, key))) return false;
+            continue;
+          }
+          if ('$exists' in pred) {
+            if (Boolean(pathExists(doc, key)) !== Boolean(pred.$exists)) return false;
+            continue;
+          }
+        }
+        if (getPath(doc, key) !== pred) return false;
+      }
+      return true;
+    }
+    function applySet(doc, set) {
+      for (const [key, val] of Object.entries(set)) {
+        const parts = key.split('.');
+        let cur = doc;
+        for (let i = 0; i < parts.length - 1; i++) {
+          if (cur[parts[i]] == null || typeof cur[parts[i]] !== 'object') cur[parts[i]] = {};
+          cur = cur[parts[i]];
+        }
+        cur[parts[parts.length - 1]] = val;
+      }
+    }
+    function makeDbDoc({ method, claim }) {
+      const entry = { url: OUTPAINT_URL, method, ladderVersion: 'reframe-v2' };
+      if (claim) entry.claim = claim;
+      return { _id: MEDIA_ID, metadata: { reframes: { '9_16': entry } } };
+    }
+    async function withStubbedUpdateOne(dbDoc, fn) {
+      const orig = Media.updateOne;
+      const calls = [];
+      Media.updateOne = async (filter, update) => {
+        calls.push({ filter, update });
+        if (!matchesFilter(dbDoc, filter)) return { matchedCount: 0, modifiedCount: 0 };
+        if (update && update.$set) applySet(dbDoc, update.$set);
+        return { matchedCount: 1, modifiedCount: 1 };
+      };
+      try {
+        return await fn(calls);
+      } finally {
+        Media.updateOne = orig;
+      }
+    }
+
+    await check('F1 persistCropSupersedingOutpaint is exported and callable', () => {
+      assert.strictEqual(typeof svc.persistCropSupersedingOutpaint, 'function');
+      return true;
+    });
+
+    await check('F2 live peer claim → write refused; DB outpaint URL and claim survive', async () => {
+      const dbDoc = makeDbDoc({
+        method: 'outpaint',
+        claim: { at: '2026-09-07T12:00:00.000Z', by: 'peer-pid:abc' }
+      });
+      const media = {
+        _id: MEDIA_ID,
+        metadata: { reframes: { '9_16': { url: OUTPAINT_URL, method: 'outpaint' } } }
+      };
+      const result = await withStubbedUpdateOne(dbDoc, async (calls) => {
+        const ok = await svc.persistCropSupersedingOutpaint(media, '9_16', '9:16', CROP_URL, 'yolo-crop');
+        return { ok, calls };
+      });
+      assert.strictEqual(result.ok, false, 'must report no-op when a live claim is held');
+      assert.strictEqual(result.calls.length, 1, 'must still attempt the filtered write');
+      const methodPred = result.calls[0].filter['metadata.reframes.9_16.method'];
+      assert.ok(methodPred && Array.isArray(methodPred.$in), 'filter must $in on method');
+      assert.ok(methodPred.$in.includes('outpaint') && methodPred.$in.includes('composite-outpaint'));
+      assert.deepStrictEqual(
+        result.calls[0].filter['metadata.reframes.9_16.claim.at'],
+        { $exists: false }
+      );
+      assert.strictEqual(dbDoc.metadata.reframes['9_16'].url, OUTPAINT_URL);
+      assert.strictEqual(dbDoc.metadata.reframes['9_16'].method, 'outpaint');
+      assert.strictEqual(dbDoc.metadata.reframes['9_16'].claim.at, '2026-09-07T12:00:00.000Z');
+      return true;
+    });
+
+    await check('F3 DB entry already yolo-crop → no-op; crop URL untouched', async () => {
+      const dbDoc = makeDbDoc({ method: 'yolo-crop' });
+      dbDoc.metadata.reframes['9_16'].url = CROP_URL;
+      const media = {
+        _id: MEDIA_ID,
+        metadata: { reframes: { '9_16': { url: CROP_URL, method: 'yolo-crop' } } }
+      };
+      const OTHER = 'https://res.cloudinary.com/reach-social-prod/image/upload/c_crop,w_1,h_1/v1/other.jpg';
+      const result = await withStubbedUpdateOne(dbDoc, async () =>
+        svc.persistCropSupersedingOutpaint(media, '9_16', '9:16', OTHER, 'yolo-crop')
+      );
+      assert.strictEqual(result, false);
+      assert.strictEqual(dbDoc.metadata.reframes['9_16'].url, CROP_URL);
+      assert.strictEqual(dbDoc.metadata.reframes['9_16'].method, 'yolo-crop');
+      return true;
+    });
+
+    await check('F4 DB outpaint with no claim → filtered update applies; persisted doc is the crop', async () => {
+      const dbDoc = makeDbDoc({ method: 'outpaint' });
+      const media = {
+        _id: MEDIA_ID,
+        metadata: { reframes: { '9_16': { url: OUTPAINT_URL, method: 'outpaint' } } }
+      };
+      const result = await withStubbedUpdateOne(dbDoc, async (calls) => {
+        const ok = await svc.persistCropSupersedingOutpaint(media, '9_16', '9:16', CROP_URL, 'yolo-crop');
+        return { ok, calls };
+      });
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(dbDoc.metadata.reframes['9_16'].url, CROP_URL);
+      assert.strictEqual(dbDoc.metadata.reframes['9_16'].method, 'yolo-crop');
+      assert.strictEqual(dbDoc.metadata.reframes['9_16'].claim, undefined);
+      const setEntry = result.calls[0].update.$set['metadata.reframes.9_16'];
+      assert.strictEqual(setEntry.url, CROP_URL);
+      assert.strictEqual(setEntry.method, 'yolo-crop');
+      assert.ok(!Object.prototype.hasOwnProperty.call(setEntry, 'claim'),
+        'crop persist must not write a live claim');
+      return true;
+    });
+  }
+
   console.log(`\nverifyReframeHoldBounded: ${passes} passed, ${failures} failed`);
   process.exit(failures === 0 ? 0 : 1);
 }

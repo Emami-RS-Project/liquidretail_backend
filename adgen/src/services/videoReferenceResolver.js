@@ -81,16 +81,20 @@
 // which path served each ref for post-run tracing.
 //
 // ── NOT THIS FILE'S JOB ───────────────────────────────────────────────────
-//   - Computing new reframes. `reframeReferenceForAspect` owns writes.
+//   - Computing new reframes. `reframeReferenceForAspect` owns writes,
+//     except the one claim-safe exception below: a cached outpaint that
+//     today's chooser would crop is persisted as that crop so the DB
+//     self-heals. The write is filtered (only outpaint-class methods,
+//     only when no live claim.at) so it cannot drop a billing lease.
 //   - Deciding pad vs crop vs outpaint. `reframeStrategyChooser` owns that.
-//   - Cache invalidation. `REFRAME_LADDER_VERSION` + REFRAME_REDERIVE_STALE
-//     handle it inside reframeReferenceForAspect.
-//   - Uploading anything. This helper is READ-ONLY over the cache.
+//   - Ladder invalidation. `REFRAME_LADDER_VERSION` + REFRAME_REDERIVE_STALE
+//     handle it inside reframeReferenceForAspect. Outpaint-vs-crop
+//     self-heal is a SEPARATE check (same ladder, better decision).
 
 'use strict';
 
 const { cropImageUrlForAspect } = require('./atlasVideoService');
-const { chooseStrategy } = require('./reframeStrategyChooser');
+const { chooseStrategy, preferCropOverOutpaintCache } = require('./reframeStrategyChooser');
 
 // Mongo-safe aspect key. Bytewise-identical to the normalisation in
 // reframeReferenceForAspect at atlasVideoService.js — `':' AND '.' are
@@ -158,6 +162,38 @@ function resolveVideoReferenceForMedia({ media, aspectRatio, brand, preferRefram
       : null;
     const cached = entry && typeof entry.url === 'string' ? entry.url.trim() : '';
     if (cached) {
+      // Cached outpaint is not a $0 DINO crop. If today's chooser would
+      // crop, serve the crop (and persist it, claim-safe) instead of the
+      // billed 4k JPEG. Cached crop/pad/exact entries skip this re-check.
+      const crop = preferCropOverOutpaintCache({
+        media,
+        aspectRatio,
+        sourceUrl: media.fileUrl,
+        cachedMethod: entry.method
+      });
+      if (crop) {
+        // Fire-and-forget DB heal. Skip non-ObjectId fixture ids so a
+        // harness cannot CastError against Mongo; production Media._id
+        // is always a 24-hex ObjectId.
+        const idStr = media._id == null ? '' : String(media._id);
+        if (/^[a-f0-9]{24}$/i.test(idStr)) {
+          try {
+            const { persistCropSupersedingOutpaint } = require('./atlasVideoService');
+            if (typeof persistCropSupersedingOutpaint === 'function') {
+              persistCropSupersedingOutpaint(
+                media, aspectKey, aspectRatio, crop.url, crop.method
+              ).catch(() => { /* best-effort DB heal; this request already has the crop */ });
+            }
+          } catch { /* persist is optional; URL decision does not depend on it */ }
+        }
+        return {
+          url: crop.url.trim(),
+          source: 'cache-superseded',
+          aspectKey,
+          method: crop.method || 'yolo-crop',
+          ladderVersion: entry.ladderVersion || null
+        };
+      }
       return {
         url: cached,
         source: 'reframe-cache',

@@ -460,6 +460,112 @@ check('F10 preferReframe:false with known dims → source-native (debug arm stil
   assert.match(r.url, /c_fill,w_1125,h_2000/);
 });
 
+// ── Section G — cached outpaint self-heals to a fresh crop ───────────
+//
+// The 2026-09-07 Pelagic incident: three refs resolved via cache to
+// previously-billed nano-banana-2/edit outpaint JPEGs. Today's chooser
+// would crop all three. Cache-hit of an outpaint-class method must
+// re-run chooseStrategy and prefer the crop. A cached crop is already
+// the best case and must NOT be recomputed (source stays reframe-cache).
+
+console.log('\n== G. cached outpaint is superseded by a fresh crop; cached crop is not recomputed ==');
+
+const OUTPAINT_URL = 'https://res.cloudinary.com/reach-social-prod/image/upload/v1/liquidretail/reframes/stale-outpaint.jpg';
+
+check('G1 cached outpaint + crop-eligible media → cache-superseded crop URL, not the outpaint JPEG', () => {
+  const media = makeMediaSmallSubject();
+  media.metadata.reframes = {
+    '9_16': { url: OUTPAINT_URL, method: 'outpaint', ladderVersion: 'reframe-v2', at: '2026-08-01T00:00:00.000Z' }
+  };
+  const r = resolveVideoReferenceForMedia({ media, aspectRatio: '9:16', brand: null });
+  assert.strictEqual(r.source, 'cache-superseded', `source: ${r.source}`);
+  assert.strictEqual(r.method, 'yolo-crop');
+  assert.notStrictEqual(r.url, OUTPAINT_URL, 'must not serve the stale outpaint URL');
+  assert.match(r.url, /c_crop/, `url: ${r.url}`);
+  assert.doesNotMatch(r.url, /liquidretail\/reframes/);
+});
+
+check('G2 G1 crop URL is byte-identical to a live chooseStrategy call', () => {
+  const media = makeMediaSmallSubject();
+  const direct = chooseStrategy({ media, aspectRatio: '9:16', sourceUrl: media.fileUrl });
+  media.metadata.reframes = {
+    '9_16': { url: OUTPAINT_URL, method: 'outpaint', ladderVersion: 'reframe-v2' }
+  };
+  const r = resolveVideoReferenceForMedia({ media, aspectRatio: '9:16', brand: null });
+  assert.strictEqual(r.url, direct.url);
+  assert.strictEqual(r.method, direct.method);
+});
+
+check('G3 cached composite-outpaint is also superseded', () => {
+  const media = makeMediaSmallSubject();
+  media.metadata.reframes = {
+    '9_16': { url: OUTPAINT_URL, method: 'composite-outpaint', ladderVersion: 'reframe-v2' }
+  };
+  const r = resolveVideoReferenceForMedia({ media, aspectRatio: '9:16', brand: null });
+  assert.strictEqual(r.source, 'cache-superseded');
+  assert.match(r.url, /c_crop/);
+});
+
+check('G4 cached yolo-crop is served as-is (source=reframe-cache, not recomputed)', () => {
+  const media = makeMediaSmallSubject();
+  const CACHED = ALT_CROP_URL;
+  media.metadata.reframes = {
+    '9_16': { url: CACHED, method: 'yolo-crop', ladderVersion: 'reframe-v2' }
+  };
+  const r = resolveVideoReferenceForMedia({ media, aspectRatio: '9:16', brand: null });
+  assert.strictEqual(r.source, 'reframe-cache', 'crop cache must not take the supersede path');
+  assert.strictEqual(r.url, CACHED);
+  assert.strictEqual(r.method, 'yolo-crop');
+});
+
+check('G5 cached yolo-crop-forced is served as-is', () => {
+  const media = makeMediaWideSubject();
+  const CACHED = 'https://res.cloudinary.com/reach-social-prod/image/upload/c_crop,w_1125,h_2000,x_0,y_0/v1/x.jpg';
+  media.metadata.reframes = {
+    '9_16': { url: CACHED, method: 'yolo-crop-forced', ladderVersion: 'reframe-v2' }
+  };
+  const r = resolveVideoReferenceForMedia({ media, aspectRatio: '9:16', brand: null });
+  assert.strictEqual(r.source, 'reframe-cache');
+  assert.strictEqual(r.url, CACHED);
+  assert.strictEqual(r.method, 'yolo-crop-forced');
+});
+
+check('G6 cached outpaint + no bboxes (chooser still defers) → outpaint cache stands', () => {
+  const media = {
+    _id: 'fixture-outpaint-no-bbox',
+    fileUrl: CATALOG_URL_SMALL,
+    width: 2000,
+    height: 2000,
+    metadata: {
+      reframes: { '9_16': { url: OUTPAINT_URL, method: 'outpaint', ladderVersion: 'reframe-v2' } }
+    }
+    // no refinedProducts → chooseStrategy defers
+  };
+  const r = resolveVideoReferenceForMedia({ media, aspectRatio: '9:16', brand: null });
+  assert.strictEqual(r.source, 'reframe-cache');
+  assert.strictEqual(r.url, OUTPAINT_URL);
+  assert.strictEqual(r.method, 'outpaint');
+});
+
+check('G7 persistCrop mutates the in-memory cache entry to the crop (no _id skips Mongo)', () => {
+  // persistCropSupersedingOutpaint is the write half of the self-heal.
+  // Mutation of the lean doc is SYNCHRONOUS (before any await); with no
+  // _id the Mongo write is skipped. That is the "cache actually updated"
+  // contract for this process; the claim-safe Mongo filter is pinned in
+  // verifyReframeHoldBounded.
+  const { persistCropSupersedingOutpaint } = require('../src/services/atlasVideoService');
+  const media = makeMediaSmallSubject();
+  delete media._id;
+  media.metadata.reframes = {
+    '9_16': { url: OUTPAINT_URL, method: 'outpaint', ladderVersion: 'reframe-v2' }
+  };
+  const crop = chooseStrategy({ media, aspectRatio: '9:16', sourceUrl: media.fileUrl });
+  persistCropSupersedingOutpaint(media, '9_16', '9:16', crop.url, crop.method);
+  assert.strictEqual(media.metadata.reframes['9_16'].url, crop.url);
+  assert.strictEqual(media.metadata.reframes['9_16'].method, 'yolo-crop');
+  assert.notStrictEqual(media.metadata.reframes['9_16'].url, OUTPAINT_URL);
+});
+
 // ── Summary ──────────────────────────────────────────────────────────
 
 const total = results.length;

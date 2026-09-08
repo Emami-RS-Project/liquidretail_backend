@@ -177,12 +177,54 @@ console.log('\nE. pure helpers — executed, not just read');
     check('E1 b64Len(3) === 4', b64Len(3) === 4, String(b64Len(3)));
     check('E2 b64Len(1) === 4 (padded, not 1.33)', b64Len(1) === 4, String(b64Len(1)));
     check('E3 b64Len grows ~4/3', b64Len(3_000_000) === 4_000_000, String(b64Len(3_000_000)));
-    // A real measured stack must sit well under the ceiling: the largest
-    // Pelagic 3-ref stack measured 2.11 MB on disk.
-    const measuredLargest = 2.11 * 1024 * 1024;
-    check('E4 the largest MEASURED stack fits the 20 MB ceiling with room',
-      b64Len(measuredLargest) < 20 * 1024 * 1024,
-      `${(b64Len(measuredLargest) / 1048576).toFixed(2)} MB`);
+    // Execute the REAL default IIFE, not a regex for "64" in source (a
+    // comment containing 64 would have satisfied that, and a hardcoded
+    // 64 * 1024 * 1024 in the harness would not move if the IIFE did).
+    const iife = ASSEMBLY_SRC.match(/const MAX_TOTAL_B64_BYTES = \(\(\) => \{[\s\S]*?\}\)\(\);/);
+    check('E4 IIFE is extractable', !!iife);
+    const ceilingWithEnv = (env) => new Function('process', `${iife[0]}\nreturn MAX_TOTAL_B64_BYTES;`)({ env });
+    const ceiling = iife ? ceilingWithEnv({}) : 0;
+    check('E4 default ceiling IS 64 MB when env is unset (executed IIFE)',
+      ceiling === 64 * 1024 * 1024,
+      `got ${ceiling}`);
+    check('E4f blank GEMINI_VIDEO_MAX_PAYLOAD_BYTES falls back to 64 MB (Number("")===0 is not a valid override)',
+      iife && ceilingWithEnv({ GEMINI_VIDEO_MAX_PAYLOAD_BYTES: '' }) === 64 * 1024 * 1024);
+    check('E4g a positive env override is honoured',
+      iife && ceilingWithEnv({ GEMINI_VIDEO_MAX_PAYLOAD_BYTES: String(10 * 1024 * 1024) }) === 10 * 1024 * 1024);
+    const measuredCatalog = 2.11 * 1024 * 1024;
+    check('E4a un-outpainted catalog stack still fits with room',
+      b64Len(measuredCatalog) < ceiling,
+      `${(b64Len(measuredCatalog) / 1048576).toFixed(2)} MB`);
+    // 3 × 7.5 MB raw × 4/3 ≈ 30 MB — the Pelagic incident shape.
+    const measuredOutpaintStack = 3 * 7.5 * 1024 * 1024;
+    check('E4b 3×7.5MB 4k outpaint stack fits the executed ceiling',
+      b64Len(measuredOutpaintStack) < ceiling,
+      `${(b64Len(measuredOutpaintStack) / 1048576).toFixed(2)} MB b64 vs ${(ceiling / 1048576).toFixed(0)} MB cap`);
+    const measuredOutpaintLow = 3 * 5.1 * 1024 * 1024;
+    check('E4c 3×5.1MB 4k outpaint stack (low end of tonight\'s range) also fits',
+      b64Len(measuredOutpaintLow) < ceiling);
+    // A 40 MP uncompressed TIFF (~120 MB raw) still refuses. 40 MB raw
+    // was the old 20 MB ceiling's bound; at 64 MB that size now fits
+    // (53 MB b64), so the pathological case has to be TIFF-class.
+    check('E4d a 40 MP TIFF-class payload still exceeds the executed ceiling',
+      b64Len(120 * 1024 * 1024) > ceiling,
+      `${(b64Len(120 * 1024 * 1024) / 1048576).toFixed(2)} MB b64`);
+    // Execute the REAL refuse-if-too-large block (comment-stripped), not
+    // a "/GEMINI_REFS_TOO_LARGE/.test(src) && /throw err/" pair that would
+    // pass if those strings lived in a comment or a different branch.
+    const refuseSrc = ASSEMBLY.match(/if \(totalB64 > MAX_TOTAL_B64_BYTES\) \{[\s\S]*?throw err;\s*\}/);
+    check('E4e refuse block is extractable from comment-stripped source', !!refuseSrc);
+    if (refuseSrc) {
+      const refuse = new Function('totalB64', 'MAX_TOTAL_B64_BYTES', refuseSrc[0]);
+      let threw = null;
+      try { refuse(ceiling + 1, ceiling); } catch (e) { threw = e; }
+      check('E4e over-ceiling THROWS GEMINI_REFS_TOO_LARGE (not a silent drop)',
+        threw != null && threw.code === 'GEMINI_REFS_TOO_LARGE',
+        threw ? `code=${threw.code}` : 'did not throw');
+      let kept = true;
+      try { refuse(ceiling, ceiling); } catch { kept = false; }
+      check('E4e equal-to-ceiling is kept (`>` not `>=`)', kept);
+    }
   }
   check('E5 the reference cap is 3 by default, not Atlas 7/5',
     /Number\.isFinite\(raw\) && raw >= 1 \? Math\.floor\(raw\) : 3/.test(ASSEMBLY));

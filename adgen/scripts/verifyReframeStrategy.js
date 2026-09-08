@@ -19,7 +19,7 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '..', 'config', 'defaults.env') });
 
 const chooser = require('../src/services/reframeStrategyChooser');
-const { chooseStrategy, isCropFirstEnabled, __test } = chooser;
+const { chooseStrategy, isCropFirstEnabled, isOutpaintClassMethod, preferCropOverOutpaintCache, OUTPAINT_CLASS_METHODS, __test } = chooser;
 const {
   parseAspect, subjectUnionBbox, computeCropRect, computeForceCropRect,
   buildCloudinaryCropUrl, overfitTolerancePct, compositeMaskMethod,
@@ -442,6 +442,127 @@ try {
 
 } finally {
   process.env.REFRAME_STRATEGY = prior;
+}
+
+// ── cached-outpaint self-heal (pure) ─────────────────────────────────
+//
+// A cached method:'outpaint' entry from an earlier chooser/config/DINO
+// state must lose to a FRESH crop decision. A cached crop must not be
+// re-checked (already the best case). Persist is asserted in
+// verifyVideoReferenceResolver / verifyReframeHoldBounded.
+
+console.log('\n== cached outpaint yields to a fresh crop; cached crop is left alone ==');
+
+const HEAL_URL = 'https://res.cloudinary.com/f/image/upload/v1/x.jpg';
+const HEAL_MEDIA = {
+  width: 2000, height: 2000,
+  refinedProducts: [{ x1: 800, y1: 400, x2: 1200, y2: 1600 }]
+};
+
+check('OUTPAINT_CLASS_METHODS is exactly outpaint + composite-outpaint', () => {
+  assert.deepStrictEqual([...OUTPAINT_CLASS_METHODS].sort(), ['composite-outpaint', 'outpaint']);
+});
+
+check('isOutpaintClassMethod("outpaint") true', () => {
+  assert.strictEqual(isOutpaintClassMethod('outpaint'), true);
+});
+
+check('isOutpaintClassMethod("composite-outpaint") true', () => {
+  assert.strictEqual(isOutpaintClassMethod('composite-outpaint'), true);
+});
+
+check('isOutpaintClassMethod("yolo-crop") false', () => {
+  assert.strictEqual(isOutpaintClassMethod('yolo-crop'), false);
+});
+
+check('isOutpaintClassMethod("yolo-crop-forced") false', () => {
+  assert.strictEqual(isOutpaintClassMethod('yolo-crop-forced'), false);
+});
+
+check('isOutpaintClassMethod("pad-product-only") false', () => {
+  assert.strictEqual(isOutpaintClassMethod('pad-product-only'), false);
+});
+
+check('isOutpaintClassMethod("exact") false', () => {
+  assert.strictEqual(isOutpaintClassMethod('exact'), false);
+});
+
+check('isOutpaintClassMethod(null/undefined/"") false', () => {
+  assert.strictEqual(isOutpaintClassMethod(null), false);
+  assert.strictEqual(isOutpaintClassMethod(undefined), false);
+  assert.strictEqual(isOutpaintClassMethod(''), false);
+});
+
+{
+  const priorHeal = process.env.REFRAME_STRATEGY;
+  process.env.REFRAME_STRATEGY = 'crop-first';
+  try {
+    check('cached outpaint + crop-eligible media → preferCrop returns yolo-crop', () => {
+      const s = preferCropOverOutpaintCache({
+        media: HEAL_MEDIA,
+        aspectRatio: '9:16',
+        sourceUrl: HEAL_URL,
+        cachedMethod: 'outpaint'
+      });
+      assert.ok(s, 'expected a crop supersede, got null');
+      assert.strictEqual(s.action, 'crop');
+      assert.strictEqual(s.method, 'yolo-crop');
+      assert.match(s.url, /c_crop/);
+    });
+
+    check('cached composite-outpaint + crop-eligible media → also superseded', () => {
+      const s = preferCropOverOutpaintCache({
+        media: HEAL_MEDIA,
+        aspectRatio: '9:16',
+        sourceUrl: HEAL_URL,
+        cachedMethod: 'composite-outpaint'
+      });
+      assert.ok(s);
+      assert.strictEqual(s.action, 'crop');
+    });
+
+    check('cached yolo-crop is NOT re-checked (returns null even though crop would succeed)', () => {
+      const s = preferCropOverOutpaintCache({
+        media: HEAL_MEDIA,
+        aspectRatio: '9:16',
+        sourceUrl: HEAL_URL,
+        cachedMethod: 'yolo-crop'
+      });
+      assert.strictEqual(s, null);
+    });
+
+    check('cached yolo-crop-forced is NOT re-checked', () => {
+      const s = preferCropOverOutpaintCache({
+        media: HEAL_MEDIA,
+        aspectRatio: '9:16',
+        sourceUrl: HEAL_URL,
+        cachedMethod: 'yolo-crop-forced'
+      });
+      assert.strictEqual(s, null);
+    });
+
+    check('cached pad-product-only is NOT re-checked', () => {
+      const s = preferCropOverOutpaintCache({
+        media: HEAL_MEDIA,
+        aspectRatio: '9:16',
+        sourceUrl: HEAL_URL,
+        cachedMethod: 'pad-product-only'
+      });
+      assert.strictEqual(s, null);
+    });
+
+    check('cached outpaint + no bboxes (chooser defers) → cache stands', () => {
+      const s = preferCropOverOutpaintCache({
+        media: { width: 2000, height: 2000, refinedProducts: [] },
+        aspectRatio: '9:16',
+        sourceUrl: HEAL_URL,
+        cachedMethod: 'outpaint'
+      });
+      assert.strictEqual(s, null);
+    });
+  } finally {
+    process.env.REFRAME_STRATEGY = priorHeal;
+  }
 }
 
 // ── Summary ───────────────────────────────────────────────────────────
