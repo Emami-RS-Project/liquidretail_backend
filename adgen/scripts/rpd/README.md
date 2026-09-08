@@ -553,9 +553,11 @@ flat $1.60. An unprobeable seed warns rather than refusing (matching production)
 
 - **Statics** reuse the production judge (`adVisionQcService.judgeRender`), so harness verdicts are
   directly comparable with production QC.
-- **Video** extracts 4 frames (ffmpeg) and sends seed + frames through the same `ad-vision-qc`
-  model role with a rubric covering seed fidelity, hallucinated parts, transition artifacts and
-  text legibility.
+- **Video** extracts 4 frames (local ffmpeg, data URIs — `rpd eval` does not require `--upload`)
+  spaced across the clip's real duration and sends seed + `spec.seed.refs` through the same
+  production judge (`adVisionQcService.judgeVideoRender`) production uses at titling time. Same
+  four category keys (`competitor_marks` / `product_fidelity` / `text_defects` / `layout_safe_box`),
+  same `parseVerdict` shape, same multi-ref "legitimate variation" guidance.
 
 Verdicts are **advisory**: badged "auto-eval — verify before trusting", never overwriting a human
 note, never gating anything. Vision calls are billable and have their **own** cap
