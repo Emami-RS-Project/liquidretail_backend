@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "9b107e55f2f3424c1d92610e8d7a04087200dea1",
-  "generatedAt": "2026-09-08T01:49:51.449Z",
+  "backendHead": "6861e0533a93e21769e52e3236e6bf56a858c2f3",
+  "generatedAt": "2026-09-08T02:35:00.000Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "a8d6f60ecc8e0ca4f5bfe8d7a09a242efd5c3c93d603204820cee72a06c19240",
@@ -630,11 +630,11 @@
       "owedSince": null
     },
     "services/adRegenerateService.js": {
-      "backendHash": "579cff7daa7252268dbb0bbb111e3bc5ca5ac5c5b4b01f97b3d8ef0e1fb737d0",
-      "adgenHash": "ae0fe70df405f8071efe79633c019c4b3199a955f701ed07a1297e866fad5f35",
-      "backendSha": "fb2bf533f9649897b2b40db2315d8bc5920c8119",
+      "backendHash": "2845060500a797628b150f0d055b373fcfd4fbabcabc930c6452b561b9fcf9db",
+      "adgenHash": "e7b5189a7e18936210ab4d73cb44be3dd1b0cc7d977562b5e1b94fa59346cd3f",
+      "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
       "status": "fork",
-      "reason": "Debt dated 2026-08-27 is now moot: PR #411/#413 (2026-09-07) deleted backend's in-process regenerate execution entirely -- backend's copy only stamps Ad.regenerationRequest and hands off to adgen's regenerateConsumer (confirmed by a dedicated dead-code audit the same day, docs/dormant-render-execution-comments PR). There is no remaining backend execution logic for adgen to port from or converge with -- this file is adgen-owned execution now, permanently. This PR additionally adds Cloudinary-cleanup wiring (snapshotAdCloudinaryState / destroyReplacedAdAssets in runClaimedRegeneration + recascadeDerivativeSibling)."
+      "reason": "This PR adds videoResolutionOverride threading as complementary halves of one feature: backend's copy gained the request-validation half (parseRegenVideoResolutionOverride, the 400 checks, stamping onto Ad.regenerationRequest); adgen's copy gained the execution half (runVideoFull/videoRouter/atlasVideoService.generateForAd resolutionOverride threading). Neither side's new code is a verbatim port of the other -- OWES PORTS IN BOTH DIRECTIONS the next time either half's request/response shape for this field changes, since the two are now mutually dependent."
     },
     "services/adStage.js": {
       "backendHash": "437314029f1ff3ea5dcd35f68ba074c2fbc30fe20c38c706f72e9b3c4b66529b",
@@ -754,10 +754,10 @@
     },
     "services/atlasVideoService.js": {
       "backendHash": "b98e339a27ba6f9588acb9783fcea8d2fdf3c6e307ae4e83d29d662aeab25eb8",
-      "adgenHash": "362846cbaec6353b1d85d2561308c42bf1b8098083d022f86ba57c987d8051d2",
+      "adgenHash": "PENDING_RECONCILE",
       "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
       "status": "fork",
-      "reason": "QC-fail 720p retry: generateForAd retryOverride pins attempt-1 prompt/refs/model/aspect and forces resolution 720p; retryVideoAt720pAfterQcFailure is the thin resubmit primitive. Backend copy is the dormant pre-cutover in-process path. Remaining fork unchanged (video-provider collapse / MAX_POLL_MS). Automatic retry is gated OFF by QC_RETRY_720P_ENABLED (strict === 'true')."
+      "reason": "Two independent forks merged together: (1) manual regenerate-at-720p added an additive bare resolutionOverride param threaded through buildSubmissionBody/submitGeneration/generateForAd (wins over env/caps defaults on the normal generate path; every pre-existing caller omits it); (2) QC-fail 720p retry (this PR) added the DISTINCT retryOverride object, which pins attempt-1 prompt/refs/model/aspect and forces resolution 720p for the automatic resubmit, via the thin retryVideoAt720pAfterQcFailure primitive, gated OFF by QC_RETRY_720P_ENABLED (strict === 'true'). Both params coexist; retryOverride.resolution wins over the bare resolutionOverride when both would apply. adgen-only — backend's copy of this file is the dormant pre-cutover in-process video path (production video generation is adgen-only), so there is nothing to port there. Deliberate fork, per the prior recorded reason (video-provider collapse / MAX_POLL_MS divergence). Hash to be reconciled after this merge lands via verifyVendorDrift.js --reconcile."
     },
     "services/basePlateCropService.js": {
       "backendHash": "ae8b89e98f69160f27b8faad175a2fdfe16f53122098dd5dd8a11d0e4fc48443",

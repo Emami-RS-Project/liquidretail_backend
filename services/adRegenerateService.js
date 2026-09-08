@@ -121,6 +121,21 @@ function parseRegenVideoPromptFields(body = {}) {
   return { ok: true, videoPromptRaw, videoPromptGuidance };
 }
 
+// Validate the optional videoResolutionOverride on POST /:id/regenerate.
+// Literal '720p' only — this button never sends another value. Absent /
+// empty / null collapse to null (ordinary regenerate, provider default).
+// Anything else 400s with a fixed message the route echoes verbatim.
+function parseRegenVideoResolutionOverride(body = {}) {
+  const v = body.videoResolutionOverride;
+  if (v == null || v === '') {
+    return { ok: true, videoResolutionOverride: null };
+  }
+  if (v !== '720p') {
+    return { ok: false, error: "videoResolutionOverride must be '720p'" };
+  }
+  return { ok: true, videoResolutionOverride: '720p' };
+}
+
 // Validate + normalise the optional IMAGE raw prompt on
 // POST /api/ads/:id/regenerate. Same shape of contract as
 // parseRegenVideoPromptFields — non-string rejected, over-cap rejected with
@@ -251,7 +266,8 @@ function resolveVideoRegenCall({
 // intended" and "what the consumer executes" is structurally impossible.
 function buildRegenerationRequest({
   kind, prompt, mode, requestedBy, videoModel, promptOverride,
-  videoPromptRaw, videoPromptGuidance, imagePromptRaw
+  videoPromptRaw, videoPromptGuidance, imagePromptRaw,
+  videoResolutionOverride
 }) {
   return {
     kind,
@@ -262,7 +278,8 @@ function buildRegenerationRequest({
     promptOverride:      promptOverride || null,
     videoPromptRaw:      videoPromptRaw || null,
     videoPromptGuidance: videoPromptGuidance || null,
-    imagePromptRaw:      imagePromptRaw || null
+    imagePromptRaw:      imagePromptRaw || null,
+    videoResolutionOverride: videoResolutionOverride || null
   };
 }
 
@@ -460,7 +477,13 @@ async function regenerateAd({
   // backend no longer maps this into a render-path prompt itself (that
   // mapping, formerly local runImage/resolveImagePromptOverride, was deleted
   // along with the rest of the dormant in-process render fallback).
-  imagePromptRaw = null
+  imagePromptRaw = null,
+  // Per-call video resolution pin (PASS-THROUGH — not persisted). Literal
+  // '720p' only; the route rejects anything else. Rides on
+  // Ad.regenerationRequest so adgen's consumer can read it back; never a
+  // first-class Ad field (the next regenerate with an empty field reverts
+  // to the provider/env default).
+  videoResolutionOverride = null
 }) {
   const adId      = String(ad._id);
   const kind      = ad.kind || 'image';
@@ -492,6 +515,7 @@ async function regenerateAd({
     (videoModel ? ` videoModel=${videoModel}` : '') +
     (videoPromptRaw ? ' videoPromptRaw=true' : '') +
     (videoPromptGuidance && !videoPromptRaw ? ' videoPromptGuidance=true' : '') +
+    (videoResolutionOverride ? ` videoResolutionOverride=${videoResolutionOverride}` : '') +
     (imagePromptRaw ? ' imagePromptRaw=true' : '') +
     // Flags only — never the override text. imagePromptRaw runs ~8k chars and
     // the refinement may legitimately be empty when raw carries the intent.
@@ -521,7 +545,8 @@ async function regenerateAd({
     updatedAt:         new Date(),
     regenerationRequest: buildRegenerationRequest({
       kind, prompt, mode: effMode, requestedBy, videoModel, promptOverride,
-      videoPromptRaw, videoPromptGuidance, imagePromptRaw
+      videoPromptRaw, videoPromptGuidance, imagePromptRaw,
+      videoResolutionOverride
     })
   };
   // ⚠️ MONEY — the lock re-asserts the in-flight guard, not just
@@ -568,6 +593,7 @@ module.exports = {
   VIDEO_PROMPT_RAW_MAX,
   regenerateHasIntent,
   parseRegenVideoPromptFields,
+  parseRegenVideoResolutionOverride,
   resolveVideoRegenCall,
   // Static regenerate raw prompt — pure helper + cap for the offline harness
   // (R5 in scripts/verifyRegeneration.js) and the route gate.

@@ -524,9 +524,13 @@ function extractVideoUri(body) {
  * master with a free GET.
  */
 async function generateForAd({ ad, prompt = null, images = null, aspectRatio, durationSec, operatorPrompt = null, allowResume = true, campaignRunId = null, modelOverride = null, resolutionOverride = null }) {
-  // resolutionOverride (feat/qc-fail-720p-retry): forces the requested
-  // resolution for THIS call only — today only
-  // retryVideoAt720pAfterQcFailure passes it. Every other call site omits
+  // resolutionOverride: forces the requested resolution for THIS call only.
+  // Two callers today, both bare strings (Gemini has no separate retryOverride
+  // object the way Atlas does — see atlasVideoService.js's retryOverride vs
+  // resolutionOverride precedence dance for why): manual regenerate-at-720p
+  // (operator-initiated, via videoRouter/adRegenerateService) and the
+  // automatic QC-fail 720p retry's retryVideoAt720pAfterQcFailure (hardcodes
+  // '720p', gated OFF by QC_RETRY_720P_ENABLED). Every other call site omits
   // it and is byte-identical to before (DEFAULT_RESOLUTION, unchanged).
   const resolution = resolutionOverride || DEFAULT_RESOLUTION;
   const secs = Number(durationSec) > 0 ? Number(durationSec) : 10;

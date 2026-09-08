@@ -5460,7 +5460,13 @@ async function generateForAd({
   // (REFRAME_OUTPAINT_MODEL) — a hidden second charge beyond the ~$0.90
   // Omni resubmit this retry is already spending. Every other caller
   // omits this parameter and is byte-for-byte unaffected.
-  retryOverride = null
+  retryOverride = null,
+  // resolutionOverride (manual regenerate-at-720p): a bare string like
+  // '720p'. Wins over env/caps defaults on the normal generate path.
+  // Every existing caller omits it and is byte-for-byte unaffected.
+  // Distinct from retryOverride above — retryOverride.resolution wins over
+  // this when both are present (see the renderResolution precedence below).
+  resolutionOverride = null
 }) {
   if (!enabled()) return { skipped: true, reason: 'VIDEO_PROVIDER != atlas or ATLAS_API_KEY missing' };
 
@@ -5752,10 +5758,19 @@ async function generateForAd({
 
   // Resolution the submission body will actually request — computed BEFORE the submit
   // because the cost estimate is now ledgered at the charge point, not on success.
-  // retryOverride.resolution (when present) wins over BOTH the env default and
-  // caps.defaultResolution — see buildSubmissionBody's resolutionOverride doc.
-  const resolutionOverride = retryOverride ? (retryOverride.resolution || null) : null;
-  const renderResolution = resolutionOverride || (String(caps.paramShape || '').startsWith('gemini-omni')
+  // Precedence:
+  //   1. retryOverride.resolution — QC-retry verbatim-resubmission path ONLY.
+  //      Pins prompt/refs/model/aspect AND resolution; this branch is
+  //      unchanged so the automatic QC-retry stays byte-identical.
+  //   2. resolutionOverride — bare string (today only '720p') on the NORMAL
+  //      generateForAd path. Manual regenerate-at-720p uses this so the
+  //      rest of prompt/model/aspect resolution still runs.
+  //   3. env / caps defaults, unchanged for every existing caller that
+  //      omits both.
+  const effectiveResolutionOverride = retryOverride
+    ? (retryOverride.resolution || null)
+    : (resolutionOverride || null);
+  const renderResolution = effectiveResolutionOverride || (String(caps.paramShape || '').startsWith('gemini-omni')
     ? (process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p')
     : (caps.defaultResolution || '720p'));
   const costUsd = estimateRenderCostUsd({ model, durationSec, resolution: renderResolution });
@@ -5817,7 +5832,7 @@ async function generateForAd({
       const submitT0 = Date.now();
       // Fire-and-forget stage: never awaited on this billable path.
       adStage(ad._id, `master video submit (${aspectRatio})${attempt > 1 ? ` — retry ${attempt - 1}` : ''}`);
-      predictionId = await submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec, resolutionOverride });
+      predictionId = await submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec, resolutionOverride: effectiveResolutionOverride });
       const submitMs = Date.now() - submitT0;
       console.log(`🎬 atlasVideo[ad=${ad._id}]: prediction=${predictionId} polling...`);
 
