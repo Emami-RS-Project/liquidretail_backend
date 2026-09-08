@@ -113,15 +113,25 @@ function safeParseJson(text) {
   return null;
 }
 
-async function evalVideoCell(cell, runDir, { chat, model }) {
+async function evalVideoCell(cell, runDir, { chat, model, refUrlsForEval }) {
   const abs = path.join(runDir, cell.localPath);
   const { dir, frames } = extractFrames(abs);
   try {
+    const refs = Array.isArray(refUrlsForEval) ? refUrlsForEval : [];
     const content = [
       { type: 'text', text: VIDEO_RUBRIC },
-      { type: 'text', text: 'IMAGE 1 — ORIGINAL PRODUCT PHOTO:' },
+      {
+        type: 'text',
+        text: refs.length
+          ? `IMAGE 1 — ORIGINAL PRODUCT PHOTO (primary seed, of ${1 + refs.length} reference photos supplied):`
+          : 'IMAGE 1 — ORIGINAL PRODUCT PHOTO:'
+      },
       { type: 'image_url', image_url: { url: cell.seedUrlForEval } }
     ];
+    refs.forEach((url, i) => {
+      content.push({ type: 'text', text: `IMAGE ${i + 2} — ADDITIONAL REFERENCE PHOTO OF THE SAME PRODUCT (e.g. a different angle):` });
+      content.push({ type: 'image_url', image_url: { url } });
+    });
     frames.forEach((f, i) => {
       content.push({ type: 'text', text: `FRAME ${i + 1} of ${frames.length} (in order):` });
       content.push({ type: 'image_url', image_url: { url: dataUri(f) } });
@@ -235,6 +245,14 @@ async function evalRun(runDir, {
   const brandName = (manifest.spec && manifest.spec.titling && manifest.spec.titling.brandName) || null;
   const seedUrl = manifest.spec && manifest.spec.seed ? manifest.spec.seed.url : null;
   if (!seedUrl) throw new Error('rpd eval: the manifest has no seed url to compare against');
+  // Video-only: the production static judge (adVisionQcService.judgeRender)
+  // has its own fixed signature (a single originalProductUrl) and is left
+  // untouched here — this repo's shared judge, not RPD's to change. Video's
+  // rubric is RPD's own, so it can honestly show every reference photo the
+  // generation itself received, not just the primary seed.
+  const refUrls = (manifest.spec && manifest.spec.seed && Array.isArray(manifest.spec.seed.refs))
+    ? manifest.spec.seed.refs.filter((u) => typeof u === 'string' && u.trim())
+    : [];
 
   const targets = (manifest.cells || []).filter((c) =>
     c.status === 'done' && c.localPath && !(c.notes || []).some((n) => n.auto)
@@ -261,7 +279,7 @@ async function evalRun(runDir, {
     try {
       out = cell.kind === 'static'
         ? await evalStaticCell(cell, runDir, { judge, brandName })
-        : await evalVideoCell(cell, runDir, { chat, model });
+        : await evalVideoCell(cell, runDir, { chat, model, refUrlsForEval: refUrls });
     } catch (err) {
       out = { ok: false, error: err.message };
     }
