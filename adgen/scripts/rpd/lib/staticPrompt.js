@@ -91,7 +91,14 @@ function staticFixture({ spec, variant }) {
     surface: variant.surface || stat.surface || 'meta_feed_1_1',
     seedStyle: variant.seedStyle || stat.seedStyle || null,
     variantKind: variant.variantKind || stat.variantKind || null,
-    seedAspect: variant.seedAspect || stat.seedAspect || null
+    seedAspect: variant.seedAspect || stat.seedAspect || null,
+    // 2026-09-08: threads imageShotHeuristicService.resolveSeedClass's
+    // finer 'lifestyle_scene'/'on_figure_plain' split into shouldPreserveScene
+    // (gated on SEED_CLASS_SCENE_BASED). Mirrors seedStyle/variantKind above —
+    // production computes this from Media.classification/background; the
+    // harness lets a spec/variant supply it directly so a spec can compare
+    // the SAME seedStyle:'lifestyle' cell under both seedClass verdicts.
+    seedClass: variant.seedClass || stat.seedClass || null
   };
 }
 

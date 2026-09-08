@@ -1,0 +1,16 @@
+{
+  "name": "studio-vocab-gymshark-leggings",
+  "notes": "Third, meaningfully different brand (Gymshark, athletic wear) to stress-test whether the on_figure_plain veto and prompt produce brand-appropriate (gym/fitness-context) backgrounds, not just footwear/lifestyle or fishing/outdoor ones. Real seed (product 6a8d1ed8d9e1e0e1dccedbb8, background.sceneType 'Studio' — already correctly on_figure_plain even before the vocab fix, so this tests the underlying scene-preserve mechanism's generalization, not the vocab fix itself.",
+  "seed": { "productId": "6a8d1ed8d9e1e0e1dccedbb8" },
+  "static": {
+    "surface": "meta_feed_1_1",
+    "intent": "product_first_lifestyle",
+    "productDesc": "women's pink running leggings with a pocket, shown worn on a cropped female model against a plain studio backdrop",
+    "seedStyle": "lifestyle",
+    "seedClass": "on_figure_plain",
+    "variantKind": "product_image",
+    "copy": { "headline": "Run Your Way", "rating": 4.7, "reviewCount": 210, "cta": "SHOP NOW" },
+    "models": ["openai/gpt-image-2/edit"],
+    "variants": [ { "id": "fixed-1" } ]
+  }
+}

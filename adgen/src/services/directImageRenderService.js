@@ -1385,16 +1385,34 @@ function shortenToCap(full, cap) {
   return `${full.slice(0, Math.max(1, cap - 1)).trimEnd()}…`;
 }
 
-/** The product sentence the prompt opens with. */
+/**
+ * The product sentence the prompt opens with.
+ *
+ * FIXED 2026-09-07 — `concept?.product_description || concept?.subject` was
+ * dead: neither field is ever written by any Director schema (confirmed by
+ * a repo-wide grep and by a live directConceptsRound call against two real
+ * catalog products — both fields came back null on every concept). Same
+ * defect class as the `conceptLook()` fix documented in conceptProjection.js
+ * (`art_direction` was never emitted either) — an arm speculatively written
+ * against a schema shape the Director never actually produced, so this
+ * fallback silently went straight to `product?.title` on every call, a bare
+ * 1-3 word string with far less briefing value than the catalog's own real
+ * description text.
+ *
+ * Now prefers `product?.description` (CatalogProduct's real, always-present
+ * feature copy) over the bare title. Deliberately does NOT read
+ * `concept.rationale` or any other Director internals here — per
+ * conceptProjection.js's rule, the Director's private reasoning must never
+ * leak into a render prompt, and this fix does not reopen that hole. This
+ * string is briefing text for the model, not text to render — never the
+ * product NAME alone as ad copy, which is dropped by owner instruction and
+ * separately forbidden in the absence block.
+ */
 function describeProductForPrompt({ concept, product, layoutInput }) {
-  // Prefer the Director's own description of what it composed around; it is
-  // written for this concept. Fall back to catalog title, then the layout
-  // input's product block. Never the product NAME alone as ad copy — the name is
-  // dropped by owner instruction and separately forbidden in the absence block;
-  // this string is briefing text for the model, not text to render.
   const fromConcept = concept?.product_description || concept?.subject || null;
   return String(
     fromConcept
+    || product?.description
     || product?.title
     || layoutInput?.product?.name
     || 'the product shown in the supplied photograph'
@@ -1838,9 +1856,15 @@ function buildIntentData({ concept, layoutInput, brand, product = null, cta, cam
   // headline only; subhead undefined). Flag-on: cascade through layoutInput
   // then brand.tagline so ai_brand_led still has a brand line when Director
   // nulls the headline. Do NOT cascade product name/title or description —
-  // resolvedProduct is .select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb') so description is not loaded,
-  // and the product name is forbidden as ad copy by owner directive and
-  // fenced in absences.
+  // description IS now loaded on resolvedProduct (2026-09-08, added so
+  // describeProductForPrompt's product-fidelity fallback below actually
+  // works — it was previously a silent no-op, see session.d/
+  // 2026-09-08_scene-preserve-onfigureplain.md Finding 4), but that is a
+  // DIFFERENT use: a sentence describing what the product looks like for
+  // the model's own reference, never rendered as visible ad copy. This
+  // cascade must still never read product.description/title as headline
+  // or subhead text — the product name is forbidden as ad copy by owner
+  // directive and fenced in absences, independent of what's loaded.
   //
   // Trim every tier; empty string is absent (matches renderableCopy's one()).
   let headline;
@@ -2584,12 +2608,19 @@ async function renderDirectImage(callArgs = {}) {
     LayoutInputArtifact.findById(layoutInputArtifactId).select('input brandId productId').lean(),
     resolveConcept({ adConceptArtifactId, adConceptId, expectedProductId: productId }),
     brandId ? Brand.findById(brandId).lean() : null,
-    productId ? CatalogProduct.findById(productId).select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb').lean() : null,
+    productId ? CatalogProduct.findById(productId).select('title description imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb').lean() : null,
     // classification + technicalInsights feed resolveSeedStyle for the
     // lifestyle scene-preserve branch (STATIC_LIFESTYLE_PRESERVE).
     // width + height feed seedAspectFromDims → resolveAspectTreatment's
     // 'native' arm (without them every preserve submit falls to 'extend').
-    mediaId ? Media.findById(mediaId).select('fileUrl classification technicalInsights width height subjects refinedProducts primarySubjectLabel primarySubjectDesc').lean() : null
+    // background feeds resolveSeedClass's on_figure_plain/lifestyle_scene
+    // split (SEED_CLASS_SCENE_BASED) — omitting it does not break anything
+    // (resolveSeedClass falls back to the per-shotType default), but it
+    // silently loses the whole point of the finer classifier: without a
+    // real background.sceneType/setting to read, an on_model shot in front
+    // of an ACTUAL real environment could not be told apart from one in
+    // front of a studio backdrop.
+    mediaId ? Media.findById(mediaId).select('fileUrl classification technicalInsights background width height subjects refinedProducts primarySubjectLabel primarySubjectDesc').lean() : null
   ]);
   // A missing layout artifact is recoverable: everything it supplies has a
   // source of its own. brand/product come from the explicit args, and themeFor
@@ -2641,7 +2672,7 @@ async function renderDirectImage(callArgs = {}) {
       { alertLevel: 'fatal', alertKey: 'direct-image:no-credentials' }
     );
   }
-  const resolvedProduct = product || (effectiveLayout.productId ? await CatalogProduct.findById(effectiveLayout.productId).select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb').lean() : null);
+  const resolvedProduct = product || (effectiveLayout.productId ? await CatalogProduct.findById(effectiveLayout.productId).select('title description imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb').lean() : null);
   // Delivery dims are NOT derived here any more: they come from the surface the
   // prompt is built from, a few lines below, so the size Sharp writes and the
   // size the geometry block promised the model cannot disagree.
@@ -2740,8 +2771,14 @@ async function renderDirectImage(callArgs = {}) {
   });
   // Lifestyle/UGC scene preserve — intent still owns copy; only the scene
   // fidelity opening swaps when the flag is on (staticAdIntents).
-  const { resolveSeedStyle } = require('./imageShotHeuristicService');
+  const { resolveSeedStyle, resolveSeedClass } = require('./imageShotHeuristicService');
   const seedStyle = resolveSeedStyle(media);
+  // Finer scene-quality split (SEED_CLASS_SCENE_BASED) — see
+  // staticAdIntents.shouldPreserveScene's header for why 'lifestyle'
+  // alone is too coarse: it conflates a real environment with an on-figure
+  // shot against a plain studio backdrop. Always computed (pure, no I/O);
+  // buildPrompt's own gate decides whether it changes anything.
+  const seedClass = resolveSeedClass(media);
   // Seed aspect from Media.width/height — the ONLY production path into
   // resolveAspectTreatment's 'native' arm. Missing/zero dims → null →
   // 'extend' (today's behaviour). First render, regen, and QC re-entry all
@@ -2768,6 +2805,7 @@ async function renderDirectImage(callArgs = {}) {
     },
     surface,
     seedStyle,
+    seedClass,
     variantKind,
     seedAspect,
     // Per-segment prompt-override consumer (staticAdIntents.applySegmentOverrides).

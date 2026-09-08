@@ -419,8 +419,16 @@ function collectPrompts(mod, data) {
     ['pose/hands/framing still free', 'Their pose, their hands and how they are framed are yours to direct'],
     ['cannot strip the wearer', 'you may NOT remove them and show the item lying on its own'],
     ['no hanger/mannequin/flat-lay substitute', 'a hanger, a mannequin, a surface or a flat lay'],
-    ['adding a person stays discretionary', 'you may introduce a person or leave it unpeopled'],
-    ['worn-ness excluded from the free list', 'whether the item is worn, which the paragraph above ties to the reference'],
+    // UPDATED 2026-09-08 (session.d/2026-09-08_scene-preserve-onfigureplain.md
+    // and the same day's static-ad person-inclusion fix): "discretionary"
+    // person-adding was too weak — the reported bug was ads shipping product
+    // shots with nobody in frame. Adding a person to an unpeopled reference is
+    // now the DEFAULT, not an option to weigh; unpeopled is the exception
+    // (spare parts, fasteners, bulk packaging). Pinned positively (the new
+    // default) so a regression back to "discretionary" wording fails loudly.
+    ['adding a person is now the default, not discretionary', 'introduce a person wearing, holding or using it in a natural way appropriate to the product — do this by default'],
+    ['unpeopled only for genuinely person-less products', 'Leave it unpeopled only when the product genuinely is not something a person plausibly wears, holds, carries or uses'],
+    ['worn-ness stays tied to the reference — cannot strip the wearer via the free list either', 'Do not take a worn or held item off the body, and do not remove a person the reference already shows'],
   ];
   for (const [name, needle] of clauses) {
     for (const { intentKey, surface, prompt } of rows) {

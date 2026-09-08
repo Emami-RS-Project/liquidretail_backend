@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "5bc521eefb606c3f57254c8b4093a3f1adb283e1",
-  "generatedAt": "2026-09-08T03:17:59.667Z",
+  "backendHead": "5396f4d53b55166457010da2febf8ec38b6a7e60",
+  "generatedAt": "2026-09-08T17:33:59.505Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
@@ -957,11 +957,10 @@
     },
     "services/imageShotHeuristicService.js": {
       "backendHash": "3a9a4ea1b7ad95437b0374f1d4844c2c20c28c651c0a2d517b52f3171d17111b",
-      "adgenHash": "3a9a4ea1b7ad95437b0374f1d4844c2c20c28c651c0a2d517b52f3171d17111b",
+      "adgenHash": "6189779862da837ae0be1fcbe42910f52b6658882890b493f56f2e58fbb107a3",
       "backendSha": "9b482775e2f75324ca0dec26c9bb405bd1899093",
-      "status": "synced",
-      "portTo": null,
-      "owedSince": null
+      "status": "fork",
+      "reason": "2026-09-08: extended STUDIO_SCENE_RE prefix/suffix vocabulary (white/floor/ecommerce/detail) found via live seed sampling; applied identically to both copies, still byte-identical"
     },
     "services/ingestShotClassifyService.js": {
       "backendHash": "8e44a42bc6fc0b1be58abbef4d1bdb5facada4bf699b39a9dbef8f5360ddc03d",
@@ -1276,10 +1275,10 @@
     },
     "services/staticAdIntents.js": {
       "backendHash": "b1e1763ef7482c536ffd2a5a5e2e4a9361e0951977a7c57e247ec4c6be02ecdf",
-      "adgenHash": "157acd1dd0735042b05a82268a0fd696e4a507872a5e7a02079a14270bc2fd4a",
+      "adgenHash": "b85c4f3c33a825ad68b4a088e1b5d628d3d6741ccd8d8719fe5fa5efb7cfc132",
       "backendSha": "7cc2c7dfbada49e800d3fd0cc1899e9735c425cb",
       "status": "fork",
-      "reason": "2026-09-07: port scrim-forbidden + CTA-removal fix from now-disconnected liquidretail_adgen repo into the live /adgen monorepo path"
+      "reason": "2026-09-08: threaded seedClass through buildPrompt for the on_figure_plain scene-preserve veto; applied identically to both copies alongside the pre-existing person-inclusion/rating-furniture fork"
     },
     "services/staticPipeline.js": {
       "backendHash": "52b48bf6fcbe9a7723c682dcf0c18e35f7819a8e27f6a39704807bec07e49927",

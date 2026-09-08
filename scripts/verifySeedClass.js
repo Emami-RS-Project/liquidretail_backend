@@ -38,7 +38,9 @@
  *   I*  background missing entirely
  *   J*  flag does not change resolveSeedClass; caller-gate stub
  *   K*  resolveSeedStyle behaviour unchanged (zero regression pin)
- *   L*  no existing call site wired (zero behaviour change)
+ *   L*  call-site allowlist — exactly the three known scene-preserve
+ *       callers (services/staticAdIntents.js + both adgen copies), no
+ *       unexpected fourth caller (was "zero call sites" before 2026-09-08)
  *   R*  revert-prove — four mutations applied to a temp copy
  *
  *   node scripts/verifySeedClass.js
@@ -100,7 +102,7 @@ const STUDIO_SURVEY = [
   'Studio Minimal',
   'Studio Beauty',
   // Beauty Studio: first reading of "prefix rule" looks like → scene.
-  // The anchored pattern's prefix set IS (fashion|apparel|beauty|photo(graphy)?),
+  // The anchored pattern's prefix set IS (fashion|apparel|beauty|photo(graphy)?|white|ecommerce),
   // so 'beauty studio' matches and is PLAIN. Pin what the regex actually does.
   'Beauty Studio',
   'Studio Interior',
@@ -125,7 +127,15 @@ const FALSE_POSITIVE = [
   'mountain backdrop',
   'city backdrop',
   'non-studio kitchen',
-  'Fitness Studio'
+  'Fitness Studio',
+  // 2026-09-08: best adversarial case for the new 'floor' suffix — an
+  // activity studio (real venue) whose free-text label happens to end in
+  // "Floor" must still read as scene, not get swept up by the production
+  // fix for "Studio Floor" (photography-studio vocabulary, no activity
+  // prefix). Grok adversarial review (grok-4.6, high effort) confirmed this
+  // is the one residual shape close to the new word and recommended pinning
+  // it rather than narrowing the regex further.
+  'Dance Studio Floor'
 ];
 const REAL_SURVEY = [
   'Urban Street',
@@ -249,7 +259,15 @@ for (const scene of STUDIO_EQUIPMENT) {
   });
 }
 // Prefix / suffix arms that the survey list does not name.
-for (const scene of ['Photo Studio', 'Photography Studio', 'Studio Shot', 'Studio Scene', 'Studio Set']) {
+// 'White Studio' and 'Studio Floor' (2026-09-08) are the two REAL production
+// labels that motivated extending STUDIO_SCENE_RE's prefix/suffix sets — see
+// the sceneVerdict/STUDIO_SCENE_RE comments in imageShotHeuristicService.js.
+// 'Ecommerce Studio' and 'Studio Detail' (2026-09-08, same day, a broader
+// frequency survey of every real sceneType label) are two more — each
+// checked against its own background.description + setting before adding
+// (every sampled instance of both is a genuinely blank seamless/white
+// backdrop, setting 'studio' or 'product-shot-on-solid').
+for (const scene of ['Photo Studio', 'Photography Studio', 'Studio Shot', 'Studio Scene', 'Studio Set', 'White Studio', 'Studio Floor', 'Ecommerce Studio', 'Studio Detail']) {
   checkFn(`B4 prefix/suffix arm '${scene}' → on_figure_plain`, () => {
     assert.ok(isStudioSceneLabel(scene), `isStudioSceneLabel('${scene}')`);
     assert.strictEqual(resolveSeedClass(media('on_model', {
@@ -257,6 +275,50 @@ for (const scene of ['Photo Studio', 'Photography Studio', 'Studio Shot', 'Studi
     })), 'on_figure_plain');
   });
 }
+// The two production labels each also carry a real setting value on the same
+// doc (product-shot-on-solid / studio respectively). Pin that the verdict
+// comes from sceneType matching the anchor, NOT from a sceneType-present
+// fallback to setting — that fallback was a rejected first-draft fix (it
+// broke C-group's 'Beach + contradictory setting studio → scene' guard) and
+// must never be reintroduced silently.
+checkFn("B4b 'White Studio' + setting product-shot-on-solid → on_figure_plain via sceneType", () => {
+  assert.strictEqual(resolveSeedClass(media('on_model', {
+    background: { sceneType: 'White Studio', setting: 'product-shot-on-solid' }
+  })), 'on_figure_plain');
+});
+checkFn("B4c 'Studio Floor' + setting studio → on_figure_plain via sceneType", () => {
+  assert.strictEqual(resolveSeedClass(media('on_model', {
+    background: { sceneType: 'Studio Floor', setting: 'studio' }
+  })), 'on_figure_plain');
+});
+checkFn("B4d 'Ecommerce Studio' + setting product-shot-on-solid → on_figure_plain via sceneType", () => {
+  assert.strictEqual(resolveSeedClass(media('on_model', {
+    background: { sceneType: 'Ecommerce Studio', setting: 'product-shot-on-solid' }
+  })), 'on_figure_plain');
+});
+checkFn("B4e 'Studio Detail' + setting studio → on_figure_plain via sceneType", () => {
+  assert.strictEqual(resolveSeedClass(media('on_model', {
+    background: { sceneType: 'Studio Detail', setting: 'studio' }
+  })), 'on_figure_plain');
+});
+// Two REJECTED candidates from the same survey, pinned so a future session
+// does not "helpfully" add them: both SOUND studio-like by label wording
+// alone, but each real doc's own background.description + setting ('indoor')
+// describes an actual room (a wall, a floor), not a blank backdrop — content
+// wins over label wording. 'Minimal Studio' is the sharpest case: 'Studio
+// Minimal' (reverse word order) IS already accepted above, but this specific
+// label's real description is a genuine indoor scene, so the two must not be
+// conflated by word-order alone.
+checkFn("B4f 'Indoor Studio' + setting indoor → lifestyle_scene (real room, not a backdrop)", () => {
+  assert.strictEqual(resolveSeedClass(media('on_model', {
+    background: { sceneType: 'Indoor Studio', setting: 'indoor' }
+  })), 'lifestyle_scene');
+});
+checkFn("B4g 'Minimal Studio' + setting indoor → lifestyle_scene (real room despite studio wording)", () => {
+  assert.strictEqual(resolveSeedClass(media('on_model', {
+    background: { sceneType: 'Minimal Studio', setting: 'indoor' }
+  })), 'lifestyle_scene');
+});
 
 // ── C. real environments + false-positive labels (rule 2) ──────────────────
 console.log('C. real-environment + false-positive labels');
@@ -662,14 +724,41 @@ check('K7 resolveSeedClass is additive — resolveSeedStyle fn is still exported
   /function resolveSeedStyle\(arg, maybeUrl\)/.test(SRC)
   && /resolveSeedStyle,/.test(SRC));
 
-// ── L. no existing call site wired ─────────────────────────────────────────
-console.log('L. zero call-site change');
+// ── L. call-site allowlist ──────────────────────────────────────────────────
+// 2026-09-08: this used to assert ZERO call sites anywhere (the classifier
+// was fully built but genuinely unused). The scene-preserve on_figure_plain
+// fix (session.d/2026-09-08_scene-preserve-onfigureplain.md) is the first
+// real caller — services/staticAdIntents.js and its two adgen counterparts.
+// L1 now allowlists exactly those three, deliberately named rather than
+// switched off: any FOURTH file referencing these symbols is still an
+// unreviewed, ungated caller and should still fail loudly.
+//
+// SCAN_ROOTS now also covers adgen/src/{services,routes} — the root-only
+// scan used to leave the copy that actually renders (adgen owns live static
+// generation; see adgen/CLAUDE.md) invisible to this pin. adgen has no
+// src/pipelines directory (checked at the time of this change).
+console.log('L. call-site allowlist');
 const SCAN_ROOTS = [
   path.join(__dirname, '..', 'services'),
   path.join(__dirname, '..', 'routes'),
-  path.join(__dirname, '..', 'pipelines')
+  path.join(__dirname, '..', 'pipelines'),
+  path.join(__dirname, '..', 'adgen', 'src', 'services'),
+  path.join(__dirname, '..', 'adgen', 'src', 'routes')
 ];
+// The definition file itself, in both trees — never a "caller".
+const DEFINITION_FILES = new Set([
+  path.resolve(SVC_PATH),
+  path.resolve(path.join(__dirname, '..', 'adgen', 'src', SVC_REL))
+]);
+// The only files allowed to reference these symbols today. Adding a name
+// here is a deliberate, reviewed decision — see the header comment above.
+const ALLOWED_CALLERS = new Set([
+  path.join('services', 'staticAdIntents.js'),
+  path.join('adgen', 'src', 'services', 'staticAdIntents.js'),
+  path.join('adgen', 'src', 'services', 'directImageRenderService.js')
+]);
 const wired = [];
+const unexpectedWired = [];
 const leakedVideoHelper = [];
 function walkJs(dir) {
   let entries;
@@ -684,10 +773,12 @@ function walkJs(dir) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) { walkJs(p); continue; }
     if (!e.name.endsWith('.js')) continue;
-    if (path.resolve(p) === path.resolve(SVC_PATH)) continue;
+    if (DEFINITION_FILES.has(path.resolve(p))) continue;
     const txt = fs.readFileSync(p, 'utf8');
     if (/\bresolveSeedClass\b|\bSTUDIO_SCENE_RE\b|\bisSeedClassSceneBased\b|\bisStudioSceneLabel\b/.test(txt)) {
-      wired.push(path.relative(path.join(__dirname, '..'), p));
+      const rel = path.relative(path.join(__dirname, '..'), p);
+      wired.push(rel);
+      if (!ALLOWED_CALLERS.has(rel)) unexpectedWired.push(rel);
     }
     if (/\bseedClassForVideo\b/.test(txt)) {
       leakedVideoHelper.push(path.relative(path.join(__dirname, '..'), p));
@@ -695,9 +786,13 @@ function walkJs(dir) {
   }
 }
 for (const root of SCAN_ROOTS) walkJs(root);
-check('L1 no service/route/pipeline call site uses the new symbols yet',
-  wired.length === 0,
-  wired.length ? `wired: ${wired.join(', ')}` : '');
+check('L1 the three known scene-preserve callers are wired (both staticAdIntents.js copies + adgen renderer)',
+  ALLOWED_CALLERS.size === wired.length &&
+  [...ALLOWED_CALLERS].every((f) => wired.includes(f)),
+  `wired: ${wired.join(', ') || '(none)'}`);
+check('L1c no UNEXPECTED service/route/pipeline call site uses the new symbols',
+  unexpectedWired.length === 0,
+  unexpectedWired.length ? `unexpected: ${unexpectedWired.join(', ')}` : '');
 check('L1b seedClassForVideo is not referenced outside the service',
   leakedVideoHelper.length === 0,
   leakedVideoHelper.length ? `leaked: ${leakedVideoHelper.join(', ')}` : '');
