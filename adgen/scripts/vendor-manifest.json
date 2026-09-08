@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "a68f4efc3147b42ad44daa67e3785db4234081af",
-  "generatedAt": "2026-09-07T20:49:28.691Z",
+  "backendHead": "64da9b29273a6807574cfdcd7d8d0a3ecad2a71f",
+  "generatedAt": "2026-09-08T00:28:29.492Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "a8d6f60ecc8e0ca4f5bfe8d7a09a242efd5c3c93d603204820cee72a06c19240",
@@ -1281,12 +1281,10 @@
     },
     "services/staticAdIntents.js": {
       "backendHash": "b1e1763ef7482c536ffd2a5a5e2e4a9361e0951977a7c57e247ec4c6be02ecdf",
-      "adgenHash": "b25c1490a1b3b820564cc629446df9cf71ce2f053d8d6657cb01405f5e4b4a30",
+      "adgenHash": "157acd1dd0735042b05a82268a0fd696e4a507872a5e7a02079a14270bc2fd4a",
       "backendSha": "7cc2c7dfbada49e800d3fd0cc1899e9735c425cb",
       "status": "fork",
-      "reason": "Fork, not a copy. This change ports the segment-override CONSUMER (loadSegmentOverrides / matchSegmentOverride / applySegmentOverrides / buildPrompt({segment}) / appliedOverrides / promptFlagsSnapshot) so an adopted qc-insights row in config/segmentPromptOverrides.js actually appends at render instead of silently no-op'ing. Require path is ../../config/segmentPromptOverrides (adgen config/ is at repo root; ../config resolves to the FILE src/config.js) — backend uses ../config/ because its services/ sits at repo root. Remaining adgen-owned policy hunks, not this port: APPAREL EXTENSION on the role preamble (isApparelCategory — measured gpt-image-2 safety false-positives on Pelagic swimwear); SOCIAL_PROOF_QUOTE_ELIGIBLE (quote-only eligibility + function-shaped core); PMAX_DRAWCTA_QUOTE_ONLY_SOCIAL_PROOF; resolveDrawCta/applyDensity taking `data` so those flags can see the quote-only shape. Empty table is a byte-identical no-op vs the pre-port SHA matrix (verifyStaticIntentChanges.js G).",
-      "portTo": null,
-      "owedSince": null
+      "reason": "2026-09-07: port scrim-forbidden + CTA-removal fix from now-disconnected liquidretail_adgen repo into the live /adgen monorepo path"
     },
     "services/staticPipeline.js": {
       "backendHash": "52b48bf6fcbe9a7723c682dcf0c18e35f7819a8e27f6a39704807bec07e49927",
@@ -1343,12 +1341,10 @@
     },
     "services/veoPromptBuilder.js": {
       "backendHash": "86cf32181d02df4531254d731a782e596078c70b3968aee39da021d3375208c5",
-      "adgenHash": "a3ae7681095b3464f3e1da133d272de8e6521eaa92acc303f8f05bdef176188b",
+      "adgenHash": "36511176778321553f602dfd18a8d086e43a43f8561e92ec88f55b166eb36e06",
       "backendSha": "45f5e3c05b472f319a78fdc53e19229cd2001434",
       "status": "fork",
-      "reason": "Backend counterpart is dormant generation code slated for REMOVAL (owner 2026-09-04: adgen is the only generator; strip backend's copy, don't sync it). adgen's copy is the live one; nothing is owed to backend.",
-      "portTo": null,
-      "owedSince": null
+      "reason": "2026-09-07: port 3-clip CORE prompt fix from now-disconnected liquidretail_adgen repo into the live /adgen monorepo path"
     },
     "services/veoStoryboardService.js": {
       "backendHash": "4e3d420b3a6219b72f25dc95aac6afa679ea5c23a7c3627d1abcb9ba9f5bf344",
