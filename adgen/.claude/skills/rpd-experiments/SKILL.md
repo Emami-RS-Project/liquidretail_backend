@@ -6,7 +6,8 @@ description: Run rapid product development (RPD) experiments — A/B video model
 # RPD experiments
 
 The harness lives at `scripts/rpd/` (read its `README.md` for full detail). It runs entirely from
-this checkout — **no deploy, no Mongo, no Ad rows, no CostLog**. Cells = `models × variants`.
+this checkout — **no deploy, no Ad rows, no campaign/mint path**. Mongo is used for
+`seed.productId` (catalog seed + Director cache/detect). Cells = `models × variants`.
 
 **Two things changed 2026-09-03/04, read before touching the video side:** (1) the video
 prompt is now one frozen CORE paragraph, the same for every model — the old per-field
@@ -77,9 +78,12 @@ Atlas cells need `ATLAS_API_KEY`; Gemini cells need `GEMINI_VIDEO_API_KEY`. The
 runner now checks only the keys the run actually needs, so a Gemini-only
 experiment does not require an Atlas key.
 
-**3. Always dry-run first, and say the price out loud.** `rpd.js run <spec>` is
-free and writes every prompt to `manifest.json`. Show them the number and get a
-yes before adding `--live --max-usd <cap>`. Never spend without an explicit ok.
+**3. Always dry-run first, and say the price out loud.** `rpd.js run <spec>`
+writes every prompt to `manifest.json` and never submits an image/video
+generation. With `seed.productId` and no cached Director artifact it may still
+spend on detect+Director prep — say that. Show the generation estimate and get a
+yes before adding `--live --max-usd <cap>`. Never spend generation budget without
+an explicit ok.
 
 **4. Show seed images as numbered thumbnails and ask for the order** — every
 time, without being asked. (Same rule as the workflow below; in newbie mode it
@@ -134,8 +138,9 @@ are. So:
 3. **Say when a prompt change is the wrong tool.** Fidelity complaints usually are not fixed
    by stronger wording; prompt levers move motion, pacing, look and scene.
 4. **One variable per arm**, baseline included, and pick a product whose logo/label IS the test.
-5. **Dry-run — it is free** and prints the exact prompt per cell, so they see what will be sent
-   before any money moves.
+5. **Dry-run first** — prints the exact prompt per cell, no image/video submit.
+   With `seed.productId` this may still run detect+Director (say so). They see
+   what will be sent before generation money moves.
 6. **Ask for the dollar cap.** Never invent one.
 7. Note observations, publish, add a LEARNINGS row. Say plainly when n=1 proves little.
 
@@ -183,6 +188,8 @@ hand them syntax. Concretely:
    baseline spec, not an experimental arm.
 6. **Dry-run first regardless**, show the estimate, get the dollar cap, then go
    live. Same safety contract as any other run — this workflow doesn't skip it.
+   With `seed.productId`, say whether Director prep will be a cache hit or a
+   live detect+round (the latter costs even on dry-run).
 7. **Hand back the titled file** (or the raw master if they said no titling),
    per "Delivering results" below.
 
@@ -192,9 +199,13 @@ this same real product instead of a synthetic A/B.
 
 ## The safety contract (do not improvise around it)
 
-- **Dry-run is the default.** `--live` is the only billable door and **requires `--max-usd N`**.
-  Never invent a cap: the USER sets the budget. If they asked for a live run without naming one,
-  ask for the dollar cap first.
+- **Dry-run is the default for image/video generation.** `--live` is the only generation
+  door and **requires `--max-usd N`**. Never invent a cap: the USER sets the budget. If they
+  asked for a live run without naming one, ask for the dollar cap first.
+  With `seed.productId` and no cached Director artifact, a dry-run may still spend on
+  YOLO detect + a Director round (the production prep pipeline) so the prompt is real
+  direction. Say that out loud. Opt out with `spec.director.enabled: false`. A `seed.url`
+  spec never takes that path.
 - **Never re-run `--live` to "finish" a run.** Recovery is always
   `node scripts/rpd/rpd.js resume <runDir>` — free, re-polls receipts, downloads, reconciles
   settled prices, and runs the titling pass. A second `run --live` is a new billable matrix.
@@ -207,7 +218,7 @@ this same real product instead of a synthetic A/B.
 
 ```bash
 node scripts/rpd/rpd.js models                     # slugs, caps, floor estimates
-node scripts/rpd/rpd.js run spec.json              # FREE: prompts, bodies, estimates, gallery
+node scripts/rpd/rpd.js run spec.json              # no image/video submit (Director prep may spend on productId cache-miss)
 node scripts/rpd/rpd.js run spec.json --live --max-usd <N>   # billable, hard-capped
 node scripts/rpd/rpd.js resume <runDir>            # finish interrupted runs (free)
 node scripts/rpd/rpd.js eval <runDir>              # vision-grade cells (own cap: --eval-max-usd)
@@ -223,13 +234,16 @@ Static levers are `raw` / `blocks` / `patch` (see `references/spec-authoring.md`
 a whole canonical prompt block, which is how you measure a proposed change to
 `staticAdIntents` before anyone commits it.
 
-**Seed from the catalog** with `seed": {"productId": "..."}` (needs `MONGODB_URI`, read-only) —
+**Seed from the catalog** with `"seed": {"productId": "..."}` (needs `MONGODB_URI`) —
 resolves the merchant-feed primary + 2 refs by the live production rule and stamps them into the
-manifest. **If `spec.titling` is also set**, the same lookup wires the product's real Brand
-(logo/colors/font/tagline/titleStylePreset) into `spec.titling.brand` and its real title into
-`spec.titling.copy.headline` — unless the operator already set those themselves, which always
-wins. Titling then renders with that real look instead of the fixture brand. Proof-class copy
-(quote/rating/reviewCount) is never touched by this — still absent unless explicitly supplied.
+manifest. Static `productDesc` / copy (and titling headline) then default from the real
+Director: cache hit if a `CreativeDirectionArtifact` exists, otherwise detect + a Director
+round (billable even on dry-run; next run is a cache hit). Operator-supplied copy always
+wins; `director.enabled: false` opts out to catalog title / brand tagline. **If `spec.titling`
+is also set**, the same lookup wires the product's real Brand (logo/colors/font/tagline/
+titleStylePreset) into `spec.titling.brand`. Proof-class copy (quote/rating/reviewCount) is
+never touched by this — still absent unless explicitly supplied, including from a Director
+concept that carries those fields. The video camera prompt stays Director-free.
 **Reference-to-video** models run when `seed.videoUrl` is set.
 
 **Queue an experiment for tonight** by adding a variant to

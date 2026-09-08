@@ -681,6 +681,398 @@ const codeOnly = (src) => src
     assert.strictEqual(f.data.cta, 'SHOP NOW'); // production default, not a claim
   });
 
+  // ── DR. Director-defaulted static/titling copy (once per runSpec) ──────
+  // Behavioural, against the real exported helpers with injected fakes.
+  // No Mongo, no network, no ATLAS_API_KEY.
+  console.log('\nDR. Director-defaulted copy (cache / detect+round / opt-out)');
+  const directorMod = require(path.join(RPD, 'lib', 'directorDirection'));
+  const CONCEPT = {
+    concept_id: 'c-dir-1',
+    product_description: 'a wool runner in natural white with a tonal lace',
+    subject: 'should lose to product_description',
+    copy: { headline: 'Wool, not foam.', subheadline: 'Comfort that lasts.', cta: 'SHOP NOW' },
+    rating: 4.9,
+    reviewCount: 1200,
+    quote: 'Best shoes I have ever owned',
+    attribution: 'A. Reviewer'
+  };
+  const resolvedBase = () => ({
+    url: 'https://res.cloudinary.com/x/image/upload/v1/seed.jpg',
+    refs: ['https://res.cloudinary.com/x/image/upload/v1/ref.jpg'],
+    productTitle: 'Wool Runner',
+    brandName: 'Allbirds',
+    brandHex: '#101418',
+    brand: { _id: 'brand-1', name: 'Allbirds', tagline: 'Nature made better' },
+    docs: [
+      { _id: 'media-seed', fileUrl: 'https://res.cloudinary.com/x/image/upload/v1/seed.jpg', fileType: 'image', metadata: { imageRole: 'hero' } },
+      { _id: 'media-ref', fileUrl: 'https://res.cloudinary.com/x/image/upload/v1/ref.jpg', fileType: 'image', metadata: { imageRole: 'alt' } }
+    ]
+  });
+  const specNeedingDirector = () => ({
+    name: 'dr-test',
+    seed: { productId: 'prod-1' },
+    static: {
+      surface: 'meta_feed_1_1',
+      intent: 'brand_led',
+      models: ['openai/gpt-image-2/edit'],
+      variants: [{ id: 'baseline' }]
+    }
+  });
+  const boom = (label) => async () => { throw new Error(`${label} must not be called`); };
+  const stubDescribe = (args) => directorMod.localDescribeProductForPrompt(args);
+  const stubCopy = (c) => {
+    const src = (c && (c.copy || c.copy_picks)) || {};
+    return { headline: src.headline || null, subheadline: src.subheadline || null, cta: src.cta || null };
+  };
+  const baseDeps = (over = {}) => ({
+    describeProductForPrompt: stubDescribe,
+    renderableCopy: stubCopy,
+    PLATFORM_FORMAT_KEYS: ['meta_feed_1_1', 'meta_stories_9_16', 'meta_feed_4_5'],
+    readDirectorCost: async () => null,
+    ...over
+  });
+
+  await checkAsync('DR1 explicit productDesc/copy always wins — detect+Director never fire', async () => {
+    const spec = specNeedingDirector();
+    spec.static.productDesc = 'HAND-TYPED a black cotton tee';
+    spec.static.copy = { headline: 'HAND-TYPED headline', subhead: 'HAND-TYPED sub' };
+    const calls = { detect: 0, director: 0, cache: 0 };
+    await directorMod.applyDirectorDefaults(spec, resolvedBase(), {
+      deps: baseDeps({
+        findLatestArtifact: async () => { calls.cache++; throw new Error('cache must not run'); },
+        ensureDetectForProducts: async () => { calls.detect++; throw new Error('detect must not run'); },
+        directConceptsRound: async () => { calls.director++; throw new Error('director must not run'); }
+      })
+    });
+    assert.strictEqual(spec.static.productDesc, 'HAND-TYPED a black cotton tee');
+    assert.strictEqual(spec.static.copy.headline, 'HAND-TYPED headline');
+    assert.strictEqual(spec.static.copy.subhead, 'HAND-TYPED sub');
+    assert.strictEqual(calls.detect, 0);
+    assert.strictEqual(calls.director, 0);
+    assert.strictEqual(calls.cache, 0);
+    assert.strictEqual(spec.directorPrep.source, 'manual');
+    const { staticFixture } = require(path.join(RPD, 'lib', 'staticPrompt'));
+    const f = staticFixture({ spec, variant: { id: 'b' } });
+    assert.strictEqual(f.product.desc, 'HAND-TYPED a black cotton tee');
+    assert.strictEqual(f.data.headline, 'HAND-TYPED headline');
+  });
+
+  await checkAsync('DR2 cache hit fills productDesc/headline from the concept; detect+Director stay idle', async () => {
+    const spec = specNeedingDirector();
+    let detectArgs = null;
+    let directorArgs = null;
+    await directorMod.applyDirectorDefaults(spec, resolvedBase(), {
+      deps: baseDeps({
+        findLatestArtifact: async ({ brandId, productId, platformFormat }) => {
+          assert.strictEqual(String(brandId), 'brand-1');
+          assert.strictEqual(String(productId), 'prod-1');
+          assert.strictEqual(platformFormat, 'meta_feed_1_1');
+          return { roundIndex: 3, concepts: [CONCEPT] };
+        },
+        ensureDetectForProducts: async (...a) => { detectArgs = a; return { ensured: 0 }; },
+        directConceptsRound: async (a) => { directorArgs = a; return { concepts: [] }; }
+      })
+    });
+    assert.strictEqual(spec.static.productDesc, CONCEPT.product_description);
+    assert.strictEqual(spec.static.copy.headline, 'Wool, not foam.');
+    assert.strictEqual(spec.static.copy.subhead, 'Comfort that lasts.');
+    assert.strictEqual(detectArgs, null, 'cache hit must not call detect');
+    assert.strictEqual(directorArgs, null, 'cache hit must not call Director');
+    assert.strictEqual(spec.directorPrep.source, 'cache');
+    assert.strictEqual(spec.directorPrep.detectFired, false);
+    assert.strictEqual(spec.directorPrep.directorFired, false);
+    assert.strictEqual(spec.directorPrep.roundIndex, 3);
+  });
+
+  await checkAsync('DR3 cache miss fires detect then Director with brandId/productId/platformFormat', async () => {
+    const spec = specNeedingDirector();
+    spec.static.surface = 'meta_stories_9_16';
+    spec.director = { campaignKind: 'product', creativeIntent: 'lean-editorial' };
+    let detectArgs = null;
+    let directorArgs = null;
+    await directorMod.applyDirectorDefaults(spec, resolvedBase(), {
+      deps: baseDeps({
+        findLatestArtifact: async () => null,
+        ensureDetectForProducts: async (ids, opts) => {
+          detectArgs = { ids, opts };
+          return { ensured: 1, ready: 1, timedOut: 0, total: 1 };
+        },
+        directConceptsRound: async (args) => {
+          directorArgs = args;
+          return { concepts: [CONCEPT], roundIndex: 0 };
+        },
+        readDirectorCost: async () => ({ costUsd: 0.105, costSource: 'estimated' })
+      })
+    });
+    assert(detectArgs, 'detect must run on a cache miss');
+    assert.deepStrictEqual(detectArgs.ids, ['prod-1']);
+    assert.strictEqual(String(detectArgs.opts.brandId), 'brand-1');
+    assert.strictEqual(detectArgs.opts.wait, true);
+    assert(directorArgs, 'Director must run on a cache miss');
+    assert.strictEqual(String(directorArgs.brandId), 'brand-1');
+    assert.strictEqual(String(directorArgs.productId), 'prod-1');
+    assert.strictEqual(directorArgs.platformFormat, 'meta_stories_9_16');
+    assert.strictEqual(directorArgs.campaignKind, 'product');
+    assert.strictEqual(directorArgs.creativeIntent, 'lean-editorial');
+    assert(Array.isArray(directorArgs.seededUniverse) && directorArgs.seededUniverse.length === 2);
+    assert.strictEqual(directorArgs.seededUniverse[0].role, 'catalog');
+    assert.strictEqual(directorArgs.seededUniverse[0].mediaId, 'media-seed');
+    assert.strictEqual(spec.static.productDesc, CONCEPT.product_description);
+    assert.strictEqual(spec.directorPrep.source, 'live-round');
+    assert.strictEqual(spec.directorPrep.detectFired, true);
+    assert.strictEqual(spec.directorPrep.directorFired, true);
+    assert.strictEqual(spec.directorPrep.costUsd, 0.105);
+  });
+
+  await checkAsync('DR4 detect throw degrades to catalog title / brand tagline, does not crash', async () => {
+    const spec = specNeedingDirector();
+    await directorMod.applyDirectorDefaults(spec, resolvedBase(), {
+      deps: baseDeps({
+        findLatestArtifact: async () => null,
+        ensureDetectForProducts: boom('detect'),
+        directConceptsRound: boom('director')
+      })
+    });
+    assert.strictEqual(spec.static.productDesc, 'Wool Runner');
+    assert.strictEqual(spec.static.copy.headline, 'Nature made better');
+    assert.strictEqual(spec.directorPrep.source, 'fallback');
+    assert(spec.directorPrep.warning);
+  });
+
+  await checkAsync('DR5 Director throw degrades the same way', async () => {
+    const spec = specNeedingDirector();
+    await directorMod.applyDirectorDefaults(spec, resolvedBase(), {
+      deps: baseDeps({
+        findLatestArtifact: async () => null,
+        ensureDetectForProducts: async () => ({ ensured: 1, ready: 1, timedOut: 0, total: 1 }),
+        directConceptsRound: boom('director')
+      })
+    });
+    assert.strictEqual(spec.static.productDesc, 'Wool Runner');
+    assert.strictEqual(spec.directorPrep.source, 'fallback');
+  });
+
+  await checkAsync('DR6 opt-out (director.enabled === false) is catalog-only, no detect, no Director', async () => {
+    const spec = specNeedingDirector();
+    spec.director = { enabled: false };
+    const calls = { cache: 0, detect: 0, director: 0 };
+    await directorMod.applyDirectorDefaults(spec, resolvedBase(), {
+      deps: baseDeps({
+        findLatestArtifact: async () => { calls.cache++; return { concepts: [CONCEPT] }; },
+        ensureDetectForProducts: async () => { calls.detect++; },
+        directConceptsRound: async () => { calls.director++; }
+      })
+    });
+    assert.strictEqual(calls.cache, 0);
+    assert.strictEqual(calls.detect, 0);
+    assert.strictEqual(calls.director, 0);
+    assert.strictEqual(spec.static.productDesc, 'Wool Runner');
+    assert.strictEqual(spec.static.copy.headline, 'Nature made better');
+    assert.strictEqual(spec.directorPrep.source, 'opt-out');
+  });
+
+  check('DR7 proof-class fields on a Director concept are dropped, never defaulted onto the fixture', () => {
+    const fields = directorMod.fieldsFromConcept(CONCEPT, {
+      productTitle: 'Wool Runner',
+      brand: { tagline: 'Nature made better' }
+    }, { describeProductForPrompt: stubDescribe, renderableCopy: stubCopy });
+    assert.strictEqual(fields.productDesc, CONCEPT.product_description);
+    assert.strictEqual(fields.headline, 'Wool, not foam.');
+    for (const k of directorMod.PROOF_CLASS_STATIC) {
+      assert(!(k in fields), `${k} must not be copied out of a Director concept`);
+    }
+    const spec = specNeedingDirector();
+    directorMod.applyDerivedFields(spec, { fields, locks: directorMod.operatorLocks(spec) });
+    const { staticFixture } = require(path.join(RPD, 'lib', 'staticPrompt'));
+    const f = staticFixture({ spec, variant: { id: 'b' } });
+    for (const k of ['rating', 'reviewCount', 'reviewsText', 'quote', 'attribution', 'badge']) {
+      assert(!(k in f.data), `${k} leaked from a Director-shaped concept into the fixture`);
+    }
+  });
+
+  check('DR8 variant.productDesc still wins over a derived spec.static.productDesc', () => {
+    const spec = specNeedingDirector();
+    spec.static.productDesc = CONCEPT.product_description;
+    const { staticFixture } = require(path.join(RPD, 'lib', 'staticPrompt'));
+    const f = staticFixture({ spec, variant: { id: 'v', productDesc: 'VARIANT desc wins' } });
+    assert.strictEqual(f.product.desc, 'VARIANT desc wins');
+  });
+
+  check('DR9 video camera prompt path is untouched — no Director concept reaches buildVeoPrompt', () => {
+    const pvSrc = read(path.join(RPD, 'lib', 'promptVariants.js'));
+    assert(/no Director concept, no layoutInput on the camera path/.test(pvSrc));
+    assert(!/directConceptsRound|directorDirection|videoTitleDirection|applyBenefitsPlacement/.test(codeOnly(pvSrc)));
+    const { buildForCell } = require(path.join(RPD, 'lib', 'promptVariants'));
+    const out = buildForCell({
+      spec: {
+        name: 'dr-video',
+        seed: { url: 'https://res.cloudinary.com/x/image/upload/v1/s.jpg', productTitle: 'Wool Runner' },
+        aspectRatio: '9:16',
+        durationSec: 8,
+        models: [model],
+        variants: [{ id: 'baseline' }],
+        directorPrep: { source: 'cache', fields: { headline: 'SHOULD NEVER REACH THE CAMERA PROMPT' } }
+      },
+      model,
+      caps,
+      variant: { id: 'baseline' }
+    });
+    assert(out.prompt, 'baseline video prompt must still build');
+    assert(!/SHOULD NEVER REACH THE CAMERA PROMPT/.test(out.prompt));
+    assert(!/Wool, not foam/.test(out.prompt));
+  });
+
+  await checkAsync('DR10 seed.url (no productId) is skipped entirely', async () => {
+    const spec = {
+      name: 'url-only',
+      seed: { url: 'https://example.test/s.jpg' },
+      static: { surface: 'meta_feed_1_1', productDesc: 'hand desc', variants: [{ id: 'b' }] }
+    };
+    const calls = { n: 0 };
+    const res = await directorMod.applyDirectorDefaults(spec, resolvedBase(), {
+      deps: baseDeps({
+        findLatestArtifact: async () => { calls.n++; return null; },
+        ensureDetectForProducts: async () => { calls.n++; },
+        directConceptsRound: async () => { calls.n++; }
+      })
+    });
+    assert.strictEqual(res.source, 'skipped');
+    assert.strictEqual(calls.n, 0);
+    assert.strictEqual(spec.static.productDesc, 'hand desc');
+  });
+
+  check('DR11 seededUniverse from dbSeed docs uses production catalog role', () => {
+    const u = directorMod.buildSeededUniverseFromDocs(resolvedBase().docs);
+    assert.strictEqual(u.length, 2);
+    assert.strictEqual(u[0].role, 'catalog');
+    assert.strictEqual(u[0].mediaId, 'media-seed');
+    assert.strictEqual(u[1].mediaId, 'media-ref');
+  });
+
+  check('DR12 local describeProductForPrompt matches the production export on the same fixtures', () => {
+    const { describeProductForPrompt } = require(path.join(__dirname, '..', 'src', 'services', 'directImageRenderService'));
+    const fixtures = [
+      { concept: { product_description: 'from director' }, product: { title: 'T' }, layoutInput: {} },
+      { concept: { subject: 'from subject' }, product: { title: 'T' }, layoutInput: {} },
+      { concept: {}, product: { title: 'Catalog Title' }, layoutInput: {} },
+      { concept: null, product: null, layoutInput: { product: { name: 'Layout Name' } } },
+      { concept: null, product: null, layoutInput: {} }
+    ];
+    for (const f of fixtures) {
+      assert.strictEqual(
+        directorMod.localDescribeProductForPrompt(f),
+        describeProductForPrompt(f),
+        `describe mismatch on ${JSON.stringify(f)}`
+      );
+    }
+  });
+
+  check('DR13 titling headline is filled from the concept when the operator left it blank', () => {
+    const spec = specNeedingDirector();
+    spec.titling = { enabled: true, copy: {} };
+    directorMod.applyDerivedFields(spec, {
+      fields: { productDesc: CONCEPT.product_description, headline: 'Wool, not foam.', subhead: 'Comfort that lasts.' },
+      locks: directorMod.operatorLocks(spec)
+    });
+    assert.strictEqual(spec.titling.copy.headline, 'Wool, not foam.');
+    assert.strictEqual(spec.titling.copy.subheadline, 'Comfort that lasts.');
+  });
+
+  check('DR14 runner still calls Director prep once per runSpec, not per cell', () => {
+    const src = read(path.join(RPD, 'lib', 'runner.js'));
+    const runSpecBody = src.slice(src.indexOf('async function runSpec'));
+    const hits = runSpecBody.split('applyDirectorDefaults');
+    assert.strictEqual(hits.length, 3, 'runSpec must require + await applyDirectorDefaults exactly once (2 occurrences)');
+    const callIdx = runSpecBody.indexOf('await applyDirectorDefaults');
+    const expandCall = runSpecBody.indexOf('expandCells(spec)');
+    const cellsLoop = runSpecBody.indexOf('for (const c of cells)');
+    assert(callIdx > 0, 'applyDirectorDefaults must be awaited in runSpec');
+    assert(callIdx < expandCall, 'Director prep must run once, before expandCells(spec)');
+    assert(callIdx < cellsLoop, 'Director prep must not sit inside the per-cell loop');
+  });
+
+  await checkAsync('DR15 titling.enabled === false does not trigger detect/Director (even with no headline)', async () => {
+    // Video-only, titling present but disabled — titlePass no-ops, so prep must too.
+    const spec = {
+      name: 'dr-titling-off',
+      seed: { productId: 'prod-1' },
+      models: ['gemini-omni-1.1-flash'],
+      variants: [{ id: 'baseline' }],
+      titling: { enabled: false, platformFormat: 'meta_stories_9_16' }
+    };
+    const calls = { cache: 0, detect: 0, director: 0 };
+    await directorMod.applyDirectorDefaults(spec, resolvedBase(), {
+      deps: baseDeps({
+        findLatestArtifact: async () => { calls.cache++; return { concepts: [CONCEPT] }; },
+        ensureDetectForProducts: async () => { calls.detect++; },
+        directConceptsRound: async () => { calls.director++; }
+      })
+    });
+    assert.strictEqual(calls.cache, 0);
+    assert.strictEqual(calls.detect, 0);
+    assert.strictEqual(calls.director, 0);
+    assert.strictEqual(spec.directorPrep.source, 'manual');
+    directorMod.applyDerivedFields(spec, {
+      fields: { headline: 'MUST NOT LAND', subhead: 'nope' },
+      locks: directorMod.operatorLocks(spec)
+    });
+    assert(!spec.titling.copy || spec.titling.copy.headline !== 'MUST NOT LAND',
+      'applyDerivedFields must not stamp copy onto a disabled titling block');
+  });
+
+  await checkAsync('DR16 detect-wait heartbeat prints while ensureDetect is in flight, then clears', async () => {
+    const spec = specNeedingDirector();
+    const lines = [];
+    await directorMod.applyDirectorDefaults(spec, resolvedBase(), {
+      deps: baseDeps({
+        findLatestArtifact: async () => null,
+        ensureDetectForProducts: async () => {
+          await new Promise((r) => setTimeout(r, 50));
+          return { ensured: 1, ready: 1, timedOut: 0, total: 1 };
+        },
+        directConceptsRound: async () => ({ concepts: [CONCEPT], roundIndex: 0 }),
+        waitHeartbeatMs: 15,
+        log: (msg) => lines.push(String(msg))
+      })
+    });
+    assert(lines.some((l) => /still waiting on product imagery prep/.test(l)),
+      `expected a heartbeat line, got: ${lines.join(' | ')}`);
+    assert(lines.some((l) => /Director round in flight/.test(l)));
+    // A throw mid-wait must still clear the timer — withWaitHeartbeat's finally.
+    let threw = false;
+    await directorMod.withWaitHeartbeat('x', async () => {
+      threw = true;
+      throw new Error('boom');
+    }, { waitHeartbeatMs: 10, log: () => {} }).catch(() => {});
+    assert(threw);
+  });
+
+  check('DR17 dry-run footer names prep spend when directorPrep.source is live-round', () => {
+    const src = read(path.join(RPD, 'lib', 'runner.js'));
+    const runSpecBody = src.slice(src.indexOf('async function runSpec'));
+    const dryBlock = runSpecBody.slice(
+      runSpecBody.indexOf('if (!live)'),
+      runSpecBody.indexOf("return { runDir, manifest }")
+    );
+    assert(/directorPrep/.test(dryBlock) && /live-round/.test(dryBlock),
+      'dry-run footer must read spec.directorPrep.source === live-round');
+    assert(/Director\/detect prep DID spend/.test(dryBlock),
+      'live-round arm must say prep DID spend, not an unqualified nothing-was-sent');
+    assert(/Nothing was sent/.test(dryBlock),
+      'the no-prep arm must still say Nothing was sent');
+    assert(/nothing will be submitted/.test(runSpecBody),
+      'header still has the no-prep dry-run label');
+    assert(/Director\/detect prep DID spend/.test(runSpecBody),
+      'header must have a prep-spent dry-run label too');
+  });
+
+  check('DR18 titling-regression-reference.json pins director.enabled=false so copy stays frozen', () => {
+    const p = path.join(RPD, 'specs', 'titling-regression-reference.json');
+    const spec = JSON.parse(fs.readFileSync(p, 'utf8'));
+    assert.strictEqual(spec.director && spec.director.enabled, false,
+      'this spec is a stable-over-time reference; a live cache lookup would change its headline');
+  });
+
   // ── R. reference-to-video cells ─────────────────────────────────────────
   console.log('\nR. reference-to-video (r2v) cells');
   const R2V = 'google/gemini-omni-flash/reference-to-video-developer';
