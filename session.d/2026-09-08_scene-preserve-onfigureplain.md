@@ -254,11 +254,71 @@ verification for a change this narrow and this rarely hit.
 
 Total spend across all four rounds: **$1.445** of the $20 cap.
 
+## Shipping to production — a second, separate defect found and fixed
+
+Owner: "lets put this into production." Before merging, owner asked directly:
+"just to be clear we have 'personed' ads that use lay down photography as a
+seed image?" — a direct question about a *different*, earlier prompt fix
+(the "WHO WEARS OR HOLDS IT" person-inclusion default, added earlier this
+session, before this /loop) sitting in the same diff as the scene-preserve
+fix. Good thing asked — the answer was no.
+
+**Live test, real Pelagic "Leaderman" board shorts (`product_only`/flat-lay
+seed, the exact product family from the original bug repro), 6 independent
+`gpt-image-2/edit` draws across two prompt attempts: 0/6 showed a person.**
+The scene-BUILDING half of the fix worked perfectly every time (dock, rocks,
+ocean backgrounds); the person-ADDING half never fired once.
+
+**Attempt 1 (Grok, grok-4.6, high effort):** hypothesis — the prompt
+simultaneously demands "keep the same tight camera distance as the
+flat-lay reference" and "add a full person," a real geometric conflict for
+a close-up crop. Fix: an explicit carve-out letting the camera pull back
+specifically when adding a person. **Live-tested 3 more draws: still 0/3.**
+The hypothesis, while logically sound, was not what was actually driving
+the miss.
+
+**Attempt 2 (Grok, grok-4.6, high effort), informed by that falsification:**
+new theory — this isn't a framing conflict at all. The model reliably
+performs "replace the background" (a conventional edit-model operation) but
+not "insert a new depicted person into product photography" (something
+image-*edit* models are commonly trained to be more conservative about than
+background changes) — consistent with "build a new scene" being followed
+100% of the time while "add a person" was followed 0% of the time. Grok's
+own stated confidence going in: **25-35%**, explicitly not a guarantee, per
+its own decision framework (0/3 again → stop prompt-tuning, move to
+vision-QC measure-and-reject; 1/3 → one more measured attempt; 2-3/3 → keep
+it). Fix: a short, high-prominence `PERSON IN FRAME — MANDATORY` directive
+opening the block (matching how `PRODUCT FIDELITY — HIGHEST PRIORITY`
+already earns compliance), plus rewriting "build a new scene" to explicitly
+include the person, since that was the one instruction the model already
+reliably followed. **Live-tested 3 more draws: 3/3 — a person appears in
+every one**, actively fishing, wearing the product, on a real boat. One
+minor secondary miss (draw 3 shows the person from behind, not satisfying
+the separate "face must be visible" rule) — not the reported bug, not
+blocking.
+
+Total across all 12 person-inclusion draws (2 falsified attempts + 1
+success): **~$1.68** additional spend. Combined session total: **~$3.13**
+of the $20 cap.
+
+Every wording change independently reviewed (diff read directly, not
+trusted from Grok's own report) and re-verified by re-running every harness
+myself: `scripts/verifyStaticFidelityPrompt.js` (2181 checks),
+`scripts/verifyQcInsights.js` (25 checks, fixture regenerated twice as the
+wording evolved), `adgen/scripts/verifyStaticIntentChanges.js` (79 checks),
+`adgen/scripts/verifySceneClassPreserve.js` (18 checks) — all green. Root
+suite 252/252, adgen suite 109/110 (the one failure,
+`verifyVendorDrift.js` on `services/fontResolverService.js`, is unrelated
+drift from `origin/main` moving forward — not a file either fix touched).
+Both `staticAdIntents.js` copies confirmed byte-identical on the shared
+`PRODUCT_FIDELITY` constant after each round.
+
 ## Status
 
-**Not shipped.** `SEED_CLASS_SCENE_BASED` remains `false` in
-`adgen/config/defaults.env`, per the owner's explicit "test before
-shipping" framing — flipping it on is a separate decision for the owner to
-make after reviewing the artifact. All four rounds' fixes (shot-type
-coarseness veto, "white"/"floor" vocabulary, "ecommerce"/"detail"
-vocabulary) ship together behind this one flag.
+**Shipped to production.** `SEED_CLASS_SCENE_BASED=true` in both
+`adgen/config/defaults.env` and the root (dormant) mirror. All five fixes
+now on `main` via [PR #428](https://github.com/Emami-RS-Project/liquidretail_backend/pull/428):
+the shot-type coarseness veto, "white"/"floor" vocabulary, "ecommerce"/
+"detail" vocabulary, and the two-round person-inclusion fix above — all
+live-tested, all Grok-reviewed, all independently re-verified before
+merging.
