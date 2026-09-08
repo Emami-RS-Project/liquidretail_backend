@@ -3252,7 +3252,7 @@ router.post('/:id/override-qc', express.json(), async (req, res) => {
 // and returns; adgen/src/services/regenerateConsumer.js claims and executes.
 // Operator refinement prompt, OR a verbatim prompt override.
 // Body: { prompt?, mode?, promptOverride?, videoPromptRaw?,
-//          videoPromptGuidance?, imagePromptRaw? }.
+//          videoPromptGuidance?, videoResolutionOverride?, imagePromptRaw? }.
 //   prompt:  a refinement note PREPENDED to the auto-composed prompt
 //            (video: OPERATOR REFINEMENT header inside buildVeoPrompt;
 //            image: refinement note into the live direct_image path).
@@ -3288,6 +3288,14 @@ router.post('/:id/override-qc', express.json(), async (req, res) => {
 //   videoPromptGuidance: string ≤1000 — video only. PREPENDS as the
 //            operator refinement when `prompt` is empty and raw is not
 //            set. Same ceiling as the wizard. PASS-THROUGH — not written.
+//   videoResolutionOverride: the string '720p' — video only. Forces this
+//            regenerate's provider submit to 720p (a quality lever, not a
+//            cost lever — Omni 720p and 1080p are the same list price).
+//            Accepted value is literally only '720p'; anything else 400s.
+//            PASS-THROUGH — not written to the Ad. The next regenerate
+//            with an empty field reverts to the provider/env default.
+//            Cascades to derivative siblings via the existing regenerate
+//            cascade (free re-composite of the new master plate).
 //   imagePromptRaw: string ≤40000 — IMAGE ads only. FULL replacement of
 //            the auto-composed static prompt for THIS regenerate call, via
 //            the existing rawPromptOverride channel (which already accepts a
@@ -3342,6 +3350,14 @@ router.post('/:id/regenerate', express.json(), async (req, res) => {
       return res.status(400).json({ error: videoFields.error });
     }
     const { videoPromptRaw, videoPromptGuidance } = videoFields;
+
+    // Manual regenerate-at-720p — same pass-through contract as the video
+    // prompt overrides above (not written to the Ad). Literal '720p' only.
+    const resolutionFields = regen.parseRegenVideoResolutionOverride(req.body || {});
+    if (!resolutionFields.ok) {
+      return res.status(400).json({ error: resolutionFields.error });
+    }
+    const { videoResolutionOverride } = resolutionFields;
 
     // Static raw prompt — full replacement of the auto-composed image prompt.
     // Cap is 40000 (IMAGE_PROMPT_RAW_MAX), not the video 4000: the prompt this
@@ -3441,6 +3457,11 @@ router.post('/:id/regenerate', express.json(), async (req, res) => {
         error: 'imagePromptRaw is only supported for image ads'
       });
     }
+    if (videoResolutionOverride && ad.kind !== 'video') {
+      return res.status(400).json({
+        error: 'videoResolutionOverride is only supported for video ads'
+      });
+    }
     const requestedBy = req.user?.userId || req.user?.email || null;
 
     // MONEY/HONESTY — report the mode that will actually RUN and be billed,
@@ -3476,7 +3497,8 @@ router.post('/:id/regenerate', express.json(), async (req, res) => {
     setImmediate(() => {
       regen.regenerateAd({
         ad, prompt, mode, requestedBy, videoModel, promptOverride,
-        videoPromptRaw, videoPromptGuidance, imagePromptRaw
+        videoPromptRaw, videoPromptGuidance, imagePromptRaw,
+        videoResolutionOverride
       }).catch(err => console.error(`❌ regenerate setImmediate crash: ${err.message}`));
     });
   } catch (err) {

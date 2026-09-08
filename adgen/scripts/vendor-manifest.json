@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "64da9b29273a6807574cfdcd7d8d0a3ecad2a71f",
-  "generatedAt": "2026-09-08T00:28:29.492Z",
+  "backendHead": "9b107e55f2f3424c1d92610e8d7a04087200dea1",
+  "generatedAt": "2026-09-08T01:21:24.645Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "a8d6f60ecc8e0ca4f5bfe8d7a09a242efd5c3c93d603204820cee72a06c19240",
@@ -632,11 +632,11 @@
       "owedSince": null
     },
     "services/adRegenerateService.js": {
-      "backendHash": "579cff7daa7252268dbb0bbb111e3bc5ca5ac5c5b4b01f97b3d8ef0e1fb737d0",
-      "adgenHash": "ae0fe70df405f8071efe79633c019c4b3199a955f701ed07a1297e866fad5f35",
-      "backendSha": "fb2bf533f9649897b2b40db2315d8bc5920c8119",
+      "backendHash": "2845060500a797628b150f0d055b373fcfd4fbabcabc930c6452b561b9fcf9db",
+      "adgenHash": "e7b5189a7e18936210ab4d73cb44be3dd1b0cc7d977562b5e1b94fa59346cd3f",
+      "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
       "status": "fork",
-      "reason": "Debt dated 2026-08-27 is now moot: PR #411/#413 (2026-09-07) deleted backend's in-process regenerate execution entirely -- backend's copy only stamps Ad.regenerationRequest and hands off to adgen's regenerateConsumer (confirmed by a dedicated dead-code audit the same day, docs/dormant-render-execution-comments PR). There is no remaining backend execution logic for adgen to port from or converge with -- this file is adgen-owned execution now, permanently. This PR additionally adds Cloudinary-cleanup wiring (snapshotAdCloudinaryState / destroyReplacedAdAssets in runClaimedRegeneration + recascadeDerivativeSibling)."
+      "reason": "Manual regenerate-at-720p (videoResolutionOverride): additive resolutionOverride threading ported into BOTH sides in the SAME PR — adgen's execution copy (runVideoFull/regenerateAd/runClaimedRegeneration -> videoRouter.generateForAd) and backend's slim stamp-only services/adRegenerateService.js (parseRegenVideoResolutionOverride + buildRegenerationRequest -> Ad.regenerationRequest). Both sides have the feature; adgen remains a deliberate permanent fork (it executes, backend only stamps) per the prior recorded PR#411/#413 reason — not a debt."
     },
     "services/adStage.js": {
       "backendHash": "437314029f1ff3ea5dcd35f68ba074c2fbc30fe20c38c706f72e9b3c4b66529b",
@@ -755,11 +755,11 @@
       "owedSince": null
     },
     "services/atlasVideoService.js": {
-      "backendHash": "6e29f079196b3819cb0929cfaf7f96ae3b590231a56b305a52805a3d84262b60",
-      "adgenHash": "95c15d8a42d62424bc769f9384b76f5b88e74ed32a3763002ada6ca507ead6e4",
-      "backendSha": "ec64a9a586ae8fd9736d6d44952e70c9afaaa09f",
+      "backendHash": "b98e339a27ba6f9588acb9783fcea8d2fdf3c6e307ae4e83d29d662aeab25eb8",
+      "adgenHash": "17dee1d15c63eb74ca921be6fcc1be79899cea4705ee79a56a35bd4268c05f33",
+      "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
       "status": "fork",
-      "reason": "2026-09-06: backend #396 (ec64a9a5) leftover 8s fallbacks → videoDurationPolicy. FULL DIFF READ: estimateRenderCostUsd/buildVideoSegmentUrl missing duration now uses fallbackVideoDurationSec() (Meta 10s) not hardcoded 8; resolveDurationSec/buildSubmissionBody last-resort 8 → PROVIDER_DEFAULT_DURATION_SEC (still 8, named); generateForAd now resolveDurationSec(resolveAdVideoDurationSec(ad), caps) so an unset Ad.videoDurationSec submits META_VIDEO_DURATION_SEC (10) not caps.defaultDuration (8). No submit/resume/claim/retry/receipt changes. Adgen already has this exact generateForAd thread (atlasVideoService.js:5403) plus the helpers — it was the paired port this entry recorded on 2026-09-05. Remaining fork unchanged: video-provider collapse (shouldResumeAttempt in spendReceipt, videoRouter.generateForAd, Vertex arm throws) and MAX_POLL_MS 900000 vs backend 600000. Backend copies dormant. Nothing new owed."
+      "reason": "Manual regenerate-at-720p: added an additive resolutionOverride param threaded through buildSubmissionBody/submitGeneration/generateForAd (wins over env/caps defaults on the normal generate path; every existing caller omits it and is byte-for-byte unaffected). adgen-only — backend's copy of this file is the dormant pre-cutover in-process video path (production video generation is adgen-only), so there is nothing to port there. Deliberate fork, per the prior recorded reason (video-provider collapse / MAX_POLL_MS divergence)."
     },
     "services/basePlateCropService.js": {
       "backendHash": "ae8b89e98f69160f27b8faad175a2fdfe16f53122098dd5dd8a11d0e4fc48443",

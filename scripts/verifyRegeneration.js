@@ -580,8 +580,13 @@ const atRaw        = 'r'.repeat(4000);
       const bare = regen.buildRegenerationRequest({ kind: 'image', mode: 'full' });
       return bare.prompt === null && bare.requestedBy === null && bare.videoModel === null
         && bare.promptOverride === null && bare.videoPromptRaw === null
-        && bare.videoPromptGuidance === null && bare.imagePromptRaw === null;
+        && bare.videoPromptGuidance === null && bare.imagePromptRaw === null
+        && bare.videoResolutionOverride === null;
     })());
+  check('R6b videoResolutionOverride:\'720p\' round-trips on the stamped request (pass-through, not an Ad field)',
+    regen.buildRegenerationRequest({
+      kind: 'video', mode: 'full', videoResolutionOverride: '720p'
+    }).videoResolutionOverride === '720p');
   check('R6b promptOverride round-trips as an object (image-kind {system,user} shape)',
     (() => {
       const withOverride = regen.buildRegenerationRequest({
@@ -605,6 +610,56 @@ const atRaw        = 'r'.repeat(4000);
   // are all actually gone, not just untested.
   check('R6c/R6d performRegeneration no longer exists (the local-execution work function was deleted)',
     typeof regen.performRegeneration === 'undefined');
+}
+
+// ── R7: manual regenerate-at-720p (videoResolutionOverride) ─────────────
+// Owner: "just add one more button that is regenerate at 720p. That fires
+// the regenerate cycle for that ad and all derivatives." Pass-through like
+// videoPromptGuidance — not a persisted Ad field. Literal '720p' only.
+{
+  check('R7 parseRegenVideoResolutionOverride is exported',
+    typeof regen.parseRegenVideoResolutionOverride === 'function');
+  check('R7 omitted / empty / null collapse to null (ordinary regenerate)',
+    (() => {
+      const a = regen.parseRegenVideoResolutionOverride({});
+      const b = regen.parseRegenVideoResolutionOverride({ videoResolutionOverride: null });
+      const c = regen.parseRegenVideoResolutionOverride({ videoResolutionOverride: '' });
+      return a.ok && a.videoResolutionOverride === null
+        && b.ok && b.videoResolutionOverride === null
+        && c.ok && c.videoResolutionOverride === null;
+    })());
+  check("R7 literal '720p' is accepted",
+    (() => {
+      const r = regen.parseRegenVideoResolutionOverride({ videoResolutionOverride: '720p' });
+      return r.ok === true && r.videoResolutionOverride === '720p';
+    })());
+  check("R7 any other value 400s with videoResolutionOverride must be '720p'",
+    (() => {
+      const cases = ['1080p', '4k', '720P', ' 720p', 720, true, '720'];
+      return cases.every((v) => {
+        const r = regen.parseRegenVideoResolutionOverride({ videoResolutionOverride: v });
+        return r.ok === false && r.error === "videoResolutionOverride must be '720p'";
+      });
+    })());
+
+  const src = fs.readFileSync(path.join(__dirname, '../routes/ads.js'), 'utf8');
+  const startIdx = src.indexOf("router.post('/:id/regenerate'");
+  if (startIdx < 0) throw new Error('regenerate route not found in routes/ads.js');
+  const endIdx = src.indexOf('router.', startIdx + 'router.post('.length);
+  if (endIdx < 0) throw new Error('could not bound the regenerate handler');
+  const handler = src.slice(startIdx, endIdx);
+  check('R7 route calls parseRegenVideoResolutionOverride',
+    /parseRegenVideoResolutionOverride\s*\(/.test(handler));
+  check('R7 route 400s videoResolutionOverride on a non-video ad',
+    /videoResolutionOverride is only supported for video ads/.test(handler));
+  check('R7 route forwards videoResolutionOverride into regenerateAd',
+    /videoResolutionOverride/.test(handler.slice(handler.indexOf('regen.regenerateAd'))));
+
+  const adSrc = fs.readFileSync(path.join(__dirname, '../models/Ad.js'), 'utf8');
+  check('R7 Ad schema does NOT declare videoResolutionOverride as a persisted field',
+    !/^\s*videoResolutionOverride\s*:/m.test(adSrc));
+  check('R7 regenerationRequest stays Mixed (silently accepts the pass-through stamp)',
+    /regenerationRequest:\s*\{\s*type:\s*mongoose\.Schema\.Types\.Mixed/.test(adSrc));
 }
 
 if (failures.length) {

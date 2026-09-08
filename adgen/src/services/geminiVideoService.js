@@ -523,8 +523,11 @@ function extractVideoUri(body) {
  * a silent $1 loss: bootRecoveryService finds the receipt and collects the
  * master with a free GET.
  */
-async function generateForAd({ ad, prompt = null, images = null, aspectRatio, durationSec, operatorPrompt = null, allowResume = true, campaignRunId = null, modelOverride = null }) {
-  const resolution = DEFAULT_RESOLUTION;
+async function generateForAd({ ad, prompt = null, images = null, aspectRatio, durationSec, operatorPrompt = null, allowResume = true, campaignRunId = null, modelOverride = null, resolutionOverride = null }) {
+  // resolutionOverride (manual regenerate-at-720p): forces the requested
+  // resolution for THIS call only. Every other call site omits it and is
+  // byte-identical to before (DEFAULT_RESOLUTION, unchanged).
+  const resolution = resolutionOverride || DEFAULT_RESOLUTION;
   const secs = Number(durationSec) > 0 ? Number(durationSec) : 10;
   const resolvedModel = resolveGeminiModel(modelOverride);
   if (modelOverride && resolvedModel === MODEL && String(modelOverride).trim() !== MODEL) {
