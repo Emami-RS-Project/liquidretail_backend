@@ -5052,7 +5052,7 @@ function submittedImageUrls(imageUrls, caps) {
   }
 }
 
-function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl = null, durationSec = null, seed = null }) {
+function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl = null, durationSec = null, seed = null, resolutionOverride = null }) {
   switch (caps.paramShape) {
     case 'gemini-omni':
       // duration MUST be sent explicitly (Atlas enum 4|6|8|10). Brand-script
@@ -5076,7 +5076,7 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, vide
         images: submittedImageUrls(imageUrls, caps),
         duration: durationSec || caps.defaultDuration || PROVIDER_DEFAULT_DURATION_SEC,
         aspect_ratio: aspectRatio,
-        resolution: process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p',
+        resolution: resolutionOverride || process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p',
         ...(Number.isInteger(seed) ? { seed } : {})
       };
     case 'gemini-omni-r2v': {
@@ -5093,7 +5093,7 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, vide
         images: submittedImageUrls(imageUrls, caps),
         duration,
         aspect_ratio: aspectRatio,
-        resolution: process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p'
+        resolution: resolutionOverride || process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p'
       };
     }
     case 'grok':
@@ -5102,7 +5102,7 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, vide
         prompt,
         image_urls: submittedImageUrls(imageUrls, caps),
         duration: Math.min(caps.maxDuration, durationSec || PROVIDER_DEFAULT_DURATION_SEC),
-        resolution: '720p',
+        resolution: resolutionOverride || '720p',
         aspect_ratio: aspectRatio
       };
     case 'grok-i2v':
@@ -5115,7 +5115,7 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, vide
         prompt,
         image_url: submittedImageUrls(imageUrls, caps)[0],
         duration: durationSec || caps.defaultDuration || PROVIDER_DEFAULT_DURATION_SEC,
-        resolution: caps.defaultResolution || '720p',
+        resolution: resolutionOverride || caps.defaultResolution || '720p',
         aspect_ratio: aspectRatio
       };
     case 'veo':
@@ -5134,8 +5134,8 @@ function buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, vide
   }
 }
 
-async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl = null, durationSec = null, seed = null }) {
-  const body = buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec, seed });
+async function submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl = null, durationSec = null, seed = null, resolutionOverride = null }) {
+  const body = buildSubmissionBody({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec, seed, resolutionOverride });
 
   // refs= reports what the model RECEIVES, and names the assembled count too
   // when the shape takes fewer. Reading "refs=3" for a 1-reference model was
@@ -5437,7 +5437,11 @@ async function generateForAd({
   // genuinely wants a fresh submit regardless of any existing receipt
   // (adRegenerateService.js: an operator explicitly asked for a new video)
   // must say so explicitly.
-  allowResume = true
+  allowResume = true,
+  // resolutionOverride (manual regenerate-at-720p): a bare string like
+  // '720p'. Wins over env/caps defaults on the normal generate path.
+  // Every existing caller omits it and is byte-for-byte unaffected.
+  resolutionOverride = null
 }) {
   if (!enabled()) return { skipped: true, reason: 'VIDEO_PROVIDER != atlas or ATLAS_API_KEY missing' };
 
@@ -5692,9 +5696,11 @@ async function generateForAd({
 
   // Resolution the submission body will actually request — computed BEFORE the submit
   // because the cost estimate is now ledgered at the charge point, not on success.
-  const renderResolution = String(caps.paramShape || '').startsWith('gemini-omni')
+  // resolutionOverride (manual regenerate-at-720p) wins over env/caps defaults
+  // when present; every existing caller omits it and is byte-for-byte unaffected.
+  const renderResolution = resolutionOverride || (String(caps.paramShape || '').startsWith('gemini-omni')
     ? (process.env.ATLAS_VIDEO_RESOLUTION || caps.defaultResolution || '720p')
-    : (caps.defaultResolution || '720p');
+    : (caps.defaultResolution || '720p'));
   const costUsd = estimateRenderCostUsd({ model, durationSec, resolution: renderResolution });
 
   const t0 = Date.now();
@@ -5754,7 +5760,7 @@ async function generateForAd({
       const submitT0 = Date.now();
       // Fire-and-forget stage: never awaited on this billable path.
       adStage(ad._id, `master video submit (${aspectRatio})${attempt > 1 ? ` — retry ${attempt - 1}` : ''}`);
-      predictionId = await submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec });
+      predictionId = await submitGeneration({ model, prompt, imageUrls, aspectRatio, caps, videoClipUrl, durationSec, resolutionOverride });
       const submitMs = Date.now() - submitT0;
       console.log(`🎬 atlasVideo[ad=${ad._id}]: prediction=${predictionId} polling...`);
 
