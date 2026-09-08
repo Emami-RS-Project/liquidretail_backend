@@ -1,13 +1,13 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "6861e0533a93e21769e52e3236e6bf56a858c2f3",
-  "generatedAt": "2026-09-08T02:35:00.434Z",
+  "backendHead": "5bc521eefb606c3f57254c8b4093a3f1adb283e1",
+  "generatedAt": "2026-09-08T03:17:59.667Z",
   "files": {
     "models/Ad.js": {
-      "backendHash": "a8d6f60ecc8e0ca4f5bfe8d7a09a242efd5c3c93d603204820cee72a06c19240",
+      "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
       "adgenHash": "76cbe21b26cf70e54b693ab2fc7aa08852557ecfa362befbd8833eb3930ab633",
-      "backendSha": "ec64a9a586ae8fd9736d6d44952e70c9afaaa09f",
+      "backendSha": "6cee8eac343fe07493fa83c049d8c468343a0ffd",
       "status": "fork",
       "reason": "This PR adds Ad.videoQcRetry (Mixed, default null) on BOTH copies: adgen's live renderer claim-lock for the one-shot QC-triggered 720p retry, and backend models/Ad.js in the same PR so Mongoose strict on the API process cannot silently drop the field (same trap as renderError.predictionId). Remaining fork unchanged (adgen-only render/titling fields). Automatic retry is gated OFF by QC_RETRY_720P_ENABLED (strict === 'true')."
     },
@@ -68,11 +68,11 @@
       "owedSince": null
     },
     "models/Brand.js": {
-      "backendHash": "fa4bd6423d89f204e51b4d5c254f4b4908c423fd36bff38a6c80f2ba9a588077",
+      "backendHash": "741f39d1bb1f87a1f999a5dd85b4025e184f1f029d3d46588f25a2d45308143d",
       "adgenHash": "867bc01e144a7d8d77ee6bc822abf61e5b7a9ebb46ebda913162fc4de7683104",
-      "backendSha": "34922c5dc2b56313581c353597247970c1216596",
+      "backendSha": "b6d175c3c4241fe917839e7884f8617e672ed4fd",
       "status": "fork",
-      "reason": "2026-09-06: backend #391/#392 added Brand.lastCatalogResyncAt (Date, default null) for scheduled Shopify-direct/generic/Apify catalog re-sync (scheduledSyncService.runDueCatalogResyncs). Writer is backend-only ingest; adgen has zero Brand.create/update/save sites. verifyModelParity is adgen-fields SUBSET backend-fields, so a backend-only field is fine (same pattern as CampaignRun.automation). Adgen copy unchanged since the last synced look — not an independent fork. Not porting the field: adgen does not run catalog re-sync and would never stamp it."
+      "reason": "2026-09-06 backend #391/#392 added lastCatalogResyncAt (Date, default null) for scheduled Shopify-direct/generic/Apify catalog re-sync (scheduledSyncService.runDueCatalogResyncs) -- carries forward from the prior look. Since then, two more backend commits added three NEW backend-only fields: catalogYoloBackoffUntil (Date), catalogYoloBackoffFailures (Number), catalogYoloBackoffReason (String) -- per-brand catalog-YOLO backoff state that survives worker crash-loops; and catalogPostSyncHeartbeatAt (Date) -- a cross-process 'chain is alive' heartbeat for runPostSyncChain, independent of progressService's 4h MAX_RUN_MS, goes stale after POST_SYNC_CHAIN_HEARTBEAT_STALE_MIN. Confirmed via grep: zero references to any of these 4 fields anywhere in adgen/src. Adgen has zero Brand.create/update/save call sites (same precedent as lastCatalogResyncAt) -- writer is backend-only catalog ingest. verifyModelParity only requires adgen-fields SUBSET backend-fields, so backend-only fields are fine (same pattern as CampaignRun.automation). Not porting any of the 4 fields: adgen does not run catalog re-sync, catalog-YOLO backoff, or the post-sync chain, and would never read or stamp them."
     },
     "models/Campaign.js": {
       "backendHash": "079065a6d9dff95e04f8136469d847cb6f3703452e6553492ea35e26291df6ae",
@@ -613,6 +613,12 @@
       "portTo": null,
       "owedSince": null
     },
+    "services/adCloudinaryCleanup.js": {
+      "backendHash": "0d658cb3c8e962663b2bd41dd884b95f74039f199354b850ed5fb99a754af341",
+      "adgenHash": "0d658cb3c8e962663b2bd41dd884b95f74039f199354b850ed5fb99a754af341",
+      "backendSha": "c451319f117e366623a1b20713cafc09fa21427e",
+      "status": "synced"
+    },
     "services/adCopyGuards.js": {
       "backendHash": "32775cff5d6e65046a0c1f08672470160c993889efa56cffdd1163212822845e",
       "adgenHash": "32775cff5d6e65046a0c1f08672470160c993889efa56cffdd1163212822845e",
@@ -630,9 +636,9 @@
       "owedSince": null
     },
     "services/adRegenerateService.js": {
-      "backendHash": "2845060500a797628b150f0d055b373fcfd4fbabcabc930c6452b561b9fcf9db",
+      "backendHash": "c3e020679c73fd066207b6c10726d3b6289f83c35b8bfb2875d1cacadacdbc0a",
       "adgenHash": "e7b5189a7e18936210ab4d73cb44be3dd1b0cc7d977562b5e1b94fa59346cd3f",
-      "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
+      "backendSha": "6861e0533a93e21769e52e3236e6bf56a858c2f3",
       "status": "fork",
       "reason": "This PR adds videoResolutionOverride threading as complementary halves of one feature: backend's copy gained the request-validation half (parseRegenVideoResolutionOverride, the 400 checks, stamping onto Ad.regenerationRequest); adgen's copy gained the execution half (runVideoFull/videoRouter/atlasVideoService.generateForAd resolutionOverride threading). Neither side's new code is a verbatim port of the other -- OWES PORTS IN BOTH DIRECTIONS the next time either half's request/response shape for this field changes, since the two are now mutually dependent."
     },
@@ -655,10 +661,10 @@
     },
     "services/adVisionQcService.js": {
       "backendHash": "0458e60a40b7ef253e7e933efd13b041e3535f10bd9251e31ea227e9d3bcb9b0",
-      "adgenHash": "d794f7197e119ee7422dadd09a8411d753ba2635fc99a5855788c073c6b46b0a",
+      "adgenHash": "87a2f9e603d08b3eedc0e63edc782891d35e4751b7ddc1b9584f852ebb247007",
       "backendSha": "2b58cf31766b6ecf9fde711770c87dc2174cbd29",
       "status": "unported",
-      "reason": "COMPETITOR_MARKS_CAVEAT (backend c1d1dc42) is now ported into renderCategoryBlock + summarizeVisionQc + module.exports. Remaining divergence is adgen→backend: TITLING_CATEGORIES/titlingOnlyGate derive ship-gate (adgen fcf3709), occlusion-aware corrective notes, regenerationCount/visionQcMs instrumentation. Adgen deliberately lacks backend's isStaticEnabled/isVideoEnabled sync gates (SystemConfig-only resolvers).",
+      "reason": "COMPETITOR_MARKS_CAVEAT (backend c1d1dc42) is now ported into renderCategoryBlock + summarizeVisionQc + module.exports. Remaining divergence is adgen->backend: TITLING_CATEGORIES/titlingOnlyGate derive ship-gate (adgen fcf3709), occlusion-aware corrective notes, regenerationCount/visionQcMs instrumentation. Adgen deliberately lacks backend's isStaticEnabled/isVideoEnabled sync gates (SystemConfig-only resolvers). NEW as of adgen commit 9b107e55 (2026-09-07, landed after this manifest's last recorded look): MAX_QC_REGENERATIONS changed from 1 to 0 in adgen's copy -- owner directive 2026-09-07, measured QC regeneration-rate trend (12% to 22% to 25%); a failed QC pass now ships as a single-attempt run instead of retrying once, reversible by setting the constant back to 1. Backend has NOT moved on this file since the last look -- its own dormant-fallback copy still reads MAX_QC_REGENERATIONS = 1 and was never updated to match. Folding this into the existing debt rather than treating it separately: backend's copy never executes in production (adgen owns rendering unconditionally per this repo's CLAUDE.md), so this is the same kind of backend-owes-a-sync-pass debt as the items above, not an independent fork decision. owedSince carries forward unchanged.",
       "portTo": "backend",
       "owedSince": "2026-09-05T00:18:02.460Z"
     },
@@ -776,11 +782,11 @@
       "reason": "QC-fail 720p retry: resumeUnsettledQcRetries is peek-and-alert only (no steal/complete) plus qcRetryGenericSweepExclusion so a mid-retry master is invisible to the generic recovery sweep. Backend has no Gemini-provider recovery branch. Remaining fork unchanged."
     },
     "services/brandScriptExecutor.js": {
-      "backendHash": "d554b02b6e203edb0e4921e9237dcdefd94ceacc9f4f942a279945d3ac75ee9f",
+      "backendHash": "ec53050310b215d9390567cb27a15173fc84a53354fcd814e9ee744aabddaade",
       "adgenHash": "e04d522d1de961e26394cc71d43712c2182d4deb2b8d2f3d75d6974ce913a587",
-      "backendSha": "ec64a9a586ae8fd9736d6d44952e70c9afaaa09f",
+      "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
       "status": "unported",
-      "reason": "2026-09-06: faceKeepOut spread now documents that faceSamples[i].subject (full LTRB) rides the existing object; no placement behaviour change, no parallel path. Live path is adgen. Prior unported debt UNCHANGED: leftover 8s duration fallbacks now read META_VIDEO_DURATION_SEC via videoDurationPolicy.js. 2026-09-04: adgen commit fcf3709 added titlingOnlyGate=!!ad.deriveFromMaster so derive-only ads gate on TITLING_CATEGORIES only. Backend's adVisionQcService.js has no titlingOnlyGate. Pre-existing: backend still lacks stampTitlingFailureAndThrow/TITLING_ATTEMPTS_MAX. owedSince carries forward at 2026-08-28 for the titling-attempts gap.",
+      "reason": "2026-09-07: two new commits in range are unrelated to the existing titling-attempts debt -- one deletes dead code (qcAndStampVideoAd, no longer called anywhere), the other is a comment-only rewrite (explicitly stated in its own commit message, no behavior change). Prior unported debt carries forward COMPLETELY UNTOUCHED: 2026-09-06 faceKeepOut spread now documents that faceSamples[i].subject (full LTRB) rides the existing object -- no placement behaviour change, no parallel path, live path is adgen. Leftover 8s duration fallbacks now read META_VIDEO_DURATION_SEC via videoDurationPolicy.js. 2026-09-04: adgen commit fcf3709 added titlingOnlyGate=!!ad.deriveFromMaster so derive-only ads gate on TITLING_CATEGORIES only -- backend's adVisionQcService.js has no titlingOnlyGate. Pre-existing: backend still lacks stampTitlingFailureAndThrow/TITLING_ATTEMPTS_MAX; confirmed via grep backend still has zero implementation, only one comment mentioning the gap. owedSince carries forward at 2026-08-28 for the titling-attempts gap.",
       "portTo": "backend",
       "owedSince": "2026-08-28T17:47:48.113Z"
     },
@@ -857,11 +863,10 @@
       "owedSince": null
     },
     "services/cloudinaryService.js": {
-      "backendHash": "1c7cd39e0a64fd1b09eac7194dcc26be97a21397f767baadb47d0788329e5b1b",
+      "backendHash": "beae067289d9324a3fee11ad86b7243c30181a6ae1d332fb023d28cf0b11f7f4",
       "adgenHash": "beae067289d9324a3fee11ad86b7243c30181a6ae1d332fb023d28cf0b11f7f4",
-      "backendSha": "b38965cc20686ec4b135b4af9d12510ba6fa8b06",
-      "status": "fork",
-      "reason": "PR#415: added deletePublicIdFromCloudinary to both copies identically (fallback destroy path for URLs that don't parse via the normal regex but demonstrably contain the ad's stored cloudinaryPublicId)."
+      "backendSha": "c451319f117e366623a1b20713cafc09fa21427e",
+      "status": "synced"
     },
     "services/conceptProjection.js": {
       "backendHash": "a8834247caa83318cb1ee1cd36e30adee42c3c32fedcdb2191047a5621d758f3",
@@ -872,13 +877,11 @@
       "owedSince": null
     },
     "services/concurrency.js": {
-      "backendHash": "041337e403b82af0df01db1f1fd398b972ab0e70903ffc29b5869176e256a3c1",
+      "backendHash": "dc3fd4e0bbc64fc398f54bef4b46dc201576f7517335a475aa51585891e6306f",
       "adgenHash": "e3ea6e93a9f0310ce31c422a8ada44e4033f126a4222507da8da1df6174f6a7e",
-      "backendSha": "bb91303c91f8a0367869542014f540c35386af0b",
+      "backendSha": "0966924ad0ab7875dc5ca0ff3c9785826435e9bf",
       "status": "fork",
-      "reason": "Backend origin/main advanced to bb91303c (catalog YOLO ingest-detection feature). Re-diffed: only change is a new backend-only SPEC entry CATALOG_YOLO_CONCURRENCY for backend's new ingest-time YOLO detection service -- no adgen analog needed, VEO_TITLING_CONCURRENCY untouched. Prior fork reason (adgen-only SPEC fallback 4->2, tuned operating value 3) still holds.",
-      "portTo": null,
-      "owedSince": null
+      "reason": "Since the last recorded look (which only knew about CATALOG_YOLO_CONCURRENCY), three more backend commits landed: a doc-only comment rewrite of that key; the addition of CATALOG_YOLO_NIGHT_CONCURRENCY; then a rename/hardening to CATALOG_YOLO_NIGHT_MULTIPLIER (derived base * multiplier instead of an absolute value, fixing an 'operator lowers base, boost silently overrides it back up' bug, tighter clamp [1,4], a resolveKnob float-exception). All backend-only, catalog-ingest-specific, zero adgen analog (confirmed via grep). Separately, commit 0966924a DELETED RENDER_CONCURRENCY and VEO_CONCURRENCY entirely from backend's SPEC (their only consumer -- the dormant in-process render fallback -- was deleted). Adgen's copy still declares and actively uses BOTH as its own live, non-dormant render/video pool knobs (confirmed present and referenced in adgen's file, and documented in this repo's CLAUDE.md as live adgen-tuned knobs). Current full key-level diff: backend-only = CATALOG_YOLO_CONCURRENCY + CATALOG_YOLO_NIGHT_MULTIPLIER (2 keys, catalog-ingest concurrency tuning); adgen-only = RENDER_CONCURRENCY + VEO_CONCURRENCY (backend-absent now that backend deleted its dormant render fallback) + VEO_TITLING_CONCURRENCY (untouched, as before) -- 3 keys total. Deliberate fork, not a debt: adgen's knobs are its own live tuning, not something it forgot to remove; backend's ingest knobs are backend-only ingest concerns adgen will never read."
     },
     "services/copyDerivationService.js": {
       "backendHash": "1636ad6105c90e3439ff8afa4948ebdbbcc90bfe3854848ef3479ebf9b9f20b3",
@@ -897,13 +900,11 @@
       "owedSince": null
     },
     "services/directImageRenderService.js": {
-      "backendHash": "f08b826fce868dac48bab3e037b736a338f07859df885533034ec2ad1a621e4f",
+      "backendHash": "7b43a590bbad5d12951813c8694da4f058981b31e5105c9086528484b6395146",
       "adgenHash": "613ec2c8dc556bf9df8116cb39abc28a4fdeb2fb467dea3067a7ec1c73a78712",
-      "backendSha": "e955b04891fcb861bbf64a5bc8642aa2fbe7a0bc",
+      "backendSha": "0966924ad0ab7875dc5ca0ff3c9785826435e9bf",
       "status": "fork",
-      "reason": "Fork, not a copy — adgen owns the live static renderer. This change ports only the segment-override plumbing on top of that fork: buildPrompt({segment}) with categoryPath from resolvedProduct.category || inferredBreadcrumb, CatalogProduct selects now include those two fields (otherwise categoryPath is always null on the DB path), and intentResolution.promptFlags.segmentOverrides stamps built.appliedOverrides. Remaining adgen-owned hunks, deliberately not flattened: logo LRU (optionalImageCached); ai_ugc_led → objection_resolved; product.category threaded for the apparel role preamble; usableAttribution; composeCorrectiveOverride / buildQcRetryArgs; submitEditImageWithSeedFallback; resume-from-receipt (existingPredictionId / allowResume — a money guard backend does not have). Backend-only hunks left unported on purpose: promptSha256 / seedStyle on intentResolution (not segment plumbing). Previously status=unported for the resume guard; that guard is adgen-owned live-renderer policy, not a debt backend still owes, so this is a fork.",
-      "portTo": null,
-      "owedSince": null
+      "reason": "Fork, not a copy -- adgen owns the live static renderer. This change ports only the segment-override plumbing on top of that fork: buildPrompt({segment}) with categoryPath from resolvedProduct.category || inferredBreadcrumb, CatalogProduct selects now include those two fields (otherwise categoryPath is always null on the DB path), and intentResolution.promptFlags.segmentOverrides stamps built.appliedOverrides. Remaining adgen-owned hunks, deliberately not flattened: logo LRU (optionalImageCached); ai_ugc_led -> objection_resolved; product.category threaded for the apparel role preamble; usableAttribution; composeCorrectiveOverride / buildQcRetryArgs; submitEditImageWithSeedFallback; resume-from-receipt (existingPredictionId / allowResume -- a money guard backend does not have). Backend commit 0966924a (#411) DELETED its entire dormant in-process render pipeline (2118 lines removed, 20 added, all non-functional/comments) -- this deletion includes the previously-documented backend-only promptSha256/seedStyle hunks, which no longer exist in backend at all, so there is nothing left to port either way. Confirmed adgen's file was NOT touched by this commit (0-line diff) and all its documented fork behaviors remain fully intact. Backend's live copy is now ~1050 lines of geometry/logo-compositing helpers only (finishPlate, deliveryGeometryFor, logoPlacementFor, etc.), since adgen owns rendering in production."
     },
     "services/faceSafeCrop.js": {
       "backendHash": "986126268359d4f9d28f8b8075e930689a541cf369025ffbe83c9a2f61cf90a5",
@@ -1167,12 +1168,10 @@
       "owedSince": null
     },
     "services/reframeStrategyChooser.js": {
-      "backendHash": "d96732f5136b00717893c966c80ed9404f2836a1d73e78d022194f4f157e5ae2",
-      "adgenHash": "d96732f5136b00717893c966c80ed9404f2836a1d73e78d022194f4f157e5ae2",
-      "backendSha": "a0781ace9a1db1eaf1492cfac2e3b1bfdb5c2c25",
-      "status": "synced",
-      "portTo": null,
-      "owedSince": null
+      "backendHash": "0fed7de16a716d8f28e320f597a2af21a2cecdee0b3d5442815eff2f4e4173e8",
+      "adgenHash": "0fed7de16a716d8f28e320f597a2af21a2cecdee0b3d5442815eff2f4e4173e8",
+      "backendSha": "110199d03c8116b31220eb7bed30b0ddac122c70",
+      "status": "synced"
     },
     "services/remotionRenderService.js": {
       "backendHash": "d31da9813ceeff6ff78ca396c609c2e1f19c4e8628d8e09a447028d2384f9891",
@@ -1329,12 +1328,6 @@
       "portTo": null,
       "owedSince": null
     },
-    "services/ugcVideoPipeline.js": {
-      "backendHash": "28db621e0a4211e41aa13841bd934bc8443be52f0d517e077a53020e9aef0fd4",
-      "adgenHash": "28db621e0a4211e41aa13841bd934bc8443be52f0d517e077a53020e9aef0fd4",
-      "backendSha": "ec64a9a586ae8fd9736d6d44952e70c9afaaa09f",
-      "status": "synced"
-    },
     "services/veoPromptBuilder.js": {
       "backendHash": "86cf32181d02df4531254d731a782e596078c70b3968aee39da021d3375208c5",
       "adgenHash": "36511176778321553f602dfd18a8d086e43a43f8561e92ec88f55b166eb36e06",
@@ -1408,22 +1401,11 @@
       "owedSince": null
     },
     "services/videoReferenceResolver.js": {
-      "backendHash": "04922fd8510685ca870bd8c5b60df025ce738a81afc79fdc025ff3b4cb448c80",
-      "adgenHash": "cbfda90ed0f726c651df094bb1ded148948c1a5519ce5686fd8377caff8daa32",
-      "backendSha": "326fb2705dad948c41a1570d5ea42e83fcc98763",
+      "backendHash": "4405387504bb50a8c1640e71a38613e285c2df0af0abdbf1f28bf44023664939",
+      "adgenHash": "a9c4aa431680b534ee2775381f2070f028ac9d9519163d7223293534d2944ec7",
+      "backendSha": "110199d03c8116b31220eb7bed30b0ddac122c70",
       "status": "fork",
-      "reason": "per-repo header path only (adgen src/services/... vs backend services/...); executable body byte-identical",
-      "portTo": null,
-      "owedSince": null
-    },
-    "services/videoRouter.js": {
-      "backendHash": "1781950b14280cda1b8ec2db2f5ae446e4fb78899e4db79d293b55b3a1ae3483",
-      "adgenHash": "fb00e7bd22a1d9541d6bf18ac98bc6113931b52844e5bdf6dc5bc8f6560734ba",
-      "backendSha": "295541f797f9b0effb719e21e4ac07bf26cc784a",
-      "status": "unported",
-      "reason": "Both debts from the prior look still stand, unresolved by this PR: (A) backend's atlas-branch generateForAd call and adRegenerateService.js still pass zero allowResume — tracked on atlasVideoService.js/adRegenerateService.js, unaffected here. (B) backend's own router still falls through an unrecognized VIDEO_PROVIDER to the deprecated Vertex path via a bare else. Video-provider-collapse PR 0-3 makes adgen's OWN asymmetry with backend WIDER, not narrower: the vertex arm here no longer executes even when explicitly named — it now unconditionally throws until receipt stamp + CostLog + maxRedirects:0 exist on that path (aiVideoReferenceService is required only to keep its boot IIFE running; DORMANT-KEEP). Backend's vertex arm still executes a real (deprecated, under-guarded) submit when named. owedSince carries forward — this is the same still-open debt, now with a larger gap to close.",
-      "portTo": "backend",
-      "owedSince": "2026-09-05T00:18:50.152Z"
+      "reason": "per-repo header path only (adgen src/services/... vs backend services/...); executable body byte-identical"
     },
     "utils/colorContrast.js": {
       "backendHash": "0592b22f7bb40d089c11157ea75252b3060d87c80cf1b119df88e8c639986eb3",
