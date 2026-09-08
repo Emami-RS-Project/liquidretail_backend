@@ -98,7 +98,16 @@ const { assertBackendRoot } = require('./lib/siblingBackend');
 // Merging the two branches' independent bumps from the same 512 base is NOT
 // a sum of the two deltas — re-measured via this harness itself after both
 // sets of changes landed together.
-const FREEZE_N = 539;
+//
+// Bumped 539 -> 543 (2026-09-08): rebased this branch past origin/main
+// PR #423 (reframe-cache self-heal + raised Gemini payload ceiling), which
+// added new require edges under src/services/ (atlasVideoService.js,
+// geminiReferenceAssembly.js, reframeStrategyChooser.js,
+// videoReferenceResolver.js) without updating this constant on main itself
+// — same +4 delta independently confirmed against a detached origin/main
+// checkout while landing the sibling manual-720p-button PR. Not this
+// branch's own diff. Measured via this harness itself: 543/543 resolved.
+const FREEZE_N = 543;
 const {
   fileExists,
   dirExists,
