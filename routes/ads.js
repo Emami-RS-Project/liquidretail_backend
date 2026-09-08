@@ -2358,6 +2358,79 @@ function pickClosestBaseRatio(rect) {
   return best.name;
 }
 
+// Statuses that already mean "there is something to look at" on the
+// gallery. Queued/rendering stay out — that is what ?rendered=true exists
+// to hide. 'failed' is NOT in this list: a failed row is only visible
+// when it actually kept a billed static asset (see the $or arm below).
+const RENDERED_LIST_OK_STATUSES = Object.freeze(['draft', 'live', 'archived']);
+
+/**
+ * JS twin of buildRenderedListStatusClause — "does this Ad doc belong on a
+ * ?rendered=true gallery?". Kept as a named export so the harness can prove
+ * the Mongo clause and this predicate never disagree, rather than trusting
+ * a comment.
+ *
+ * VIDEO status:'failed' is intentionally false even when renderUrl is
+ * set (titling-failed masters keep the plate). That visibility gap is a
+ * separate, already-documented open issue; this change is static-only.
+ *
+ * Mirrors describeAdFailure().keptAsset (services/adPhase.js) for the
+ * IMAGE half: a truthy renderUrl is the kept-asset test. The list
+ * endpoint cannot call that function (it builds a plain $match before
+ * any DB round-trip), so the Mongo clause below is the query-shaped
+ * equivalent.
+ */
+function isVisibleOnRenderedList(ad) {
+  if (!ad) return false;
+  if (RENDERED_LIST_OK_STATUSES.includes(ad.status)) return true;
+  // !!renderUrl === describeAdFailure keptAsset for a non-qc-failed-kept
+  // failed row, and is a required conjunct of the qc-failed-kept phase.
+  return ad.status === 'failed' && ad.kind === 'image' && !!ad.renderUrl;
+}
+
+/**
+ * Mongo $match clause for GET /api/ads?rendered=true (no explicit status=).
+ *
+ *   draft|live|archived                          — unchanged
+ *   failed + kind:image + non-empty renderUrl    — QC-failed-kept statics
+ *                                                  (owner 2026-08-20: asset
+ *                                                  is kept; operator must
+ *                                                  be able to see it to
+ *                                                  override-qc / PATCH)
+ *
+ * renderUrl uses `$gt: ''` rather than `$nin: [null, '']` on purpose:
+ * Mongo `$nin` matches documents where the field DOES NOT EXIST, which
+ * would surface a never-rendered failed row. `$gt: ''` is the query
+ * equivalent of JS `!!ad.renderUrl` for string/null/missing.
+ */
+function buildRenderedListStatusClause() {
+  return {
+    $or: [
+      { status: { $in: RENDERED_LIST_OK_STATUSES } },
+      {
+        status: 'failed',
+        kind: 'image',
+        renderUrl: { $gt: '' }
+      }
+    ]
+  };
+}
+
+/**
+ * Apply the ?rendered=true widening onto a filter object that already
+ * holds brand/campaign/etc. clauses. Explicit ?status= wins outright —
+ * this is a no-op then (the original `!req.query.status` guard). Mutates
+ * and returns `filter`.
+ */
+function applyRenderedListFilter(filter, query) {
+  if (!filter || typeof filter !== 'object') return filter;
+  const q = query || {};
+  if (q.rendered === 'true' && !q.status) {
+    Object.assign(filter, buildRenderedListStatusClause());
+  }
+  return filter;
+}
+
 // GET /api/ads?brandId=X[&campaignId=Y][&campaignRunId=Z][&status=draft|live|archived][&template=...][&aspectRatio=...][&limit=50]
 router.get('/', async (req, res) => {
   try {
@@ -2400,13 +2473,13 @@ router.get('/', async (req, res) => {
     // Ads page into UGC vs product-shot buckets. Column typed as a string
     // on Ad; direct equality is fine.
     if (req.query.variantKind) filter.variantKind = String(req.query.variantKind);
-    // ?rendered=true → only ads that have actually been rendered to
-    // Cloudinary (status in draft|live|archived). Used by surfaces that
-    // shouldn't surface the queue (campaign-detail Ads section, etc.).
-    // Ignored when an explicit status= is also set.
-    if (req.query.rendered === 'true' && !req.query.status) {
-      filter.status = { $in: ['draft', 'live', 'archived'] };
-    }
+    // ?rendered=true → ads with a lookable asset. Used by surfaces that
+    // shouldn't surface the queue (campaign-detail Ads section, UGC Ads).
+    // Ignored when an explicit status= is also set. Includes failed IMAGE
+    // ads that kept their billed renderUrl (qc-failed-kept) — excluding
+    // those made the override-qc / PATCH buttons unreachable because the
+    // operator could not find the ad. Video failed rows stay hidden.
+    applyRenderedListFilter(filter, req.query);
     if (req.query.template)    filter.template    = req.query.template;
     if (req.query.aspectRatio) filter.aspectRatio = req.query.aspectRatio;
 
@@ -4794,3 +4867,13 @@ module.exports.buildOverrideQcCasFilter = buildOverrideQcCasFilter;
 // allow-list directly, and revert-prove it against the exact 5-stage synthetic
 // proof that found the original hole.
 module.exports.isGenuineQcFailureStage = isGenuineQcFailureStage;
+// QC-FAILED STATIC VISIBILITY (2026-09-07) — exported for behavioural
+// pinning by scripts/verifyQcFailedAdVisibility.js. The GET / list used
+// to drop every status:'failed' row under ?rendered=true, including a
+// qc-failed-kept image that still holds a billed renderUrl. Same rationale
+// as every other pair above: a source-text regex cannot tell a working
+// $or from a comment describing one.
+module.exports.RENDERED_LIST_OK_STATUSES = RENDERED_LIST_OK_STATUSES;
+module.exports.buildRenderedListStatusClause = buildRenderedListStatusClause;
+module.exports.applyRenderedListFilter = applyRenderedListFilter;
+module.exports.isVisibleOnRenderedList = isVisibleOnRenderedList;
