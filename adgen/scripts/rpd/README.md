@@ -19,10 +19,10 @@ An **A/B harness** for catalog **video** models × **prompt variants**, run agai
 
 It lives **outside the Ad pipeline**:
 
-- No Mongo required (optional DB seed mode is later, not now).
+- Mongo is optional — only `seed.productId` (catalog seed + Director cache/detect) connects.
 - No `Ad` rows.
-- No `CostLog`.
 - No campaign / generate / claim path.
+- Director/detect prep writes CostLog the same way production does; the run's own ledger is still `manifest.json`.
 
 You pick one or more video models, a seed image, and a list of prompt levers. The runner builds **cells = models × variants**, optionally submits (billable), polls for free, downloads `master.mp4`, optionally titles with production Remotion, and writes a self-contained gallery you can publish to Netlify (or Cloudflare Pages).
 
@@ -168,7 +168,7 @@ node scripts/rpd/rpd.js models
 
 | Command | What it does | Spends? |
 |---|---|---|
-| `run` | Build prompts, write manifest, optionally submit + poll + download + title + gallery. **Default is dry-run** (no Atlas POST). | Only with `--live` |
+| `run` | Build prompts, write manifest, optionally submit + poll + download + title + gallery. **Default is dry-run** (no image/video POST). With `seed.productId` and no cached Director artifact, dry-run may still spend on detect+Director prep — see Money model. | Generation only with `--live`. Prep may spend on dry-run (productId, cache miss). |
 | `resume <runDir>` | Re-poll existing receipts, download, reconcile settled price, rebuild gallery. **Structurally never submits** (resume path does not import `submitGeneration`). | No (polls are free) |
 | `gallery <runDir>` | Rebuild `index.html` from `manifest.json`. | No |
 | `note <runDir> <cellId\|run> "text"` | Append an observation on a cell or the whole run; persist on the manifest; rebuild gallery. | No |
@@ -181,8 +181,25 @@ node scripts/rpd/rpd.js models
 
 ## Money model
 
-**Dry-run is the default.** `--live` is the only billable door. This section covers both
-providers — read the per-provider asides, they diverge in real ways.
+**Dry-run is the default for IMAGE/VIDEO GENERATION.** `--live` is the only
+billable door for Atlas/Gemini image and video submits — that part is
+unchanged. A bare `run spec.json` (no `--live`) still never POSTs a
+generation.
+
+**Director/detect prep is a separate, smaller spend that CAN fire on a
+dry-run.** When `seed.productId` is set, no `CreativeDirectionArtifact` cache
+row exists for that product, and the operator did not opt out
+(`spec.director.enabled: false`), the harness runs the real production prep
+pipeline — YOLO detect (`ensureDetectForProducts`, Gemini vision) then a
+Director round (`directConceptsRound`, LLM) — so the static prompt (and
+titling copy) is actual direction, not a hand-typed placeholder. That is
+the default, not an opt-in. Production itself pays this cost before it
+ever gets to generation; RPD does the same so a dry-run shows the prompt
+that would actually ship. Cache hits are free. A `seed.url` spec (no
+`productId`) never touches this path.
+
+This section covers both generation providers — read the per-provider
+asides, they diverge in real ways.
 
 1. **`--live` requires `--max-usd N`.** Missing the cap → refuse, no submit.
 2. **Pre-flight:** `Σ estimate(cells) ≤ max-usd` across BOTH providers in the spec, else
@@ -227,7 +244,14 @@ providers — read the per-provider asides, they diverge in real ways.
     `variant.rngSeed` expose it so a prompt A/B can hold the model's randomness fixed. Direct
     Gemini has **no** equivalent parameter (verified against the real `buildRequestBody`, not
     inferred) — do not claim a Gemini comparison is seed-controlled.
-11. **No shared concurrency lease with production, on either provider — worse for Gemini.**
+11. **Director/detect prep is visible, never silent.** A live detect+Director call
+    prints `🎯 Detect + 🎭 Director live round fired` (with CostLog `$` when a
+    `creative_director_round` row can be read back). A cache hit prints
+    `🎭 Director: cache hit … $0`. The run stamps `spec.directorPrep`
+    (`source: cache | live-round | fallback | opt-out | manual`, `detectFired`,
+    `directorFired`, `costUsd`, `at`) so the manifest is self-documenting.
+    Opt-out and operator-complete specs spend nothing here.
+12. **No shared concurrency lease with production, on either provider — worse for Gemini.**
     Atlas pacing is in-process only. Production's Gemini path additionally holds a global
     per-model lease (`services/geminiVideoLease.js`) before every submit; this harness does
     not acquire it (that would need a live Mongo connection, which the harness deliberately
@@ -412,6 +436,16 @@ the cell would silently render the baseline while claiming otherwise. `blocks` t
 exact whole-block substitution of the finished prompt, and **errors loudly** if the block is not
 present (e.g. `STATIC_PROMPT_FIDELITY_HARDENING=false` routes to the legacy paragraph instead).
 
+**`productDesc` / copy defaults (Director, not placeholders).** With `seed.productId` and
+no operator-supplied `productDesc`/`copy.headline`/`copy.subhead`, the runner fills them
+from a real Creative Director concept — cache hit if a `CreativeDirectionArtifact` already
+exists for the product, otherwise it fires YOLO detect + a Director round (the production
+prep pipeline). An explicit `spec.static.productDesc` / `variant.productDesc` /
+`spec.static.copy.*` always wins and skips that pipeline for static. Opt out of the live
+call with `spec.director.enabled: false` (catalog title + brand tagline only). Proof-class
+fields (`rating`/`quote`/…) are never derived, including from a concept that carries them.
+The video camera prompt stays Director-free.
+
 **Intent downgrades are surfaced, not hidden.** `resolveIntent` falls back when an intent's data
 is missing — ask for `social_proof_led` with no rating and you get `product_first_lifestyle`. That
 appears in the dry run, in `promptMeta.intentDowngraded`, and as a gallery badge, because an arm
@@ -432,18 +466,37 @@ Instead of pasting a URL, name a product:
 "seed": { "productId": "6a6624b95f5af85a46562ded" }
 ```
 
-Requires `MONGODB_URI` (read-only). Resolves the merchant-feed primary image by the **live**
+Requires `MONGODB_URI`. Resolves the merchant-feed primary image by the **live**
 production rule (`CatalogProduct.imageMediaId` pointer → `metadata.feedIndex === 0`; videos and
 empty URLs rejected), plus the next two catalog refs in feed order, the product title, and the
 brand's `websiteBackground` as the crop pad hex. **The resolved values are stamped into the
 manifest**, so `resume` / `gallery` / `publish` never touch the database. A product with no usable
-still is a hard error — the harness never triggers a materialize/detect run.
+still is a hard error from the seed lookup itself.
+
+**Director is the default for copy, not a placeholder.** After the seed lookup, if static
+`productDesc` (or titling headline) is missing, the harness reads the latest
+`CreativeDirectionArtifact` for `(brandId, productId[, platformFormat])`. Cache hit → $0
+and that concept's `product_description` / copy. Cache miss → **fires**
+`ensureDetectForProducts` (YOLO / overlay-zone wait) then
+`directConceptsRound` (persists a new artifact, so the next run is a cache hit).
+Needs `ATLAS_API_KEY` or `OPENAI_API_KEY` the same as production. A throw
+(no key, network, LLM error) degrades to catalog title / `brand.tagline` with a
+warning — it does not crash the run. Opt out with:
+
+```json
+"director": { "enabled": false }
+```
+
+`campaignKind` (default `'product'`) and `creativeIntent` (default `null`) and
+`platformFormat` (from `static.surface`, else `meta_feed_1_1`) are overridable
+on that same `director` object. A `seed.url` spec with no `productId` never
+enters this path — that is the "paste a URL, hand-write the description"
+mode.
 
 **If `spec.titling` is also set**, the same lookup fetches the product's real Brand
 (`logoUrl`/`primaryColor`/`secondaryColor`/`accentColor`/`fontFamily`/`tagline`/`titleStylePreset`)
-and wires it into `spec.titling.brand`, plus the real product title into
-`spec.titling.copy.headline` — so the burned-in chrome is the product's actual on-brand look,
-not `titling.js`'s "Pelagic Test Fixture" stand-in. Either field, if the operator already set it
+and wires it into `spec.titling.brand`. Headline prefers operator copy → Director
+headline → catalog title. Either field, if the operator already set it
 in the spec, is left alone. Proof-class copy (`quote`/`rating`/`reviewCount`/`reviewsText`) is
 never touched by this — it stays absent unless supplied explicitly, same rule as always.
 
@@ -505,7 +558,7 @@ Safe by construction if you obey the CLI:
 | Budget cap **per `run --live`** | `--max-usd` is mandatory; pre-flight sum of estimates. |
 | Receipts on disk before poll | Crash-safe; you never “lose” a prediction id. |
 | `resume` never submits | Recover downloads / settled price without a second Omni POST. |
-| Dry-run default | A loop that forgets `--live` spends nothing. |
+| Dry-run default | A loop that forgets `--live` submits no image/video generation. With `seed.productId` and no cached Director artifact it may still spend on detect+Director prep. |
 | Missing/non-finite estimate → refuse | Cannot live-fire any model without a finite number the gate can sum. Unverified rates run with a loud warning — budget conservatively. |
 
 Agent recipe:
@@ -561,7 +614,8 @@ scripts/rpd/
   README.md            ← this file
   rpd.js               ← CLI
   lib/promptVariants.js ← levers vs production builder (both providers)
-  lib/runner.js        ← expand / dry-run / live run (the only file that submits — either provider)
+  lib/directorDirection.js ← cache / detect+Director prep for static+titling copy (once per run)
+  lib/runner.js        ← expand / dry-run / live run (the only file that submits a generation)
   lib/atlasPoll.js     ← free Atlas reads: poll, settled price, probes, downloads
   lib/geminiPoll.js    ← free Gemini reads: poll, settled cost, downloads (mirrors atlasPoll.js)
   lib/geminiImages.js  ← fetch + base64-encode reference images for Gemini's inline-image request shape

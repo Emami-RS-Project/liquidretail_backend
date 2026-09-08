@@ -108,7 +108,11 @@ probe silently stopped being trusted somewhere in the pipeline.
    template spec is at `scripts/rpd/specs/titling-regression-reference.json`
    — fill in a real `seed.productId` (needs `MONGODB_URI`) and keep using the
    *same* product across comparisons, or the comparison isn't apples to
-   apples.
+   apples. That spec pins `director.enabled: false` so a later production
+   Generate (which writes a new CreativeDirectionArtifact round for the same
+   product) cannot silently change the titling headline on the next reference
+   run. Do not flip that flag on; a live Director headline would defeat the
+   frozen comparison.
 2. **Run it with `titling.enabled: true`** at whatever aspect/platformFormat
    you're worried about — square, vertical Stories, vertical Reels, and a
    PMax YouTube format are the minimum spread, since #2 above is specifically

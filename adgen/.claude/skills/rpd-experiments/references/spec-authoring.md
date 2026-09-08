@@ -9,7 +9,8 @@ A spec is one JSON file. Cells = `models × variants`. Start from `scripts/rpd/s
 | `name` | yes | `[a-z0-9-_]`, becomes the run directory + gallery title |
 | `notes` | no | why this experiment exists — renders in the gallery header |
 | `seed.url` | yes (or `seed.productId`) | the product image. **Cloudinary URLs get the exact production crop** (`c_fill,g_auto`, 720-short-edge, brandHex pad). Anything else is sent to the model UNRESIZED with a warning |
-| `seed.productId` | yes (or `seed.url`) | Mongo `CatalogProduct._id`. Needs `MONGODB_URI` (read-only). Resolves the real merchant-feed primary + 2 refs by the live production rule — no manual URLs. If `titling` is also set, also wires the product's real Brand + title into it (see Titling section) unless you set those yourself |
+| `seed.productId` | yes (or `seed.url`) | Mongo `CatalogProduct._id`. Needs `MONGODB_URI`. Resolves the real merchant-feed primary + 2 refs by the live production rule — no manual URLs. Also the gate for Director-defaulted static/titling copy (cache, else detect+Director round). If `titling` is also set, wires the product's real Brand into it unless you set those yourself |
+| `director` | no | `{ enabled: false }` opts out of detect+Director (catalog title / brand tagline only). Default is ON whenever `seed.productId` is set and copy isn't already fully specified. Optional `campaignKind` (default `'product'`), `creativeIntent`, `platformFormat` (else `static.surface` / `meta_feed_1_1`) |
 | `seed.productTitle` | no | becomes `product.title` in the prompt fixture (`Product: …` line); auto-filled from `seed.productId` if not set |
 | `seed.refs[]` | no | extra reference stills, same crop rule; ≥1 ref flips the prompt to multi-view PRODUCT FIDELITY wording (same as production `hasProductReference`) |
 | `seed.brandHex` | no | crop pad color + gallery accent |
@@ -59,7 +60,8 @@ measured experiment; "cleaning it up" without a measured A/B is not.
 - Presets are `remotion/presets/*.json` (`canonical`, `canonical-awareness|consideration|conversion`, `*-pmax10`, curated brand presets).
 - `platformFormat` picks the SAFE ZONE (Stories ≠ Reels ≠ PMax YouTube) independent of the composition; composition comes from the aspect (vertical/square/landscape/feed — square supported).
 - `brand` (object, no need to author it by hand) — when `seed.productId` is used, `runner.js` fills this in automatically with the real Brand doc (`logoUrl`, `primaryColor`/`secondaryColor`/`accentColor`, `fontFamily`, `tagline`, `titleStylePreset`) so the burned-in chrome matches the real brand instead of the fixture "Pelagic Test Fixture" look. Set it yourself only to force-test a *different* brand's look than the seeded product's own. `brandName` (the plain string field, above) still only feeds the fixture and is ignored once a real `brand` object is present.
-- **Proof-class copy renders ONLY when you supply it** (`quote`, `quoteSnippet`, `reviewer`, `rating`, `reviewCount`, `reviewsText`, `badgeText`, `deliveryLine`, `price`). A defaulted quote is a fabricated testimonial — pinned by verify E8. Only put real, provenance-checked proof in a gallery someone might share.
+- Headline prefers operator copy → Director headline (when `seed.productId` ran prep) → catalog title. Subhead from the Director is applied only when you didn't set `copy.subhead` / `copy.subheadline`.
+- **Proof-class copy renders ONLY when you supply it** (`quote`, `quoteSnippet`, `reviewer`, `rating`, `reviewCount`, `reviewsText`, `badgeText`, `deliveryLine`, `price`). A defaulted quote is a fabricated testimonial — pinned by verify E8. Director-sourced proof-adjacent fields are dropped the same way. Only put real, provenance-checked proof in a gallery someone might share.
 - Titling failure keeps the master and records `titlingError` — untitled is visible, never counted as titled.
 
 ## Matrix patterns that work

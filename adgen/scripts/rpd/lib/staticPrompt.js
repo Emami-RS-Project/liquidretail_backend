@@ -49,16 +49,26 @@ function assertString(value, label) {
 }
 
 // Fixture mirroring what directImageRenderService.buildIntentData would hand
-// buildPrompt — but supplied by the spec, so no DB is needed. PROOF-CLASS
-// fields (rating/reviewCount/reviewsText/quote/attribution) are passed ONLY
-// when the operator supplies them: a defaulted rating or quote is a fabricated
-// claim, the same rule the titling fixture follows.
+// buildPrompt. Copy/productDesc come from the spec: either the operator
+// typed them (manual override, byte-identical to pre-Director-default
+// specs) or runner.js stamped them from the real Director
+// (scripts/rpd/lib/directorDirection.js) before expandStaticCells. This
+// module stays pure/offline — it never calls detect or the Director.
+// PROOF-CLASS fields (rating/reviewCount/reviewsText/quote/attribution) are
+// passed ONLY when the operator supplies them: a defaulted rating or quote
+// is a fabricated claim, the same rule the titling fixture follows. A
+// Director concept that carries proof-adjacent fields is stripped before
+// it reaches this fixture (directorDirection.fieldsFromConcept).
 function staticFixture({ spec, variant }) {
   const stat = spec.static || {};
   const copy = { ...(stat.copy || {}), ...(variant.copy || {}) };
   const desc = variant.productDesc || stat.productDesc;
   if (!desc || !String(desc).trim()) {
-    throw new Error('rpd: spec.static.productDesc is required (the product sentence production derives via describeProductForPrompt)');
+    throw new Error(
+      'rpd: spec.static.productDesc is required (the product sentence production derives via describeProductForPrompt). ' +
+      'With seed.productId this is auto-filled from the Director unless you set spec.director.enabled=false ' +
+      'or supply productDesc yourself.'
+    );
   }
   const data = {
     headline: copy.headline,

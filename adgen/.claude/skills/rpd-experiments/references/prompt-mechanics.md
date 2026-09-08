@@ -155,10 +155,24 @@ In production `directImageRenderService.buildIntentData` assembles `data`:
 headline via Director → `layoutInput.copy` → `brand.tagline`; quote via the
 provenance-gated quote pipeline; proof numbers via `resolveCoherentSocialProof`;
 CTA via `layoutInput.cta.text || 'SHOP NOW'`; badge always undefined.
+`describeProductForPrompt` prefers `concept.product_description || concept.subject`,
+then catalog title.
 
-**The harness supplies `data` from the spec instead**, so no DB is needed — and it
-passes proof-class fields **only when the operator supplies them**, because a
-defaulted rating or quote is a fabricated claim.
+**The harness now uses that same Director cascade by default when
+`seed.productId` is set.** `scripts/rpd/lib/directorDirection.js` (once per
+`runSpec`, not per cell) reads the latest `CreativeDirectionArtifact` for the
+product, or — on a cache miss — fires `ensureDetectForProducts` +
+`directConceptsRound` and stamps `spec.static.productDesc` / `copy.headline` /
+`copy.subhead` (and titling copy) from the concept, using the same fields
+`describeProductForPrompt` and the headline cascade read. An explicit
+`productDesc` / `copy.*` in the spec still wins byte-identically and skips
+detect+Director for static. `spec.director.enabled: false` opts out to catalog
+title / brand tagline. Proof-class fields are still passed **only when the
+operator supplies them** — a Director concept that carries `rating`/`quote` is
+stripped; a defaulted rating or quote is a fabricated claim.
+
+A `seed.url` spec with no `productId` is unchanged: the operator still supplies
+`data` by hand. The video camera prompt (`buildVeoPrompt`) stays Director-free.
 
 ### Step 6: what gets sacrificed when the copy set is too dense
 

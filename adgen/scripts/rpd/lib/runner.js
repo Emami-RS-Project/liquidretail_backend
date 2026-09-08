@@ -4,9 +4,15 @@
 //
 // MONEY RULES (pinned by scripts/verifyRpdHarness.js; adversarially reviewed
 // 2026-08-18 — findings 1/2/3 from that review are fixed here):
-//   - The ONLY billable call is atlasVideoService.submitGeneration — the
-//     production submit path (pacedModelSubmit spacing, structured-429-only
-//     retry, maxRedirects:0). No other POST in this harness bills.
+//   - Image/video GENERATION still has one billable door: `--live` →
+//     atlasVideoService.submitGeneration / geminiVideoService.submitGeneration
+//     (pacedModelSubmit, structured-429-only retry, maxRedirects:0 / Gemini
+//     one-POST). A dry-run never submits a generation.
+//   - Director/detect PREP is a separate, smaller spend that CAN fire on a
+//     dry-run when seed.productId is set and no CreativeDirectionArtifact
+//     cache row exists (owner 2026-09-07: simulate production; no opt-in
+//     flag). Gated only by spec.director.enabled === false (opt-OUT) or an
+//     already-complete manual override. Surfaced on spec.directorPrep.
 //   - Live mode requires BOTH opts.live and a finite opts.maxUsd; the summed
 //     floor-grade estimate of every submittable cell must fit under the cap
 //     BEFORE the first submit, or the whole run is refused. A cell whose
@@ -638,6 +644,23 @@ async function runSpec(specPath, { live = false, maxUsd = null, outRoot = 'rpd-r
     if (spec.titling && !spec.titling.brand && resolved.brand) {
       spec.titling.brand = resolved.brand;
     }
+    // Director/detect PREP — once per runSpec, never per cell. Default is
+    // the real production pipeline (cache → else YOLO detect + Director
+    // round) so static productDesc/copy (and titling copy) come from actual
+    // direction, not a hand-typed placeholder. Operator-supplied fields
+    // always win; spec.director.enabled === false opts out to catalog
+    // title / brand tagline. Proof-class fields are never touched.
+    {
+      const { applyDirectorDefaults } = require('./directorDirection');
+      await applyDirectorDefaults(spec, resolved);
+    }
+    // Catalog-title last resorts AFTER Director (or its fallback) had a
+    // chance. Operator-supplied and Director-derived values both skip these.
+    if (spec.static && resolved.productTitle) {
+      if (!spec.static.productDesc || !String(spec.static.productDesc).trim()) {
+        spec.static.productDesc = resolved.productTitle;
+      }
+    }
     if (spec.titling && resolved.productTitle) {
       spec.titling.copy = spec.titling.copy || {};
       if (!spec.titling.copy.headline) spec.titling.copy.headline = resolved.productTitle;
@@ -692,7 +715,11 @@ async function runSpec(specPath, { live = false, maxUsd = null, outRoot = 'rpd-r
   const runDir = newRunDir(outRoot, spec);
   writeManifest(runDir, manifest);
 
-  console.log(`\nRPD run: ${spec.name}  (${live ? 'LIVE' : 'dry-run — nothing will be submitted'})`);
+  const prepSpent = !!(spec.directorPrep && spec.directorPrep.source === 'live-round');
+  const dryLabel = prepSpent
+    ? 'dry-run — no image/video generation; Director/detect prep DID spend'
+    : 'dry-run — nothing will be submitted';
+  console.log(`\nRPD run: ${spec.name}  (${live ? 'LIVE' : dryLabel})`);
   console.log(`Run dir: ${runDir}\n`);
   for (const c of cells) {
     const est = Number.isFinite(c.estUsd) ? `~${fmtUsd(c.estUsd)}` : 'no estimate';
@@ -722,7 +749,15 @@ async function runSpec(specPath, { live = false, maxUsd = null, outRoot = 'rpd-r
       console.log('   A --live run will REFUSE until the spec is fixed (or --allow-duplicate-prompts).');
       console.log('   Usual cause: `directives` no longer changes the prompt — use guidance / raw / patch.');
     }
-    console.log('Prompts + exact request bodies are in manifest.json. Nothing was sent.');
+    console.log('Prompts + exact request bodies are in manifest.json.');
+    // Unqualified "nothing was sent" is a lie after a productId cache-miss
+    // that already billed detect+Director. planned.length === 0 is the same
+    // footer — both arms must stay honest about prep spend.
+    if (spec.directorPrep && spec.directorPrep.source === 'live-round') {
+      console.log('No image/video generation was submitted; Director/detect prep DID spend (see above).');
+    } else {
+      console.log('Nothing was sent.');
+    }
     return { runDir, manifest };
   }
 
