@@ -2,7 +2,7 @@
   "version": 2,
   "backendRef": "origin/main",
   "backendHead": "8fe94cae3851afd3fa4c7e5ebc49682817ee5daa",
-  "generatedAt": "2026-09-08T18:24:09.691Z",
+  "generatedAt": "2026-09-08T18:41:15.459Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
@@ -933,11 +933,10 @@
       "owedSince": null
     },
     "services/fontResolverService.js": {
-      "backendHash": "f978e12cf5dc6bff90a826205e49b952523904490b18402b7d7982778cd35c0b",
+      "backendHash": "15da026805c3929ae9287facc96d935646aa163961d8c50edbc68e61036a785e",
       "adgenHash": "15da026805c3929ae9287facc96d935646aa163961d8c50edbc68e61036a785e",
-      "backendSha": "6f5372fbcf7b7b58f4a18bc18cb1c899534f7b3b",
-      "status": "fork",
-      "reason": "resolveLibraryMatch's CSS fallback field now consults LIBRARY_SERIF_FACES (authoritative for the closed curated-face set) instead of the naive name-regex fallbackFor(), which missed the 4 script/handwritten faces (Great Vibes, Dancing Script, Pacifico, Caveat). Applied identically to both trees; still byte-identical."
+      "backendSha": "8fe94cae3851afd3fa4c7e5ebc49682817ee5daa",
+      "status": "synced"
     },
     "services/handoffContract.js": {
       "backendHash": "de310d4687251963d2fc8a51db6a7d07cf8ec9982c0d9415f0b4d850a62b955b",
