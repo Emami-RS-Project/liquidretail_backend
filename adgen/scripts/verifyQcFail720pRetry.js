@@ -2910,16 +2910,30 @@ check("K0b parser is strict === 'true' (no toLowerCase, no truthiness, no !== 'f
 check('K0c maybeRetryVideoQcFailureAt720p gates on the flag FIRST, before any eligibility/claim/submit', () => {
   const i = RETRY_SVC_SRC_FOR_K.indexOf('async function maybeRetryVideoQcFailureAt720p');
   assert.ok(i > 0, 'maybeRetryVideoQcFailureAt720p not found');
-  const bodyStart = RETRY_SVC_SRC_FOR_K.indexOf('{', i);
-  const head = RETRY_SVC_SRC_FOR_K.slice(bodyStart, bodyStart + 1200);
+  // The params are an inline destructure — `({ ad, ... }) {` — so a bare
+  // indexOf('{', i) lands on THAT opening brace, not the function body's.
+  // A prior version of this check did exactly that, which shifted every
+  // offset below by the length of the whole param list and JSDoc-adjacent
+  // gate code, and (separately) searched for the bare substring
+  // 'videoQcRetry', which the gate's OWN log line
+  // (`videoQcRetry[ad=${...}]: ...`) also contains — so `claim` always
+  // resolved inside the gate's own log text, always after flagGate, making
+  // the assertion vacuously true regardless of where the REAL Mongo claim
+  // sits. Anchor on the literal `}) {` that closes the destructured params
+  // and open the real body, and require the FILTER shape `videoQcRetry:
+  // null` (the atomic claim), which cannot appear inside the log string.
+  const paramsClose = RETRY_SVC_SRC_FOR_K.indexOf('}) {', i);
+  assert.ok(paramsClose > i, 'could not find the closing `}) {` of the destructured params');
+  const bodyStart = paramsClose + 3; // land on the body's own `{`
+  const head = RETRY_SVC_SRC_FOR_K.slice(bodyStart, bodyStart + 3000);
   const flagGate = head.indexOf('isQcRetry720pEnabled()');
   const cats = head.indexOf('retryEligibleFailingCategories');
-  const claim = head.indexOf('videoQcRetry');
+  const claim = head.search(/videoQcRetry:\s*null/);
   assert.ok(flagGate > 0, 'flag gate isQcRetry720pEnabled() missing from function head');
   assert.ok(/return null/.test(head.slice(flagGate, flagGate + 400)),
     'flag-off arm must return null (no retry)');
   assert.ok(cats > flagGate, 'eligibility check must come AFTER the flag gate');
-  assert.ok(claim < 0 || claim > flagGate, 'videoQcRetry claim must not precede the flag gate');
+  assert.ok(claim > flagGate, 'the videoQcRetry:null atomic-claim filter must not precede the flag gate (or was not found where expected)');
 });
 
 check('K0d qcAndStampVideoAdWithRetry still funnels the retry decision through maybeRetry (single choke point)', () => {
@@ -3061,6 +3075,40 @@ check('K7 isQcRetry720pEnabled is exported and agrees with the live env', () => 
   delete process.env.QC_RETRY_720P_ENABLED;
   assert.strictEqual(retrySvc.isQcRetry720pEnabled(), false);
   process.env.QC_RETRY_720P_ENABLED = 'true'; // restore ON default for anything after
+});
+
+check('K8 exactly ONE call site of videoRouter.retryVideoAt720pAfterQcFailure( in src/ — the kill switch only covers this one dispatch path', () => {
+  // The kill switch guards maybeRetryVideoQcFailureAt720p, which is the sole
+  // caller of videoRouter.retryVideoAt720pAfterQcFailure (the function that
+  // actually dispatches the billable resubmit to Atlas/Gemini). Nothing
+  // enforced that "sole caller" property structurally — a future dispatch
+  // added anywhere else in src/ (a second entry point into the retry
+  // primitive) would bypass the gate entirely while every other K check
+  // stayed green, since none of them can see call sites they don't already
+  // know about. Adversarial-review finding, 2026-09-07.
+  //
+  // Match the dotted CALL form only (`videoRouter.retryVideoAt720pAfterQcFailure(`)
+  // — this is distinct from: the function's own definition inside
+  // videoRouter.js; atlasVideoService.js's / geminiVideoService.js's own
+  // same-named functions (called as `atlasVideoService.…` /
+  // `geminiVideoService.…`, never `videoRouter.…`); and prose comments that
+  // name the function without a trailing `(` (e.g. "videoRouter.
+  // retryVideoAt720pAfterQcFailure → ..."), which this pattern's required
+  // `(` naturally excludes.
+  const { walkSource } = require('./lib/sourceWalk');
+  const CALL_RE = /videoRouter\.retryVideoAt720pAfterQcFailure\(/g;
+  const files = walkSource(SRC, { extensions: ['.js'] });
+  const hits = [];
+  for (const f of files) {
+    const text = fs.readFileSync(f, 'utf8');
+    const matches = text.match(CALL_RE);
+    if (matches) hits.push({ file: path.relative(ROOT, f), count: matches.length });
+  }
+  const total = hits.reduce((n, h) => n + h.count, 0);
+  assert.strictEqual(total, 1,
+    `expected exactly 1 call site of videoRouter.retryVideoAt720pAfterQcFailure( in src/, found ${total}: ${JSON.stringify(hits)}`);
+  assert.strictEqual(hits[0].file, 'src/services/videoQcRetryService.js',
+    `the one call site must be videoQcRetryService.js (inside the gated maybeRetryVideoQcFailureAt720p), found in ${hits[0] && hits[0].file}`);
 });
 
 console.log('');
