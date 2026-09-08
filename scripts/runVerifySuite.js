@@ -88,6 +88,14 @@ const { spawn, execFileSync } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 const SCRIPTS_DIR = path.join(ROOT, 'scripts');
 const VERIFY_RE = /^verify.*\.(js|mjs)$/;
+// Grafted `adgen/scripts/verify*.{js,mjs}` are INTENTIONALLY not in this
+// glob. mongoose majors must not mix (adgen fails closed unless mongoose 8;
+// this tree is mongoose 7), so folding those harnesses into root `npm test`
+// would trade a real result for a false pass/fail. They are gated by CI job
+// `adgen` in `.github/workflows/ci.yml` (`working-directory: adgen`,
+// `npm test` → `node scripts/runVerifySuite.js`). That job's `if:` includes
+// `backend == true`, so a backend PR still runs them. Ceiling pin lives at
+// `adgen/scripts/verifyGeminiReferenceAssembly.js`.
 
 // Directories whose modules are routinely require()'d from all over the
 // codebase (verified 2026-08-19: services/ and models/ alone account for

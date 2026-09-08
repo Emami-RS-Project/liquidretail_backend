@@ -67,18 +67,24 @@ const MAX_REFERENCE_IMAGES = (() => {
 
 // Total base64 ceiling for one request.
 //
-// MEASURED on real Pelagic stacks: 3 raw catalog refs are 0.73-2.11 MB on
-// disk, 0.97-2.81 MB once base64'd. Gemini's documented guidance is to switch
-// to the Files API above ~100 MB of total request; 20 MB is far under that and
-// still ~7x the largest measured stack, so it bounds a pathological catalog
-// image (a 40 MP TIFF) without ever tripping on a normal one.
+// MEASURED 2026-09-07 on real Pelagic 4k nano-banana-2 outpaint JPEGs:
+// 5.1–7.5 MB raw per image. Three of those base64'd is 3 × 7.5 MB × 4/3
+// ≈ 30 MB — which ALWAYS blew the previous 20 MB default (sized only
+// against un-outpainted catalog photos: "3 raw catalog refs... 0.73-2.11
+// MB on disk"). Gemini's documented Files API guidance kicks in around
+// ~100 MB; 64 MB sits well under that and still fits a legitimate 3×4k
+// outpaint stack (30 MB) with headroom, while a pathological 40 MP TIFF
+// still trips the refusal.
+//
+// Genuine over-tolerance subjects still outpaint — that is not a bug —
+// so the ceiling has to accommodate real 4k output, not only DINO crops.
 //
 // This is a REFUSAL, not a truncation. Silently dropping a reference to fit
 // would change what the model sees on a billable generation while reporting
 // success — the reference stack is the whole fidelity argument.
 const MAX_TOTAL_B64_BYTES = (() => {
   const raw = Number(process.env.GEMINI_VIDEO_MAX_PAYLOAD_BYTES);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 20 * 1024 * 1024;
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 64 * 1024 * 1024;
 })();
 
 const FETCH_TIMEOUT_MS = 30_000;
@@ -202,7 +208,7 @@ async function assembleReferences({ ad, aspectRatioOverride = null }) {
   // or a shot the pipeline hasn't detected on). `c-fill` on a Media that
   // has refinedProducts is the load-bearing anomaly to grep for.
   const refDetails = [];
-  const counts = { cache: 0, 'on-demand': 0, 'c-fill': 0 };
+  const counts = { cache: 0, 'cache-superseded': 0, 'on-demand': 0, 'c-fill': 0 };
   const urls = await buildReferenceImages({
     media,
     product,
@@ -227,6 +233,7 @@ async function assembleReferences({ ad, aspectRatioOverride = null }) {
       });
       const mid = id.mediaDoc?._id ? String(id.mediaDoc._id).slice(-6) : String(id.sourceUrl).slice(0, 20);
       const bucket = source === 'reframe-cache' ? 'cache'
+                    : source === 'cache-superseded' ? 'cache-superseded'
                     : source === 'on-demand-yolo' ? 'on-demand'
                     : 'c-fill';
       counts[bucket] += 1;
@@ -236,7 +243,7 @@ async function assembleReferences({ ad, aspectRatioOverride = null }) {
   });
   console.log(
     `📎 gemini refs[ad=${ad._id}][${aspectRatio}]: ` +
-    `cache=${counts.cache} on-demand=${counts['on-demand']} c-fill=${counts['c-fill']}` +
+    `cache=${counts.cache} cache-superseded=${counts['cache-superseded']} on-demand=${counts['on-demand']} c-fill=${counts['c-fill']}` +
     (refDetails.length ? ` — ${refDetails.join(' ')}` : '')
   );
 

@@ -375,10 +375,37 @@ function chooseStrategy({ media, aspectRatio, sourceUrl }) {
   };
 }
 
+// Paid generative methods persistReframe actually writes. 'composite-mask'
+// is a chooseStrategy ACTION, not a persisted method — the billed persist
+// of that branch is 'composite-outpaint'. A cached CROP/PAD/EXACT entry is
+// already the best case (chooser priority: skip > crop > defer/outpaint)
+// so it is NOT in this set and must not be re-checked on read.
+const OUTPAINT_CLASS_METHODS = Object.freeze(['outpaint', 'composite-outpaint']);
+
+function isOutpaintClassMethod(method) {
+  return OUTPAINT_CLASS_METHODS.includes(String(method || ''));
+}
+
+// Pure. Cached outpaint is not the best answer if today's chooser would
+// crop. Returns the chooseStrategy crop result, or null if the cache
+// should stand (not an outpaint-class method, or chooser still defers).
+// Callers persist the crop themselves — this helper has no I/O.
+function preferCropOverOutpaintCache({ media, aspectRatio, sourceUrl, cachedMethod }) {
+  if (!isOutpaintClassMethod(cachedMethod)) return null;
+  const strategy = chooseStrategy({ media, aspectRatio, sourceUrl });
+  if (strategy && strategy.action === 'crop' && typeof strategy.url === 'string' && strategy.url.trim()) {
+    return strategy;
+  }
+  return null;
+}
+
 module.exports = {
   chooseStrategy,
   isCropFirstEnabled,
   overfitTolerancePct,
+  isOutpaintClassMethod,
+  preferCropOverOutpaintCache,
+  OUTPAINT_CLASS_METHODS,
   // Promoted from __test-only to a real consumer-facing export: the PMax
   // split-stage video decision layer (services/pmaxSplitStrategy.js) needs
   // the same YOLO subject-union math to decide which side of the frame the

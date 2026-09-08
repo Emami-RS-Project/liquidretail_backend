@@ -236,9 +236,26 @@ const REFRAME_REDERIVE_STALE = () =>
 // destructive crop if the re-derive fails.
 function readReframeEntry(entry) {
   const url = entry?.url;
-  if (typeof url !== 'string' || !url.trim()) return { url: null, stale: false };
+  if (typeof url !== 'string' || !url.trim()) return { url: null, stale: false, method: null };
   const stale = REFRAME_REDERIVE_STALE() && entry?.ladderVersion !== REFRAME_LADDER_VERSION;
-  return { url: url.trim(), stale };
+  return { url: url.trim(), stale, method: entry?.method || null };
+}
+
+// Cached outpaint that today's chooser would crop is superseded in-place.
+// persistCropSupersedingOutpaint is claim-safe (will not drop a live
+// billing lease). Returns the crop URL, or null if the cache should stand.
+async function healCachedOutpaintToCrop({ media, aspectKey, aspectRatio, sourceUrl, cachedMethod }) {
+  const { preferCropOverOutpaintCache } = require('./reframeStrategyChooser');
+  const crop = preferCropOverOutpaintCache({
+    media, aspectRatio, sourceUrl, cachedMethod
+  });
+  if (!crop) return null;
+  console.log(
+    `   ✂️  reframe[${aspectKey}]: cached ${cachedMethod} superseded by ${crop.method} ` +
+    `— $0 crop, cache healed`
+  );
+  await persistCropSupersedingOutpaint(media, aspectKey, aspectRatio, crop.url, crop.method);
+  return crop.url;
 }
 // Cross-process reframe claim lease. Web service and worker are separate Node
 // processes, so the in-process Map + fresh DB re-read alone cannot stop both
@@ -2225,7 +2242,12 @@ async function reframeReferenceForAspect({ media, sourceUrl, aspectRatio, brand,
     //    is deliberately NOT served: the next video generation re-derives it
     //    under the new resize regime (see REFRAME_REDERIVE_STALE).
     const cachedEntry = readReframeEntry(media?.metadata?.reframes?.[aspectKey]);
-    if (cachedEntry.url && !cachedEntry.stale) return cachedEntry.url;
+    if (cachedEntry.url && !cachedEntry.stale) {
+      const healed = await healCachedOutpaintToCrop({
+        media, aspectKey, aspectRatio, sourceUrl, cachedMethod: cachedEntry.method
+      });
+      return healed || cachedEntry.url;
+    }
     if (cachedEntry.stale) {
       staleUrl = cachedEntry.url;
       console.log(
@@ -2265,7 +2287,12 @@ async function reframeReferenceForAspect({ media, sourceUrl, aspectRatio, brand,
         const freshEntry = readReframeEntry(fresh?.metadata?.reframes?.[aspectKey]);
         // Only a CURRENT-ladder entry short-circuits. A stale one is kept as the
         // last resort and we continue on to re-derive it.
-        if (freshEntry.url && !freshEntry.stale) return freshEntry.url;
+        if (freshEntry.url && !freshEntry.stale) {
+          const healed = await healCachedOutpaintToCrop({
+            media, aspectKey, aspectRatio, sourceUrl, cachedMethod: freshEntry.method
+          });
+          return healed || freshEntry.url;
+        }
         if (freshEntry.stale) staleUrl = freshEntry.url;
       } catch { /* fall through and compute */ }
 
@@ -2493,8 +2520,11 @@ async function reframeReferenceForAspect({ media, sourceUrl, aspectRatio, brand,
           // work". A stale url here is the very asset we hold the claim to
           // replace — bailing on it would make the re-derive impossible.
           if (settledEntry.url && !settledEntry.stale) {
+            const healed = await healCachedOutpaintToCrop({
+              media, aspectKey, aspectRatio, sourceUrl, cachedMethod: settledEntry.method
+            });
             console.log(`   ✅ reframe[${aspectKey}]: another process landed a result — no spend`);
-            return settledEntry.url;
+            return healed || settledEntry.url;
           }
           if (settledEntry.stale) staleUrl = settledEntry.url;
         } catch { /* unreadable → proceed; the claim is still ours */ }
@@ -2995,16 +3025,31 @@ async function reframeReferenceForAspect({ media, sourceUrl, aspectRatio, brand,
 // These fields are not inputs to computeIdentityDigest (which hashes mediaId,
 // not reframe entry contents — verified 2026-08-27), so adding them cannot
 // change any ad's identity or re-bill an existing master.
+function currentChooserConfig() {
+  let overfit = 0.10;
+  try {
+    overfit = require('./reframeStrategyChooser').overfitTolerancePct();
+  } catch { /* default */ }
+  const rawMethod = String(process.env.COMPOSITE_MASK_METHOD || '').toLowerCase().trim();
+  return {
+    strategy: String(process.env.REFRAME_STRATEGY || 'outpaint-only').toLowerCase().trim(),
+    compositeMaskMethod: rawMethod === 'composite-outpaint' ? 'composite-outpaint' : 'force-crop',
+    overfitTolerancePct: overfit
+  };
+}
+
 async function persistReframe(media, aspectKey, aspectRatio, finalUrl, method, { claimedAt = null } = {}) {
   if (!finalUrl) return false;
   const nowIso = new Date().toISOString();
   const heldMs = claimedAt ? Math.max(0, Date.parse(nowIso) - Date.parse(claimedAt)) : null;
+  const chooserConfig = currentChooserConfig();
   const entry = {
     url: finalUrl,
     aspect: aspectRatio,
     method,
     model: REFRAME_OUTPAINT_MODEL(),
     ladderVersion: REFRAME_LADDER_VERSION,
+    chooserConfig,
     at: nowIso,
     // Omitted (undefined) when there was no claim, so free-tier entries keep
     // their historical shape exactly.
@@ -3044,6 +3089,52 @@ async function persistReframe(media, aspectKey, aspectRatio, finalUrl, method, {
       `❌ reframeReferenceForAspect: PERSIST FAILED — paid reframe URL not shared ` +
       `across processes; spend unprotected off-box (media=${media._id} aspect=${aspectKey} ` +
       `method=${method}) — ${err.message}`
+    );
+    return false;
+  }
+}
+
+// Claim-safe crop-over-outpaint persist. Unconditional persistReframe $set
+// drops `.claim` and can let a third process POST a second nano-banana
+// while a billed outpaint is in flight. This write matches ONLY a settled
+// outpaint-class entry with no live claim.at, so a billing lease is never
+// stolen. In-memory mutation still happens so THIS request serves the crop
+// even when the filter misses.
+async function persistCropSupersedingOutpaint(media, aspectKey, aspectRatio, finalUrl, method) {
+  if (!finalUrl || !method) return false;
+  const { OUTPAINT_CLASS_METHODS } = require('./reframeStrategyChooser');
+  const nowIso = new Date().toISOString();
+  const chooserConfig = currentChooserConfig();
+  const entry = {
+    url: finalUrl,
+    aspect: aspectRatio,
+    method,
+    model: REFRAME_OUTPAINT_MODEL(),
+    ladderVersion: REFRAME_LADDER_VERSION,
+    chooserConfig,
+    at: nowIso
+  };
+  if (media) {
+    media.metadata = media.metadata || {};
+    media.metadata.reframes = media.metadata.reframes || {};
+    media.metadata.reframes[aspectKey] = entry;
+  }
+  if (!media?._id) return true;
+  try {
+    const path = `metadata.reframes.${aspectKey}`;
+    const result = await Media.updateOne(
+      {
+        _id: media._id,
+        [`${path}.method`]: { $in: [...OUTPAINT_CLASS_METHODS] },
+        [`${path}.claim.at`]: { $exists: false }
+      },
+      { $set: { [path]: entry } }
+    );
+    return (result.matchedCount || 0) > 0;
+  } catch (err) {
+    console.warn(
+      `⚠️  persistCropSupersedingOutpaint: DB heal failed (in-memory crop still served) ` +
+      `(media=${media._id} aspect=${aspectKey}) — ${err.message}`
     );
     return false;
   }
@@ -5493,6 +5584,7 @@ module.exports = {
   padTargetMode,
   REFRAME_LADDER_VERSION,
   cropImageUrlForAspect,
+  persistCropSupersedingOutpaint,
   buildVideoSegmentUrl,
   buildReferenceImages,
   isVideoRawCatalogReferencesEnabled,
