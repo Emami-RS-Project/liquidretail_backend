@@ -604,6 +604,63 @@ const adSchema = new mongoose.Schema({
   // already paid for (mirrors Omni master keep on titling failure).
   // Null when AD_VISION_QC_ENABLED is off or the ad predates this field.
   visionQc:           { type: mongoose.Schema.Types.Mixed, default: null },
+  // ── QC-triggered 720p retry lock/audit (feat/qc-fail-720p-retry) ─────
+  // MONEY-CRITICAL, MASTER-ROW ONLY. Lives on the ad that OWNS the video
+  // submission (a true master — never a derive/funnel row, since those
+  // never submit, on EITHER provider). This is BOTH the "already retried
+  // once" marker AND the atomic claim lock:
+  // services/videoQcRetryService.js's maybeRetryVideoQcFailureAt720p()
+  // claims it via
+  // `findOneAndUpdate({_id, videoQcRetry: null, claimedByWorker: {$in:[null, WORKER_ID]}}, {$set: {videoQcRetry: {...}}})`
+  // — a conditional update on `null` — so two concurrent QC failures on
+  // SIBLING derives of the same master (which, since a derive is a crop of
+  // the master's own footage, commonly fail on the SAME underlying defect
+  // at nearly the same time) can only have ONE winner. Once non-null, this
+  // master's retry budget is spent FOREVER — no code path may re-null it.
+  // Shape:
+  //   { attempted: true,
+  //     triggeredByAdId: ObjectId,      // the ad row whose QC failure fired
+  //                                     // this — the master itself, or a
+  //                                     // sibling derive that shares its
+  //                                     // footage (see design note below)
+  //     triggeredByCategories: [String],// e.g. ['text_defects']
+  //     requestedResolution: '720p',
+  //     startedAt: Date, completedAt: Date|null,
+  //     outcome: 'passed'|'failed'|'error'|'skipped'|'unsettled'|null,
+  //                                     // 'unsettled' = possibly-billed retry
+  //                                     // receipt, master stays 'rendering';
+  //                                     // completedAt stays unset until a
+  //                                     // human completes it (the sweep
+  //                                     // peeks + Slack-alerts, it does
+  //                                     // not auto-complete). lastAlertedAt
+  //                                     // debounce for that alert.
+  //     predictionId: String|null,      // the retry's OWN veoPredictionId
+  //     error: String|null,             // set on outcome:'error'|'unsettled'
+  //     preRetryStatus / preRetryRenderError / preRetryBasePlate
+  //       (sourced from the claim query's own status/renderError/basePlate
+  //        in a follow-up write — never from the caller's in-memory ad,
+  //        which is stale post-qcAndStampVideoAd),
+  //     attempt1PredictionId / attempt1VeoVideoUrl,
+  //     heldExistingCallerClaim: Boolean,
+  //     ownerWorkerId: String }
+  // WHY MASTER-SCOPED, NOT DERIVE-SCOPED: a derive never independently
+  // generates video — renderer.js's derive branch stamps a derive's
+  // veoVideoUrl to the EXACT SAME URL as its master's (a spatial crop /
+  // retitle at TITLING time, never a second submit), so a
+  // product_fidelity/text_defects defect a derive's QC catches is baked
+  // into the MASTER's own generated pixels — a derive-only "retry" would
+  // just re-crop the identical already-failing footage. The only
+  // actionable retry is regenerating the MASTER (same seeds/prompt, forced
+  // 720p, whichever provider — Atlas or Gemini — generated it) and then
+  // re-deriving the ORIGINALLY-failing row from the new master. Sibling
+  // derives that already passed QC are deliberately left on the OLD
+  // master's footage (not silently re-derived) — see that function's own
+  // header comment for the accepted-inconsistency tradeoff.
+  // Null on every ad that predates this field, and on every derive/funnel
+  // row forever (their own `videoQcRetry` is never written — the lock
+  // always lives on the master doc, even when a derive's failure triggered
+  // it).
+  videoQcRetry:       { type: mongoose.Schema.Types.Mixed, default: null },
   // Per-stage wall time in ms for THIS render, whichever pipeline ran.
   //
   // Legacy shape (kept for existing readers): { deriveMs, renderMs, uploadMs }.

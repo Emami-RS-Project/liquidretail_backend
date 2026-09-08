@@ -148,6 +148,7 @@ function adDoc(over = {}) {
     claimedAt: null,
     updatedAt: minsAgo(30),
     campaignRunIds: ['run_1'],
+    videoQcRetry: null,
     ...over
   };
 }
@@ -240,6 +241,32 @@ check('D2: a not-yet-stale unclaimed row is not selected',
   sel(NOT_STALE) === false);
 check('D3: a non-rendering status is never selected',
   sel({ ...DEAD_UNCLAIMED, status: 'draft' }) === false);
+
+// ── QC-retry exclusion (QC-retry sweep peeks+alerts; generic must not draft+title these)
+check('Q1: an unsettled QC-retry row is NOT selected by the generic sweep (wrong finish line: draft+title)',
+  sel({
+    ...DEAD_CLAIMED,
+    veoVideoUrl: MIRRORED,
+    renderUrl: MIRRORED,
+    videoQcRetry: { attempted: true, outcome: 'unsettled', predictionId: 'v1_retry' }
+  }) === false);
+check('Q2: an in-flight QC-retry row (outcome:null) is NOT selected',
+  sel({
+    ...DEAD_CLAIMED,
+    veoVideoUrl: MIRRORED,
+    videoQcRetry: { attempted: true, outcome: null }
+  }) === false);
+check('Q3: today\'s E5 path (outcome:error + rendering + predictionId) is NOT selected — new arm owns it',
+  sel({
+    ...DEAD_CLAIMED,
+    veoVideoUrl: MIRRORED,
+    videoQcRetry: { attempted: true, outcome: 'error', predictionId: 'v1_e5' }
+  }) === false);
+check('Q4: a settled passed QC-retry that is still rendering IS selected (generic recovery still applies)',
+  sel({
+    ...DEAD_UNCLAIMED,
+    videoQcRetry: { attempted: true, outcome: 'passed' }
+  }) === true);
 
 // ── E. window ordering cannot be inverted by env ────────────────────────────
 {

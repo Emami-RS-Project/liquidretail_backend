@@ -116,7 +116,12 @@ function functionBody(src, signatureRe) {
 // require() of that file (E6 pins this), so config.js cannot process.exit
 // and alertService never loads. The compiled copy is the real function
 // bodies with a stubbed module graph.
-const EXPORT_RE = /module\.exports\s*=\s*\{\s*run,\s*shutdown\s*\}\s*;/;
+// EXPORT_START + balanced() (not a fixed-shape regex) so this survives
+// renderer.js's module.exports gaining sibling exports (feat/qc-fail-720p-retry
+// added `findSiblingMasterAd` for services/videoQcRetryService.js) without
+// this harness needing a hand-maintained literal shape. Same discipline the
+// rest of this file already uses for function bodies.
+const EXPORT_START = 'module.exports = {';
 const REAL_RELATIVE = new Set(['./renderErrorFields', './concurrency']);
 
 function specId(request) {
@@ -124,10 +129,16 @@ function specId(request) {
 }
 
 function loadRenderer({ alerts, Ad }) {
-  assert.ok(EXPORT_RE.test(SRC),
-    'renderer.js no longer assigns module.exports = { run, shutdown }; update the isolated loader');
+  const exportIdx = SRC.indexOf(EXPORT_START);
+  assert.ok(exportIdx >= 0, 'renderer.js no longer has a module.exports = { … } block; update the isolated loader');
+  const exportBlock = balanced(SRC, exportIdx + EXPORT_START.length - 1, '{', '}');
+  assert.ok(exportBlock, 'could not find the closing brace of renderer.js\'s module.exports block; update the isolated loader');
+  const fullStatement = SRC.slice(exportIdx, exportIdx + (EXPORT_START.length - 1) + exportBlock.length)
+    + SRC.slice(exportIdx + (EXPORT_START.length - 1) + exportBlock.length).match(/^\s*;/)[0];
+  assert.ok(/\brun\b/.test(exportBlock) && /\bshutdown\b/.test(exportBlock),
+    'renderer.js no longer exports run/shutdown; update the isolated loader');
   const wrapped = SRC.replace(
-    EXPORT_RE,
+    fullStatement,
     'module.exports = { run, shutdown, notifyRenderFailure, notifyDeriveWaitBackup, notifyRunFinalized, alertOrphanedClaimsOnBoot };'
   );
 

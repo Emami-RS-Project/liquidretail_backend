@@ -252,9 +252,10 @@ check('E16 releaseClaim filter is owner-scoped',
 // F. Poll gate + shutdown.
 check('F1 pollTick returns early when gate off',
   /if\s*\(!isTitlerEnabled\(\)\)\s*return;/.test(titler));
-check('F2 shutdown drains up to 25s then force-releases',
+check('F2 shutdown drains up to 25s then force-releases receipt-free claims',
   /SHUTDOWN_DRAIN_MS\s*=\s*25_?000/.test(titler) &&
-  /force-releasing[\s\S]{0,80}Promise\.all\(remaining\.map/.test(titler));
+  /force-releasing/.test(titler) &&
+  /forceReleaseClaimsOnDrainTimeout/.test(titler));
 
 // G. render.yaml.
 //

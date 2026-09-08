@@ -1,17 +1,15 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "9b107e55f2f3424c1d92610e8d7a04087200dea1",
-  "generatedAt": "2026-09-08T01:34:35.912Z",
+  "backendHead": "6861e0533a93e21769e52e3236e6bf56a858c2f3",
+  "generatedAt": "2026-09-08T02:35:00.434Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "a8d6f60ecc8e0ca4f5bfe8d7a09a242efd5c3c93d603204820cee72a06c19240",
-      "adgenHash": "f334d3928e5fda6db814d49609519860fcade686e3d02f96e00fbbd50fe25216",
+      "adgenHash": "76cbe21b26cf70e54b693ab2fc7aa08852557ecfa362befbd8833eb3930ab633",
       "backendSha": "ec64a9a586ae8fd9736d6d44952e70c9afaaa09f",
       "status": "fork",
-      "reason": "2026-09-06: persist per-frame subject boxes on Ad.basePlate.faceSamples[i].subject (comment-only Mixed-schema note; no new Mongo keys, CURRENT_VERSION stays 1). Live renderer is adgen; nothing owed to backend for this persist. Prior: leftover 8s duration fallbacks now read META_VIDEO_DURATION_SEC via videoDurationPolicy.js (paired backend fix/stale-video-duration). declare-only schema defense: copied backend qcOverridden/qcOverriddenAt/qcOverriddenBy/qcOverrideReason (writer is backend POST /:id/override-qc; adgen metaAdsPushService ad.save() would strip them). Remaining diffs are legitimate ongoing fork (adgen-only titling/QC comments and regenerate-consumer claim comments). veoReferenceImages field comment notes a Gemini resume backfill can re-derive this field from the ad's current reference state rather than the exact stack originally submitted.",
-      "portTo": null,
-      "owedSince": null
+      "reason": "This PR adds Ad.videoQcRetry (Mixed, default null) on BOTH copies: adgen's live renderer claim-lock for the one-shot QC-triggered 720p retry, and backend models/Ad.js in the same PR so Mongoose strict on the API process cannot silently drop the field (same trap as renderError.predictionId). Remaining fork unchanged (adgen-only render/titling fields). Automatic retry is gated OFF by QC_RETRY_720P_ENABLED (strict === 'true')."
     },
     "models/Advertiser.js": {
       "backendHash": "0a7e1bb9ca5e0fbbfc6972f9c96d87f839b0a86175831b5446ae27095137ba3f",
@@ -755,11 +753,11 @@
       "owedSince": null
     },
     "services/atlasVideoService.js": {
-      "backendHash": "b98e339a27ba6f9588acb9783fcea8d2fdf3c6e307ae4e83d29d662aeab25eb8",
-      "adgenHash": "17dee1d15c63eb74ca921be6fcc1be79899cea4705ee79a56a35bd4268c05f33",
-      "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
+      "backendHash": "3f505e887e7796cbe14b17ceb0f0ea24340bab758ecd254ff8f2df337f9b5d6d",
+      "adgenHash": "533423f514cbc07704b8b2b79e4a7eb251fdfada85a98cf4cbb5902f834de41a",
+      "backendSha": "110199d03c8116b31220eb7bed30b0ddac122c70",
       "status": "fork",
-      "reason": "Manual regenerate-at-720p: added an additive resolutionOverride param threaded through buildSubmissionBody/submitGeneration/generateForAd (wins over env/caps defaults on the normal generate path; every existing caller omits it and is byte-for-byte unaffected). adgen-only — backend's copy of this file is the dormant pre-cutover in-process video path (production video generation is adgen-only), so there is nothing to port there. Deliberate fork, per the prior recorded reason (video-provider collapse / MAX_POLL_MS divergence)."
+      "reason": "Two independent forks merged together: (1) manual regenerate-at-720p added an additive bare resolutionOverride param threaded through buildSubmissionBody/submitGeneration/generateForAd (wins over env/caps defaults on the normal generate path; every pre-existing caller omits it); (2) QC-fail 720p retry (this PR) added the DISTINCT retryOverride object, which pins attempt-1 prompt/refs/model/aspect and forces resolution 720p for the automatic resubmit, via the thin retryVideoAt720pAfterQcFailure primitive, gated OFF by QC_RETRY_720P_ENABLED (strict === 'true'). Both params coexist; retryOverride.resolution wins over the bare resolutionOverride when both would apply. adgen-only -- backend's copy of this file is the dormant pre-cutover in-process video path (production video generation is adgen-only), so there is nothing to port there. Deliberate fork, per the prior recorded reason (video-provider collapse / MAX_POLL_MS divergence)."
     },
     "services/basePlateCropService.js": {
       "backendHash": "ae8b89e98f69160f27b8faad175a2fdfe16f53122098dd5dd8a11d0e4fc48443",
@@ -771,13 +769,11 @@
       "owedSince": "2026-08-28T19:52:53.994Z"
     },
     "services/bootRecoveryService.js": {
-      "backendHash": "23c6c84aed1a3cc6ec0e3ae4cd003f5de614c14e4670f376e35fa71a2bf716cb",
-      "adgenHash": "2fe1cda386f2cbb87b359ef97ac3bbb022387f30ae22bece1b6253b5b42b0e16",
-      "backendSha": "abf7e0c2053d9e2d633cc3b3a62bad48531e3271",
+      "backendHash": "61c7f0b33a21efd680bbdfa0faa60a1ce32efb02ae9a54445045001586cab927",
+      "adgenHash": "13d5c339d57ce30561a34e0b772ac5c39f9c458a14d535e8741a5f4d189208bf",
+      "backendSha": "0966924ad0ab7875dc5ca0ff3c9785826435e9bf",
       "status": "fork",
-      "reason": "PR #110 (2026-09-03): Gemini completed-master recovery Cloudinary-mirrors (not the raw Files API URI), CAS-guards the download+upload on renderStage='boot-recovery-gemini-mirror', and sets unsettledAtTimeout on mirror failure so recoverableNotCollected alerts. Second fix round: folder keys off ad.veoModel (the model this ad was generated with) not the bare MODEL constant; a thrown mirror failure restores the prior renderStage+updatedAt so the next sweep can retry (the CAS updatedAt write is a one-shot clock, not a heartbeat). Backend has no Gemini-provider recovery branch (Atlas-only) -- adgen-only fork, not a port debt.",
-      "portTo": null,
-      "owedSince": null
+      "reason": "QC-fail 720p retry: resumeUnsettledQcRetries is peek-and-alert only (no steal/complete) plus qcRetryGenericSweepExclusion so a mid-retry master is invisible to the generic recovery sweep. Backend has no Gemini-provider recovery branch. Remaining fork unchanged."
     },
     "services/brandScriptExecutor.js": {
       "backendHash": "d554b02b6e203edb0e4921e9237dcdefd94ceacc9f4f942a279945d3ac75ee9f",

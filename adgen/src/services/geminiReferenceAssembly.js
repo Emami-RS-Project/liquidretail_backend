@@ -123,6 +123,52 @@ async function fetchReferenceBytes(url) {
 }
 
 /**
+ * Fetch + validate + base64-ready-encode a FIXED list of reference URLs.
+ *
+ * Factored out of assembleReferences' own fetch loop (feat/qc-fail-720p-retry)
+ * so the QC-triggered 720p retry (geminiVideoService.retryVideoAt720pAfterQcFailure)
+ * can reuse the EXACT same content-type validation and MAX_TOTAL_B64_BYTES
+ * refusal a fresh submit gets, against attempt 1's already-persisted
+ * `Ad.veoReferenceImages` URL list — rather than re-deriving a fresh
+ * reference list from the ad's CURRENT state (not "same seeds") or
+ * reimplementing fetch/validate/encode from scratch, which would risk
+ * silently missing a safety check this function already has (the payload
+ * size ceiling in particular is a REFUSAL, not a truncation — see the
+ * class comment on MAX_TOTAL_B64_BYTES above).
+ *
+ * Same failure modes as the inline loop it replaced: throws
+ * GEMINI_REFS_FETCH_FAILED on any unusable URL, GEMINI_REFS_TOO_LARGE if the
+ * running base64 total exceeds the ceiling. Returns `images` in the exact
+ * `{ buffer, mimeType, sourceUrl }` shape geminiVideoService's
+ * buildRequestBody already expects — callers pass this straight through as
+ * generateForAd's `images` argument.
+ */
+async function fetchAndEncodeReferenceUrls(urls) {
+  const images = [];
+  let totalB64 = 0;
+  for (const url of urls) {
+    const got = await fetchReferenceBytes(url);
+    if (!got.ok) {
+      const err = new Error(`gemini refs: reference unusable (${got.reason}): ${String(url).slice(0, 120)}`);
+      err.code = 'GEMINI_REFS_FETCH_FAILED';
+      throw err;
+    }
+    totalB64 += b64Len(got.buffer.length);
+    if (totalB64 > MAX_TOTAL_B64_BYTES) {
+      const err = new Error(
+        `gemini refs: base64 payload ${(totalB64 / 1048576).toFixed(2)} MB exceeds the ` +
+        `${(MAX_TOTAL_B64_BYTES / 1048576).toFixed(0)} MB ceiling — refusing to submit ` +
+        `rather than silently dropping a reference`
+      );
+      err.code = 'GEMINI_REFS_TOO_LARGE';
+      throw err;
+    }
+    images.push({ buffer: got.buffer, mimeType: got.mimeType, sourceUrl: url });
+  }
+  return images;
+}
+
+/**
  * Assemble the reference stack for one ad, as bytes.
  *
  * Returns `{ images, urls, aspectRatio }` where each image is
@@ -254,27 +300,7 @@ async function assembleReferences({ ad, aspectRatioOverride = null }) {
   }
 
   // ── FETCH. Fail closed on any bad reference. ───────────────────────────
-  const images = [];
-  let totalB64 = 0;
-  for (const url of urls) {
-    const got = await fetchReferenceBytes(url);
-    if (!got.ok) {
-      const err = new Error(`gemini refs: reference unusable (${got.reason}): ${String(url).slice(0, 120)}`);
-      err.code = 'GEMINI_REFS_FETCH_FAILED';
-      throw err;
-    }
-    totalB64 += b64Len(got.buffer.length);
-    if (totalB64 > MAX_TOTAL_B64_BYTES) {
-      const err = new Error(
-        `gemini refs: base64 payload ${(totalB64 / 1048576).toFixed(2)} MB exceeds the ` +
-        `${(MAX_TOTAL_B64_BYTES / 1048576).toFixed(0)} MB ceiling — refusing to submit ` +
-        `rather than silently dropping a reference`
-      );
-      err.code = 'GEMINI_REFS_TOO_LARGE';
-      throw err;
-    }
-    images.push({ buffer: got.buffer, mimeType: got.mimeType, sourceUrl: url });
-  }
+  const images = await fetchAndEncodeReferenceUrls(urls);
 
   // Outpaint-leak canary. The resolver's two outputs are intentional: a
   // cached deterministic Cloudinary crop (c_crop / c_pad, DINO-derived) or a
@@ -299,6 +325,11 @@ async function assembleReferences({ ad, aspectRatioOverride = null }) {
 module.exports = {
   assembleReferences,
   fetchReferenceBytes,
+  // Exported for geminiVideoService.retryVideoAt720pAfterQcFailure
+  // (feat/qc-fail-720p-retry) and scripts/verifyQcFail720pRetry.js — see
+  // this function's own doc comment for why the retry reuses it rather
+  // than re-deriving or reimplementing.
+  fetchAndEncodeReferenceUrls,
   b64Len,
   MAX_REFERENCE_IMAGES,
   MAX_TOTAL_B64_BYTES

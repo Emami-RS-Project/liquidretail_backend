@@ -83,15 +83,35 @@ const { assertBackendRoot } = require('./lib/siblingBackend');
 // ./cloudinaryService (lazy, still counted). Measured via this harness
 // itself: 515/515 resolved.
 //
-// Bumped 515 -> 519 (2026-09-08): PR #423 (reframe-cache self-heal + raised
-// Gemini payload ceiling) added new require edges under src/services/
-// (atlasVideoService.js, geminiReferenceAssembly.js,
-// reframeStrategyChooser.js, videoReferenceResolver.js all changed) without
-// updating this constant, so origin/main itself shipped red on this check —
-// confirmed on a detached origin/main checkout before this bump, not just on
-// a branch. Not this PR's own diff; caught while rebasing past #423.
-// Measured via this harness itself: 519/519 resolved.
-const FREEZE_N = 519;
+// Bumped (on the feat/qc-fail-720p-retry branch, based off the pre-Cloudinary-
+// hygiene 512) 512 -> 519 -> 533 -> 537 -> 536 across four rounds of the
+// QC-retry feature: the new src/services/videoQcRetryService.js's own
+// requires; ownership/unsettled-redesign requires (../config, ./alertService,
+// ../models/CampaignRun, ./campaignRunGuards, ./bootRecoveryService,
+// ./geminiVideoService, ./atlasVideoService, plus renderer.js/titler.js call
+// sites switching to videoQcRetryService); qcRetrySweepExclusion.js leaf +
+// titler.js's receipt-aware drain require('./spendReceipt'); then -1 when the
+// alert-and-manual crash-recovery simplification dropped
+// resumeUnsettledQcRetries's campaignAdsGenerationService requirement
+// (completeUnsettledRetry still needs it, kept for a human-run script).
+//
+// Merging the two branches' independent bumps from the same 512 base is NOT
+// a sum of the two deltas — re-measured via this harness itself after both
+// sets of changes landed together.
+//
+// PR #423 (reframe-cache self-heal + raised Gemini payload ceiling) added
+// new require edges under src/services/ (atlasVideoService.js,
+// geminiReferenceAssembly.js, reframeStrategyChooser.js,
+// videoReferenceResolver.js) without updating this constant on main itself —
+// this branch and the sibling manual-720p-button PR (#422, merged) each
+// independently caught and bumped for that same drift before merging with
+// each other, landing on different intermediate numbers (543 here, 519 on
+// #422) because each only accounted for its own branch's baseline. Merging
+// this branch with #422 (already on main) lands back on 543 -- #422's own
+// diff added zero new require() edges (parameters/logic only, no new
+// require statements), so the merged total equals this branch's own
+// pre-merge count. Re-measured via this harness itself: 543/543 resolved.
+const FREEZE_N = 543;
 const {
   fileExists,
   dirExists,

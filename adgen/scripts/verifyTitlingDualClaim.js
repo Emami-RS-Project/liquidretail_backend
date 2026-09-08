@@ -576,6 +576,11 @@ function nestedMatches(doc, filter) {
         }
       });
     }
+    // Mongo `{ field: null }` matches missing. Required once
+    // buildRecoverySweepFilter gained `{ videoQcRetry: null }` as an $or
+    // arm — a handoff fixture with no videoQcRetry key is still a
+    // no-retry row.
+    if (cond === null) return v === null || v === undefined;
     return v === cond;
   });
 }
