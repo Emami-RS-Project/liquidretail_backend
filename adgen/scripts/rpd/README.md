@@ -158,6 +158,7 @@ JSON file. Cells = `models` × `variants`. Per-variant overrides (`durationSec`,
 ```text
 node scripts/rpd/rpd.js run <spec.json> [--live --max-usd N] [--out rpd-runs] [--upload]
 node scripts/rpd/rpd.js resume <runDir>
+node scripts/rpd/rpd.js retest <productId> [productId2 ...] [--out rpd-runs] [--preset canonical] [--no-title]
 node scripts/rpd/rpd.js eval <runDir> [--eval-max-usd 0.5]
 node scripts/rpd/rpd.js stats [--out rpd-runs] [--csv]
 node scripts/rpd/rpd.js gallery <runDir>
@@ -170,12 +171,50 @@ node scripts/rpd/rpd.js models
 |---|---|---|
 | `run` | Build prompts, write manifest, optionally submit + poll + download + title + gallery. **Default is dry-run** (no image/video POST). With `seed.productId` and no cached Director artifact, dry-run may still spend on detect+Director prep — see Money model. | Generation only with `--live`. Prep may spend on dry-run (productId, cache miss). |
 | `resume <runDir>` | Re-poll existing receipts, download, reconcile settled price, rebuild gallery. **Structurally never submits** (resume path does not import `submitGeneration`). | No (polls are free) |
+| `retest <productId…>` | Pull an already-rendered production video master for each CatalogProduct id, wrap it as a normal RPD run, scan a dense plate grid, and re-title it. **Structurally never generates** (Mongo read + Cloudinary GET + local Remotion). See below. | No |
 | `gallery <runDir>` | Rebuild `index.html` from `manifest.json`. | No |
 | `note <runDir> <cellId\|run> "text"` | Append an observation on a cell or the whole run; persist on the manifest; rebuild gallery. | No |
 | `publish <runDir>` | Deploy the gallery. **Netlify by default** (site `rs-rpd`, Flood QRF); `--host cloudflare` for Pages. Creates the site once if absent. Per-deploy URLs are immutable; `manifest.json` is never published. | No (hosting only) |
 | `eval <runDir>` | Vision-grade settled cells into badged auto-notes. Own cap, `--eval-max-usd` (default $0.50). | Yes — vision LLM, ~$0.01–0.03/cell |
 | `stats` | Aggregate every run manifest: settled cost + latency percentiles per model/duration/size. `--csv` for a spreadsheet. | No |
 | `models` | Print `MODEL_CAPS` + `estimateRenderCostUsd` table. | No |
+
+---
+
+## Retesting an existing production render (`retest`)
+
+`seed.productId` seeds a **new** generation from catalog/brand data. There is no
+existing path to grab an already-rendered production `Ad` and just re-run the
+**free** titling pass on it — e.g. to test a keep-out placement fix against
+real shipped creative without spending anything new.
+
+```bash
+node scripts/rpd/rpd.js retest <productId> [productId2 ...] [--out rpd-runs] [--preset canonical] [--no-title]
+```
+
+For each CatalogProduct id it finds the most recent settled **true master**
+(`veoVideoUrl` set, `deriveFromMaster` null, duration ≥ 8s; prefers a 9:16
+surface), downloads that already-paid Cloudinary master, writes a normal run
+directory + `manifest.json` (`mode: 'reused-existing'`), scans a dense plate
+grid into `cells/<id>/grid.json` (reference for a human — ffmpeg/sharp missing
+is a warning, not a crash), and titles it with the same `titlePass` /
+`titleCell` loop `run`/`resume` use. `--no-title` stops after download+grid
+(useful for inspecting `grid.json` only). `--preset` defaults to `canonical`.
+
+**Genuinely free.** No Atlas or Gemini generation POST, ever. Mongo read +
+HTTPS GET of an existing URL + local ffprobe/sharp/Remotion. Marginal
+`costUsd` on each cell is `0` with `costSource: 'reused-existing'` (the
+historical production charge is out of scope). `charged: true` because
+production already paid for the master, not because this tool billed anything.
+
+**One brand per call.** `titleCell` → `resolveTitleBrand` reads only
+`spec.titling.brand` (run-level), never `cell.brand`. Mixing products from
+different brands in one `retest` call applies the **first** product's brand to
+every cell. Target a single brand's products for a correct per-brand look; the
+CLI warns if you mix.
+
+Output is a completely normal RPD run directory — `gallery`, `note`, `publish`,
+`stats`, and `eval` all work on it unmodified. Requires `MONGODB_URI`.
 
 ---
 
@@ -616,12 +655,14 @@ scripts/rpd/
   lib/promptVariants.js ← levers vs production builder (both providers)
   lib/directorDirection.js ← cache / detect+Director prep for static+titling copy (once per run)
   lib/runner.js        ← expand / dry-run / live run (the only file that submits a generation)
+  lib/existingMaster.js ← retest: reuse a production master (Mongo read + free download; never generates)
+  lib/densePlateGrid.js ← plate-scan reference grid (ffmpeg/sharp, no spend)
   lib/atlasPoll.js     ← free Atlas reads: poll, settled price, probes, downloads
   lib/geminiPoll.js    ← free Gemini reads: poll, settled cost, downloads (mirrors atlasPoll.js)
   lib/geminiImages.js  ← fetch + base64-encode reference images for Gemini's inline-image request shape
   lib/resume.js        ← finish interrupted runs, either provider; structurally cannot spend
   lib/manifest.js      ← atomic ledger writes + notes
-  lib/titling.js       ← standalone Remotion pass (production presets)
+  lib/titling.js       ← standalone Remotion pass (production presets) + shared titlePass
   lib/gallery.js       ← self-contained index.html
   lib/publish.js       ← wrangler pages deploy
   specs/               ← example experiment specs
