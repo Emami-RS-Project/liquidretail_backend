@@ -45,9 +45,22 @@ const DEFAULT_ROLE_FONTS = {
 
 // Families we treat as serif for CSS fallback purposes (heuristic; anything
 // else falls back to sans-serif).
-// Must stay aligned with LIBRARY_SERIF_FACES: a library serif whose name misses
-// this regex gets `fallback: 'sans-serif'`, so if the file fails to load the
-// browser substitutes a sans for a serif face.
+//
+// NOT aligned with LIBRARY_SERIF_FACES, and that is fine: this regex is a
+// name-only guess for an arbitrary REQUESTED family we have no other
+// information about (custom-font / Google-Fonts call sites). It deliberately
+// misses 4 of the 48 curated library faces — the script/handwritten cluster
+// (Great Vibes, Dancing Script, Pacifico, Caveat — "the Great Vibes
+// convention") whose names carry no recognised serif token. That used to leak
+// into resolveLibraryMatch's `fallback` field, which computed it via this
+// function on an already-RESOLVED library family instead of consulting
+// LIBRARY_SERIF_FACES (the authoritative answer for that closed set) — fixed
+// there; see that call site's own comment. This regex itself was correctly
+// left untouched: verifyFontFallback.js pins fallbackFor's naive, name-only
+// answers on purpose, and widening it to special-case library face names
+// would blur the line with the STATIC image-gen path's shared classifier
+// below, which fontClassification.js's own header explicitly warns against
+// growing casually.
 //
 // The regex itself now lives in services/fontClassification.js, the single
 // source of truth shared with the STATIC image-gen prompt path, which used to
@@ -827,7 +840,21 @@ async function resolveLibraryMatch(requestedFamily, weight = 400, { brand = null
     style: 'normal',
     localPath,
     remoteUrl: null,
-    fallback: fallbackFor(font.family),
+    // NOT fallbackFor(font.family): that is the naive name-regex heuristic,
+    // meant for an arbitrary REQUESTED name we have no other information
+    // about (see its other call sites). Here font.family is already a
+    // resolved, canonical LIBRARY face, and LIBRARY_SERIF_FACES is this
+    // module's own authoritative serif/sans classification for that closed
+    // set — consulting it beats re-guessing from the name. This is not
+    // cosmetic: SERIF_HINTS misses 4 of the 48 curated faces (Great Vibes,
+    // Dancing Script, Pacifico, Caveat — the script/handwritten cluster,
+    // "the Great Vibes convention" — none of their names contain a
+    // recognised serif token), so fallbackFor(font.family) previously
+    // returned 'sans-serif' for a script face. Harmless while the real TTF
+    // loads, but if that file ever fails to load at render time the browser
+    // would substitute a grotesk sans for a cursive script — exactly the
+    // failure mode this field's own header comment warns about.
+    fallback: LIBRARY_SERIF_FACES.has(font.family) ? 'serif' : 'sans-serif',
     source: 'library-match',
     exact: false,
     requestedFamily: pick.requestedFamily,

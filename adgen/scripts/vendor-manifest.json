@@ -933,11 +933,10 @@
     },
     "services/fontResolverService.js": {
       "backendHash": "f978e12cf5dc6bff90a826205e49b952523904490b18402b7d7982778cd35c0b",
-      "adgenHash": "f978e12cf5dc6bff90a826205e49b952523904490b18402b7d7982778cd35c0b",
+      "adgenHash": "15da026805c3929ae9287facc96d935646aa163961d8c50edbc68e61036a785e",
       "backendSha": "6f5372fbcf7b7b58f4a18bc18cb1c899534f7b3b",
-      "status": "synced",
-      "portTo": null,
-      "owedSince": null
+      "status": "fork",
+      "reason": "resolveLibraryMatch's CSS fallback field now consults LIBRARY_SERIF_FACES (authoritative for the closed curated-face set) instead of the naive name-regex fallbackFor(), which missed the 4 script/handwritten faces (Great Vibes, Dancing Script, Pacifico, Caveat). Applied identically to both trees; still byte-identical."
     },
     "services/handoffContract.js": {
       "backendHash": "de310d4687251963d2fc8a51db6a7d07cf8ec9982c0d9415f0b4d850a62b955b",
