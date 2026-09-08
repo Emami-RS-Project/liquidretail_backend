@@ -6,6 +6,7 @@
 //
 //   node scripts/rpd/rpd.js run <spec.json> [--live --max-usd N] [--out rpd-runs]
 //   node scripts/rpd/rpd.js resume <runDir>
+//   node scripts/rpd/rpd.js retest <productId> [productId2 ...] [--out rpd-runs] [--preset canonical] [--no-title]
 //   node scripts/rpd/rpd.js gallery <runDir>
 //   node scripts/rpd/rpd.js note <runDir> <cellId|run> "text"
 //   node scripts/rpd/rpd.js publish <runDir> [--project rs-rpd]
@@ -17,8 +18,6 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', 'config', 'defaults.env') });
-
-const path = require('path');
 
 // OFFLINE-SAFE LEDGER WRITES. The image path (atlasImageService.submitAndPoll)
 // calls recordFlatCost → costTracker.persistCost → CostLog.create at its charge
@@ -55,35 +54,6 @@ function flagValue(args, name) {
   return next;
 }
 
-// Titling pass over settled masters. Shared by `run --live` and `resume` so
-// "finished" means the same thing on both paths: settled → master on disk →
-// titled (when the spec asks for titling). Free — no Atlas spend — so it is
-// safe to re-run; failures keep the master (untitled ≠ lost) and are retried
-// on the next resume unless a titled file already exists.
-async function titlePass(runDir, manifest) {
-  const titlingSpec = manifest.spec && manifest.spec.titling;
-  if (!titlingSpec || !titlingSpec.enabled) return;
-  const { titleCell } = require('./lib/titling');
-  const { writeManifest } = require('./lib/manifest');
-  const eligible = manifest.cells.filter((c) => c.status === 'done' && c.localPath && !c.titledPath);
-  for (const cell of eligible) {
-    console.log(`🎬 titling ${cell.id}…`);
-    const t0 = Date.now();
-    const res = await titleCell({ runDir, cell, titlingSpec });
-    cell.timings = cell.timings || {};
-    cell.timings.titlingMs = Date.now() - t0;
-    if (res.timings) cell.timings.titling = res.timings;
-    if (res.ok) {
-      cell.titledPath = path.relative(runDir, res.titledPath);
-      delete cell.titlingError;
-    } else {
-      cell.titlingError = res.error; // master kept — untitled ≠ lost
-      console.warn(`   ⚠️ titling failed (master kept): ${res.error}`);
-    }
-    writeManifest(runDir, manifest);
-  }
-}
-
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
 
@@ -103,7 +73,10 @@ async function main() {
     const { runDir, manifest } = await runSpec(specPath, { live, maxUsd, outRoot, upload, allowDuplicates });
 
     // Optional titling pass over settled masters (spec.titling.enabled).
-    if (live) await titlePass(runDir, manifest);
+    if (live) {
+      const { titlePass } = require('./lib/titling');
+      await titlePass(runDir, manifest);
+    }
 
     console.log(`\nGallery: ${buildGallery(runDir)}`);
     console.log(`Next: node scripts/rpd/rpd.js note ${runDir} <cellId|run> "observation"`);
@@ -117,8 +90,42 @@ async function main() {
     const { resumeRun } = require('./lib/resume');
     const { buildGallery } = require('./lib/gallery');
     const manifest = await resumeRun(runDir);
+    const { titlePass } = require('./lib/titling');
     await titlePass(runDir, manifest); // free; makes resume finish cells the same way run does
     console.log(`Gallery: ${buildGallery(runDir)}`);
+    return;
+  }
+
+  if (cmd === 'retest') {
+    const productIds = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '--out' || a === '--preset') { i += 1; continue; }
+      if (a.startsWith('--')) continue;
+      productIds.push(a);
+    }
+    if (!productIds.length) {
+      throw new Error('usage: rpd retest <productId> [productId2 ...] [--out rpd-runs] [--preset canonical] [--no-title]');
+    }
+    const { buildRunFromExisting } = require('./lib/existingMaster');
+    const { buildGallery } = require('./lib/gallery');
+    const { titlePass } = require('./lib/titling');
+    const outRoot = flagValue(args, '--out') || 'rpd-runs';
+    const preset = flagValue(args, '--preset') || 'canonical';
+    const noTitle = flag(args, '--no-title');
+    const { runDir, manifest, failed } = await buildRunFromExisting(productIds, {
+      outRoot,
+      titling: { enabled: !noTitle, preset }
+    });
+    for (const f of failed) {
+      console.warn(`⚠️  skipped ${f.productId}: ${f.reason}`);
+    }
+    if (manifest.spec && manifest.spec.titling && manifest.spec.titling.enabled) {
+      await titlePass(runDir, manifest);
+    }
+    console.log(`\nGallery: ${buildGallery(runDir)}`);
+    console.log(`Next: node scripts/rpd/rpd.js note ${runDir} <cellId|run> "observation"`);
+    console.log(`      node scripts/rpd/rpd.js publish ${runDir}`);
     return;
   }
 
@@ -347,7 +354,7 @@ async function main() {
     return;
   }
 
-  console.error('rpd — rapid product development harness. Commands: run | resume | gallery | note | publish | models');
+  console.error('rpd — rapid product development harness. Commands: run | resume | retest | gallery | note | publish | models');
   console.error('See scripts/rpd/README.md');
   process.exit(cmd ? 1 : 0);
 }

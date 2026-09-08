@@ -177,6 +177,33 @@ async function titleCell({ runDir, cell, titlingSpec }) {
   }
 }
 
+// Titling pass over settled masters. Relocated from rpd.js so `run`,
+// `resume`, and `retest` share one loop. Free — no generation spend — so it
+// is safe to re-run; failures keep the master (untitled ≠ lost) and are
+// retried on the next pass unless a titled file already exists.
+async function titlePass(runDir, manifest) {
+  const titlingSpec = manifest.spec && manifest.spec.titling;
+  if (!titlingSpec || !titlingSpec.enabled) return;
+  const { writeManifest } = require('./manifest');
+  const eligible = manifest.cells.filter((c) => c.status === 'done' && c.localPath && !c.titledPath);
+  for (const cell of eligible) {
+    console.log(`🎬 titling ${cell.id}…`);
+    const t0 = Date.now();
+    const res = await titleCell({ runDir, cell, titlingSpec });
+    cell.timings = cell.timings || {};
+    cell.timings.titlingMs = Date.now() - t0;
+    if (res.timings) cell.timings.titling = res.timings;
+    if (res.ok) {
+      cell.titledPath = path.relative(runDir, res.titledPath);
+      delete cell.titlingError;
+    } else {
+      cell.titlingError = res.error; // master kept — untitled ≠ lost
+      console.warn(`   ⚠️ titling failed (master kept): ${res.error}`);
+    }
+    writeManifest(runDir, manifest);
+  }
+}
+
 // fixtureBrand/fixtureMeta exported for scripts/verifyRpdHarness.js, which
 // pins that proof-class fields never default into the chrome.
-module.exports = { titleCell, fixtureBrand, fixtureMeta, resolveTitleBrand };
+module.exports = { titleCell, titlePass, fixtureBrand, fixtureMeta, resolveTitleBrand };
