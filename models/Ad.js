@@ -646,6 +646,15 @@ const adSchema = new mongoose.Schema({
   // Null when vision QC is off (or the ad predates this field). Gate-off
   // now stamps a disabled verdict rather than leaving this null.
   visionQc:           { type: mongoose.Schema.Types.Mixed, default: null },
+  // QC-triggered 720p retry lock/audit (feat/qc-fail-720p-retry) — declared
+  // here for Mongoose-strict-mode safety only. Backend never writes this
+  // field (adgen's renderer/titler own the whole QC-retry claim/lock
+  // lifecycle); a full Ad doc load + backend-side .save() would otherwise
+  // silently strip an in-flight/settled retry's state under strict mode,
+  // the same class of bug this repo's CLAUDE.md documents for
+  // renderError.predictionId. See adgen/src/models/Ad.js's videoQcRetry
+  // for the authoritative shape and write-path documentation.
+  videoQcRetry:       { type: mongoose.Schema.Types.Mixed, default: null },
   // Per-stage wall time in ms for THIS render, whichever pipeline ran:
   // { deriveMs, renderMs, uploadMs }. Answers "why is this ad slow" without a
   // log-diving session — direct_image's renderMs is the Atlas submit+poll
