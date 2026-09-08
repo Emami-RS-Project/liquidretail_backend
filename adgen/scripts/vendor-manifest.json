@@ -2,7 +2,7 @@
   "version": 2,
   "backendRef": "origin/main",
   "backendHead": "9b107e55f2f3424c1d92610e8d7a04087200dea1",
-  "generatedAt": "2026-09-08T01:21:24.645Z",
+  "generatedAt": "2026-09-08T01:34:35.912Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "a8d6f60ecc8e0ca4f5bfe8d7a09a242efd5c3c93d603204820cee72a06c19240",
@@ -636,7 +636,7 @@
       "adgenHash": "e7b5189a7e18936210ab4d73cb44be3dd1b0cc7d977562b5e1b94fa59346cd3f",
       "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
       "status": "fork",
-      "reason": "Manual regenerate-at-720p (videoResolutionOverride): additive resolutionOverride threading ported into BOTH sides in the SAME PR — adgen's execution copy (runVideoFull/regenerateAd/runClaimedRegeneration -> videoRouter.generateForAd) and backend's slim stamp-only services/adRegenerateService.js (parseRegenVideoResolutionOverride + buildRegenerationRequest -> Ad.regenerationRequest). Both sides have the feature; adgen remains a deliberate permanent fork (it executes, backend only stamps) per the prior recorded PR#411/#413 reason — not a debt."
+      "reason": "This PR adds videoResolutionOverride threading as complementary halves of one feature: backend's copy gained the request-validation half (parseRegenVideoResolutionOverride, the 400 checks, stamping onto Ad.regenerationRequest); adgen's copy gained the execution half (runVideoFull/videoRouter/atlasVideoService.generateForAd resolutionOverride threading). Neither side's new code is a verbatim port of the other -- OWES PORTS IN BOTH DIRECTIONS the next time either half's request/response shape for this field changes, since the two are now mutually dependent."
     },
     "services/adStage.js": {
       "backendHash": "437314029f1ff3ea5dcd35f68ba074c2fbc30fe20c38c706f72e9b3c4b66529b",
