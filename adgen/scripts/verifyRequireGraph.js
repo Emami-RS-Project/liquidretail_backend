@@ -82,7 +82,16 @@ const { assertBackendRoot } = require('./lib/siblingBackend');
 // ./adCloudinaryCleanup; that file requires ../models/Ad and
 // ./cloudinaryService (lazy, still counted). Measured via this harness
 // itself: 515/515 resolved.
-const FREEZE_N = 515;
+//
+// Bumped 515 -> 519 (2026-09-08): PR #423 (reframe-cache self-heal + raised
+// Gemini payload ceiling) added new require edges under src/services/
+// (atlasVideoService.js, geminiReferenceAssembly.js,
+// reframeStrategyChooser.js, videoReferenceResolver.js all changed) without
+// updating this constant, so origin/main itself shipped red on this check —
+// confirmed on a detached origin/main checkout before this bump, not just on
+// a branch. Not this PR's own diff; caught while rebasing past #423.
+// Measured via this harness itself: 519/519 resolved.
+const FREEZE_N = 519;
 const {
   fileExists,
   dirExists,
