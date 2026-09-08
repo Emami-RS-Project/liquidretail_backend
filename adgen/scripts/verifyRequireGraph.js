@@ -107,10 +107,11 @@ const { assertBackendRoot } = require('./lib/siblingBackend');
 // independently caught and bumped for that same drift before merging with
 // each other, landing on different intermediate numbers (543 here, 519 on
 // #422) because each only accounted for its own branch's baseline. Merging
-// this branch with #422 (already on main) requires one more re-measure,
-// done here rather than guessed: re-measured via this harness itself after
-// both sets of changes landed together.
-const FREEZE_N = 0; // placeholder — measured and fixed below before this merge is committed
+// this branch with #422 (already on main) lands back on 543 -- #422's own
+// diff added zero new require() edges (parameters/logic only, no new
+// require statements), so the merged total equals this branch's own
+// pre-merge count. Re-measured via this harness itself: 543/543 resolved.
+const FREEZE_N = 543;
 const {
   fileExists,
   dirExists,

@@ -2,7 +2,7 @@
   "version": 2,
   "backendRef": "origin/main",
   "backendHead": "6861e0533a93e21769e52e3236e6bf56a858c2f3",
-  "generatedAt": "2026-09-08T02:35:00.000Z",
+  "generatedAt": "2026-09-08T02:35:00.434Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "a8d6f60ecc8e0ca4f5bfe8d7a09a242efd5c3c93d603204820cee72a06c19240",
@@ -753,11 +753,11 @@
       "owedSince": null
     },
     "services/atlasVideoService.js": {
-      "backendHash": "b98e339a27ba6f9588acb9783fcea8d2fdf3c6e307ae4e83d29d662aeab25eb8",
-      "adgenHash": "PENDING_RECONCILE",
-      "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
+      "backendHash": "3f505e887e7796cbe14b17ceb0f0ea24340bab758ecd254ff8f2df337f9b5d6d",
+      "adgenHash": "533423f514cbc07704b8b2b79e4a7eb251fdfada85a98cf4cbb5902f834de41a",
+      "backendSha": "110199d03c8116b31220eb7bed30b0ddac122c70",
       "status": "fork",
-      "reason": "Two independent forks merged together: (1) manual regenerate-at-720p added an additive bare resolutionOverride param threaded through buildSubmissionBody/submitGeneration/generateForAd (wins over env/caps defaults on the normal generate path; every pre-existing caller omits it); (2) QC-fail 720p retry (this PR) added the DISTINCT retryOverride object, which pins attempt-1 prompt/refs/model/aspect and forces resolution 720p for the automatic resubmit, via the thin retryVideoAt720pAfterQcFailure primitive, gated OFF by QC_RETRY_720P_ENABLED (strict === 'true'). Both params coexist; retryOverride.resolution wins over the bare resolutionOverride when both would apply. adgen-only — backend's copy of this file is the dormant pre-cutover in-process video path (production video generation is adgen-only), so there is nothing to port there. Deliberate fork, per the prior recorded reason (video-provider collapse / MAX_POLL_MS divergence). Hash to be reconciled after this merge lands via verifyVendorDrift.js --reconcile."
+      "reason": "Two independent forks merged together: (1) manual regenerate-at-720p added an additive bare resolutionOverride param threaded through buildSubmissionBody/submitGeneration/generateForAd (wins over env/caps defaults on the normal generate path; every pre-existing caller omits it); (2) QC-fail 720p retry (this PR) added the DISTINCT retryOverride object, which pins attempt-1 prompt/refs/model/aspect and forces resolution 720p for the automatic resubmit, via the thin retryVideoAt720pAfterQcFailure primitive, gated OFF by QC_RETRY_720P_ENABLED (strict === 'true'). Both params coexist; retryOverride.resolution wins over the bare resolutionOverride when both would apply. adgen-only -- backend's copy of this file is the dormant pre-cutover in-process video path (production video generation is adgen-only), so there is nothing to port there. Deliberate fork, per the prior recorded reason (video-provider collapse / MAX_POLL_MS divergence)."
     },
     "services/basePlateCropService.js": {
       "backendHash": "ae8b89e98f69160f27b8faad175a2fdfe16f53122098dd5dd8a11d0e4fc48443",
