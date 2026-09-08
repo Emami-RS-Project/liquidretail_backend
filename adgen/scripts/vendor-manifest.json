@@ -1,17 +1,15 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "64da9b29273a6807574cfdcd7d8d0a3ecad2a71f",
-  "generatedAt": "2026-09-08T00:28:29.492Z",
+  "backendHead": "9b107e55f2f3424c1d92610e8d7a04087200dea1",
+  "generatedAt": "2026-09-08T01:49:51.449Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "a8d6f60ecc8e0ca4f5bfe8d7a09a242efd5c3c93d603204820cee72a06c19240",
-      "adgenHash": "f334d3928e5fda6db814d49609519860fcade686e3d02f96e00fbbd50fe25216",
+      "adgenHash": "76cbe21b26cf70e54b693ab2fc7aa08852557ecfa362befbd8833eb3930ab633",
       "backendSha": "ec64a9a586ae8fd9736d6d44952e70c9afaaa09f",
       "status": "fork",
-      "reason": "2026-09-06: persist per-frame subject boxes on Ad.basePlate.faceSamples[i].subject (comment-only Mixed-schema note; no new Mongo keys, CURRENT_VERSION stays 1). Live renderer is adgen; nothing owed to backend for this persist. Prior: leftover 8s duration fallbacks now read META_VIDEO_DURATION_SEC via videoDurationPolicy.js (paired backend fix/stale-video-duration). declare-only schema defense: copied backend qcOverridden/qcOverriddenAt/qcOverriddenBy/qcOverrideReason (writer is backend POST /:id/override-qc; adgen metaAdsPushService ad.save() would strip them). Remaining diffs are legitimate ongoing fork (adgen-only titling/QC comments and regenerate-consumer claim comments). veoReferenceImages field comment notes a Gemini resume backfill can re-derive this field from the ad's current reference state rather than the exact stack originally submitted.",
-      "portTo": null,
-      "owedSince": null
+      "reason": "This PR adds Ad.videoQcRetry (Mixed, default null) on BOTH copies: adgen's live renderer claim-lock for the one-shot QC-triggered 720p retry, and backend models/Ad.js in the same PR so Mongoose strict on the API process cannot silently drop the field (same trap as renderError.predictionId). Remaining fork unchanged (adgen-only render/titling fields). Automatic retry is gated OFF by QC_RETRY_720P_ENABLED (strict === 'true')."
     },
     "models/Advertiser.js": {
       "backendHash": "0a7e1bb9ca5e0fbbfc6972f9c96d87f839b0a86175831b5446ae27095137ba3f",
@@ -755,11 +753,11 @@
       "owedSince": null
     },
     "services/atlasVideoService.js": {
-      "backendHash": "6e29f079196b3819cb0929cfaf7f96ae3b590231a56b305a52805a3d84262b60",
-      "adgenHash": "95c15d8a42d62424bc769f9384b76f5b88e74ed32a3763002ada6ca507ead6e4",
-      "backendSha": "ec64a9a586ae8fd9736d6d44952e70c9afaaa09f",
+      "backendHash": "b98e339a27ba6f9588acb9783fcea8d2fdf3c6e307ae4e83d29d662aeab25eb8",
+      "adgenHash": "362846cbaec6353b1d85d2561308c42bf1b8098083d022f86ba57c987d8051d2",
+      "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
       "status": "fork",
-      "reason": "2026-09-06: backend #396 (ec64a9a5) leftover 8s fallbacks → videoDurationPolicy. FULL DIFF READ: estimateRenderCostUsd/buildVideoSegmentUrl missing duration now uses fallbackVideoDurationSec() (Meta 10s) not hardcoded 8; resolveDurationSec/buildSubmissionBody last-resort 8 → PROVIDER_DEFAULT_DURATION_SEC (still 8, named); generateForAd now resolveDurationSec(resolveAdVideoDurationSec(ad), caps) so an unset Ad.videoDurationSec submits META_VIDEO_DURATION_SEC (10) not caps.defaultDuration (8). No submit/resume/claim/retry/receipt changes. Adgen already has this exact generateForAd thread (atlasVideoService.js:5403) plus the helpers — it was the paired port this entry recorded on 2026-09-05. Remaining fork unchanged: video-provider collapse (shouldResumeAttempt in spendReceipt, videoRouter.generateForAd, Vertex arm throws) and MAX_POLL_MS 900000 vs backend 600000. Backend copies dormant. Nothing new owed."
+      "reason": "QC-fail 720p retry: generateForAd retryOverride pins attempt-1 prompt/refs/model/aspect and forces resolution 720p; retryVideoAt720pAfterQcFailure is the thin resubmit primitive. Backend copy is the dormant pre-cutover in-process path. Remaining fork unchanged (video-provider collapse / MAX_POLL_MS). Automatic retry is gated OFF by QC_RETRY_720P_ENABLED (strict === 'true')."
     },
     "services/basePlateCropService.js": {
       "backendHash": "ae8b89e98f69160f27b8faad175a2fdfe16f53122098dd5dd8a11d0e4fc48443",
@@ -771,13 +769,11 @@
       "owedSince": "2026-08-28T19:52:53.994Z"
     },
     "services/bootRecoveryService.js": {
-      "backendHash": "23c6c84aed1a3cc6ec0e3ae4cd003f5de614c14e4670f376e35fa71a2bf716cb",
-      "adgenHash": "2fe1cda386f2cbb87b359ef97ac3bbb022387f30ae22bece1b6253b5b42b0e16",
-      "backendSha": "abf7e0c2053d9e2d633cc3b3a62bad48531e3271",
+      "backendHash": "61c7f0b33a21efd680bbdfa0faa60a1ce32efb02ae9a54445045001586cab927",
+      "adgenHash": "13d5c339d57ce30561a34e0b772ac5c39f9c458a14d535e8741a5f4d189208bf",
+      "backendSha": "0966924ad0ab7875dc5ca0ff3c9785826435e9bf",
       "status": "fork",
-      "reason": "PR #110 (2026-09-03): Gemini completed-master recovery Cloudinary-mirrors (not the raw Files API URI), CAS-guards the download+upload on renderStage='boot-recovery-gemini-mirror', and sets unsettledAtTimeout on mirror failure so recoverableNotCollected alerts. Second fix round: folder keys off ad.veoModel (the model this ad was generated with) not the bare MODEL constant; a thrown mirror failure restores the prior renderStage+updatedAt so the next sweep can retry (the CAS updatedAt write is a one-shot clock, not a heartbeat). Backend has no Gemini-provider recovery branch (Atlas-only) -- adgen-only fork, not a port debt.",
-      "portTo": null,
-      "owedSince": null
+      "reason": "QC-fail 720p retry: resumeUnsettledQcRetries is peek-and-alert only (no steal/complete) plus qcRetryGenericSweepExclusion so a mid-retry master is invisible to the generic recovery sweep. Backend has no Gemini-provider recovery branch. Remaining fork unchanged."
     },
     "services/brandScriptExecutor.js": {
       "backendHash": "d554b02b6e203edb0e4921e9237dcdefd94ceacc9f4f942a279945d3ac75ee9f",

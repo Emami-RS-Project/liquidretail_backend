@@ -131,6 +131,19 @@ const Ad = require('../models/Ad');
 // here is a one-line change.
 const QC_RETRY_ELIGIBLE_CATEGORIES = Object.freeze(['product_fidelity', 'text_defects']);
 
+// Kill switch for the automatic QC-triggered 720p resubmit. Owner 2026-09-07:
+// this mechanism must ship INERT until a human flips the flag. Parser is
+// strictly === 'true' — unset, 'false', 'TRUE', '1', and garbage are all OFF
+// (this repo has a documented history of truthy/case-insensitive parsers
+// accidentally enabling spend). File default in config/defaults.env is false.
+// Read at CALL TIME, never cached at require, so a harness (or a live
+// SystemConfig-style flip that rewrites process.env) can change it without
+// a process restart of this module. The ONE gate is maybeRetryVideoQcFailureAt720p
+// below — qcAndStampVideoAdWithRetry funnels every retry decision through it.
+function isQcRetry720pEnabled() {
+  return process.env.QC_RETRY_720P_ENABLED === 'true';
+}
+
 const RETRY_ELIGIBLE_MASTER_STATUSES = Object.freeze(['failed', 'draft', 'rendering']);
 
 // Outcomes that are fully settled. Used by generic-sweep / titler-reclaim
@@ -578,6 +591,19 @@ async function bumpMasterRun(campaignRunIds, field) {
  * scripts/verifyQcFail720pRetry.js revert-proves this specific layer.
  */
 async function maybeRetryVideoQcFailureAt720p({ ad, visionQc, brandName, campaignRunId }) {
+  // FULL STOP when the kill switch is off — no eligibility walk, no atomic
+  // claim, no provider dispatch, no billable POST. qcAndStampVideoAdWithRetry
+  // has already run QC and persisted the verdict; returning null here keeps
+  // that verdict, which is byte-identical to pre-feature qcAndStampVideoAd
+  // for side effects (QC ran, verdict persisted, nothing resubmitted).
+  if (!isQcRetry720pEnabled()) {
+    console.log(
+      `   ℹ️  videoQcRetry[ad=${ad && ad._id}]: QC_RETRY_720P_ENABLED=${JSON.stringify(process.env.QC_RETRY_720P_ENABLED)} ` +
+      `(need exactly 'true') — skipping automatic 720p retry; attempt-1 verdict stands, no resubmit`
+    );
+    return null;
+  }
+
   const triggeredByCategories = retryEligibleFailingCategories(visionQc);
   if (!triggeredByCategories.length) return null; // e.g. layout_safe_box-only — not in scope
 
@@ -1482,6 +1508,7 @@ async function resumeUnsettledQcRetries({
 module.exports = {
   qcAndStampVideoAdWithRetry,
   maybeRetryVideoQcFailureAt720p,
+  isQcRetry720pEnabled,
   QC_RETRY_ELIGIBLE_CATEGORIES,
   retryEligibleFailingCategories,
   masterRetryWriteFilter,

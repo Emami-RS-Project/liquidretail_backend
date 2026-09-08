@@ -1070,6 +1070,12 @@ function wouldClaimOneMatch(row) {
 // ─────────────────────────────────────────────────────────────────────────
 // SECTION D — the retry POLICY, behavioural
 // ─────────────────────────────────────────────────────────────────────────
+// Production file default is QC_RETRY_720P_ENABLED=false (strict === 'true'
+// parser). This suite's D/E/F/R checks prove the ON path; section K below
+// pins the OFF path (the money property this flag exists for). Set at call
+// time — isQcRetry720pEnabled reads process.env on every invocation.
+process.env.QC_RETRY_720P_ENABLED = 'true';
+
 console.log('\nD. maybeRetryVideoQcFailureAt720p — behavioural (master/derive scope, atomic cap, race, F1/F3/F7/F10)');
 
 {
@@ -2877,6 +2883,184 @@ await checkAsync('R12c rate_rejected alert detail tells the operator to KEEP PEE
     assert.ok(/Do NOT call abandonUnsettledRetry/.test(detail),
       `rate_rejected runbook must explicitly say not to abandon:\n${detail}`);
   } finally { unstub(); alerts.restore(); h.restore(); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// SECTION K — kill switch QC_RETRY_720P_ENABLED (default OFF, MONEY)
+// ─────────────────────────────────────────────────────────────────────────
+console.log('\nK. QC_RETRY_720P_ENABLED kill switch — default OFF, no resubmit');
+
+const RETRY_SVC_SRC_FOR_K = fs.readFileSync(RETRY_SVC_PATH, 'utf8');
+const DEFAULTS_ENV_SRC = fs.readFileSync(path.join(ROOT, 'config', 'defaults.env'), 'utf8');
+
+check('K0 defaults.env ships QC_RETRY_720P_ENABLED=false (file default OFF)', () => {
+  assert.ok(/^QC_RETRY_720P_ENABLED=false$/m.test(DEFAULTS_ENV_SRC),
+    'config/defaults.env must declare QC_RETRY_720P_ENABLED=false');
+});
+
+check("K0b parser is strict === 'true' (no toLowerCase, no truthiness, no !== 'false')", () => {
+  assert.ok(/process\.env\.QC_RETRY_720P_ENABLED === 'true'/.test(RETRY_SVC_SRC_FOR_K),
+    "isQcRetry720pEnabled must use process.env.QC_RETRY_720P_ENABLED === 'true'");
+  assert.ok(!/QC_RETRY_720P_ENABLED[^;]*toLowerCase/.test(RETRY_SVC_SRC_FOR_K),
+    'must not case-fold the flag — TRUE/True would otherwise enable spend');
+  assert.ok(!/QC_RETRY_720P_ENABLED\s*!==\s*'false'/.test(RETRY_SVC_SRC_FOR_K),
+    "must not use !== 'false' (unset would then be ON)");
+});
+
+check('K0c maybeRetryVideoQcFailureAt720p gates on the flag FIRST, before any eligibility/claim/submit', () => {
+  const i = RETRY_SVC_SRC_FOR_K.indexOf('async function maybeRetryVideoQcFailureAt720p');
+  assert.ok(i > 0, 'maybeRetryVideoQcFailureAt720p not found');
+  const bodyStart = RETRY_SVC_SRC_FOR_K.indexOf('{', i);
+  const head = RETRY_SVC_SRC_FOR_K.slice(bodyStart, bodyStart + 1200);
+  const flagGate = head.indexOf('isQcRetry720pEnabled()');
+  const cats = head.indexOf('retryEligibleFailingCategories');
+  const claim = head.indexOf('videoQcRetry');
+  assert.ok(flagGate > 0, 'flag gate isQcRetry720pEnabled() missing from function head');
+  assert.ok(/return null/.test(head.slice(flagGate, flagGate + 400)),
+    'flag-off arm must return null (no retry)');
+  assert.ok(cats > flagGate, 'eligibility check must come AFTER the flag gate');
+  assert.ok(claim < 0 || claim > flagGate, 'videoQcRetry claim must not precede the flag gate');
+});
+
+check('K0d qcAndStampVideoAdWithRetry still funnels the retry decision through maybeRetry (single choke point)', () => {
+  const i = RETRY_SVC_SRC_FOR_K.indexOf('async function qcAndStampVideoAdWithRetry');
+  assert.ok(i > 0, 'qcAndStampVideoAdWithRetry not found');
+  const nextFn = RETRY_SVC_SRC_FOR_K.indexOf('\nasync function ', i + 10);
+  const body = RETRY_SVC_SRC_FOR_K.slice(i, nextFn > 0 ? nextFn : i + 2500);
+  assert.ok(/maybeRetryVideoQcFailureAt720p\(/.test(body),
+    'drop-in must call maybeRetryVideoQcFailureAt720p so the kill switch covers every live caller');
+  assert.ok(!/retryVideoAt720pAfterQcFailure\(/.test(body),
+    'drop-in must not dispatch a submit itself — that would bypass the kill switch');
+});
+
+async function withQcRetryFlag(value, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, 'QC_RETRY_720P_ENABLED');
+  const prev = process.env.QC_RETRY_720P_ENABLED;
+  try {
+    if (value === undefined) delete process.env.QC_RETRY_720P_ENABLED;
+    else process.env.QC_RETRY_720P_ENABLED = value;
+    await fn();
+  } finally {
+    if (had) process.env.QC_RETRY_720P_ENABLED = prev;
+    else delete process.env.QC_RETRY_720P_ENABLED;
+  }
+}
+
+await checkAsync("K1 flag unset: eligible QC failure does NOT resubmit (MONEY)", async () => {
+  await withQcRetryFlag(undefined, async () => {
+    const h = setupHarness(RETRY_SVC_PATH);
+    try {
+      const master = freshMasterDoc();
+      h.adStore.seed(master);
+      h.setVerdict(NEW_MASTER_URL, makeVerdict(true));
+      const result = await h.freshModule.maybeRetryVideoQcFailureAt720p({
+        ad: master, visionQc: makeVerdict(false, ['text_defects']).visionQc,
+        brandName: 'TestBrand', campaignRunId: 'run1'
+      });
+      assert.strictEqual(result, null, 'flag-off must return null (no retry)');
+      assert.strictEqual(h.videoRouterCalls.length, 0, 'MONEY: unset flag must not call retryVideoAt720pAfterQcFailure');
+      assert.ok(!h.adStore.get(master._id).videoQcRetry, 'must not take the atomic retry claim when flag is off');
+    } finally { h.restore(); }
+  });
+});
+
+await checkAsync("K2 flag 'false': eligible QC failure does NOT resubmit (MONEY)", async () => {
+  await withQcRetryFlag('false', async () => {
+    const h = setupHarness(RETRY_SVC_PATH);
+    try {
+      const master = freshMasterDoc();
+      h.adStore.seed(master);
+      h.setVerdict(NEW_MASTER_URL, makeVerdict(true));
+      const result = await h.freshModule.maybeRetryVideoQcFailureAt720p({
+        ad: master, visionQc: makeVerdict(false, ['product_fidelity']).visionQc,
+        brandName: 'TestBrand', campaignRunId: 'run1'
+      });
+      assert.strictEqual(result, null);
+      assert.strictEqual(h.videoRouterCalls.length, 0, "MONEY: 'false' must not resubmit");
+    } finally { h.restore(); }
+  });
+});
+
+await checkAsync("K3 flag 'TRUE' (wrong case) is OFF — strict parser, no accidental enable", async () => {
+  await withQcRetryFlag('TRUE', async () => {
+    const h = setupHarness(RETRY_SVC_PATH);
+    try {
+      const master = freshMasterDoc();
+      h.adStore.seed(master);
+      const result = await h.freshModule.maybeRetryVideoQcFailureAt720p({
+        ad: master, visionQc: makeVerdict(false, ['text_defects']).visionQc,
+        brandName: 'TestBrand', campaignRunId: 'run1'
+      });
+      assert.strictEqual(result, null);
+      assert.strictEqual(h.videoRouterCalls.length, 0, "MONEY: 'TRUE' must not enable spend");
+    } finally { h.restore(); }
+  });
+});
+
+await checkAsync("K4 flag '1' is OFF — not a truthy parser", async () => {
+  await withQcRetryFlag('1', async () => {
+    const h = setupHarness(RETRY_SVC_PATH);
+    try {
+      const master = freshMasterDoc();
+      h.adStore.seed(master);
+      const result = await h.freshModule.maybeRetryVideoQcFailureAt720p({
+        ad: master, visionQc: makeVerdict(false, ['text_defects']).visionQc,
+        brandName: 'TestBrand', campaignRunId: 'run1'
+      });
+      assert.strictEqual(result, null);
+      assert.strictEqual(h.videoRouterCalls.length, 0, "MONEY: '1' must not enable spend");
+    } finally { h.restore(); }
+  });
+});
+
+await checkAsync("K5 flag 'true' still fires (sanity: OFF tests did not break the ON path)", async () => {
+  await withQcRetryFlag('true', async () => {
+    const h = setupHarness(RETRY_SVC_PATH);
+    try {
+      const master = freshMasterDoc();
+      h.adStore.seed(master);
+      h.setVerdict(NEW_MASTER_URL, makeVerdict(true));
+      const result = await h.freshModule.maybeRetryVideoQcFailureAt720p({
+        ad: master, visionQc: makeVerdict(false, ['text_defects']).visionQc,
+        brandName: 'TestBrand', campaignRunId: 'run1'
+      });
+      assert.ok(result, 'flag-on must still retry');
+      assert.strictEqual(h.videoRouterCalls.length, 1, 'flag-on sanity: exactly one resubmit');
+    } finally { h.restore(); }
+  });
+});
+
+await checkAsync('K6 flag-off qcAndStampVideoAdWithRetry: QC runs, verdict persists, ZERO billable resubmits (MONEY)', async () => {
+  await withQcRetryFlag('false', async () => {
+    const h = setupHarness(RETRY_SVC_PATH);
+    try {
+      const master = freshMasterDoc();
+      h.adStore.seed(master);
+      h.setVerdict(OLD_MASTER_URL, makeVerdict(false, ['text_defects']));
+      const result = await h.freshModule.qcAndStampVideoAdWithRetry({
+        ad: master, deliveredUrl: OLD_MASTER_URL, brandName: 'TestBrand', campaignRunId: 'run1'
+      });
+      assert.strictEqual(h.qcCalls.length, 1, 'QC must still run when the retry flag is off');
+      assert.strictEqual(h.videoRouterCalls.length, 0, 'MONEY: drop-in must not resubmit when flag is off');
+      assert.strictEqual(result.settle, 'terminal');
+      assert.ok(result.verdict && result.verdict.passed === false, 'attempt-1 failing verdict is kept');
+      const row = h.adStore.get(master._id);
+      assert.ok(!row.videoQcRetry, 'must not stamp Ad.videoQcRetry when flag is off');
+      assert.strictEqual(row.veoVideoUrl, OLD_MASTER_URL, 'attempt-1 asset must not be swapped');
+      assert.strictEqual(row.veoPredictionId, 'pred-attempt-1', 'attempt-1 spend receipt must stay');
+      assert.strictEqual(row.status, 'failed', 'QC failure remains terminal — same as pre-feature qcAndStampVideoAd');
+    } finally { h.restore(); }
+  });
+});
+
+check('K7 isQcRetry720pEnabled is exported and agrees with the live env', () => {
+  process.env.QC_RETRY_720P_ENABLED = 'true';
+  assert.strictEqual(retrySvc.isQcRetry720pEnabled(), true);
+  process.env.QC_RETRY_720P_ENABLED = 'false';
+  assert.strictEqual(retrySvc.isQcRetry720pEnabled(), false);
+  delete process.env.QC_RETRY_720P_ENABLED;
+  assert.strictEqual(retrySvc.isQcRetry720pEnabled(), false);
+  process.env.QC_RETRY_720P_ENABLED = 'true'; // restore ON default for anything after
 });
 
 console.log('');
