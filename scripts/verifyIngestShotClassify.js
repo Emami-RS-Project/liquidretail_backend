@@ -1163,6 +1163,7 @@ async function main() {
     const Brand = require('../models/Brand');
     const IntegrationCredential = require('../models/IntegrationCredential');
     const materializeDrain = require('../services/catalogMaterializeDrainService');
+    const reviewIntake = require('../services/catalogReviewIntakeService');
     const cryptoSvc = require('../services/integrationCryptoService');
     const axios = require('axios');
     const genericResolver = require('../services/genericCatalogResolver');
@@ -1201,6 +1202,7 @@ async function main() {
         brandFindOne: Brand.findOne,
         brandFindOneAndUpdate: Brand.findOneAndUpdate,
         startDrain: materializeDrain.startCatalogMaterializeDrain,
+        startReviewIntake: reviewIntake.startCatalogReviewIntake,
         resolveGeneric: genericResolver.resolveGenericCatalog,
         resolveShopify: shopifyAccess.resolveShopifyAccess,
         pullShopify: apifyPull.pullShopifyProducts,
@@ -1284,6 +1286,7 @@ async function main() {
         const q = {
           select: () => q,
           sort: () => q,
+          limit: () => q,
           lean: async () => [],
           then: (resolve) => resolve([])
         };
@@ -1311,6 +1314,7 @@ async function main() {
       // null is the no-write shape).
       Brand.findOneAndUpdate = async () => null;
       materializeDrain.startCatalogMaterializeDrain = async () => ({ started: false });
+      reviewIntake.startCatalogReviewIntake = async () => ({ ok: true, skipped: true });
       catClassify.inferCoarseEnum = () => null;
       catClassify.resolveCoarseCategoryRef = async () => null;
       detectSvc.enqueueBrandProductDetects = async () => ({ enqueued: 0 });
@@ -1361,6 +1365,7 @@ async function main() {
         Brand.findOne = orig.brandFindOne;
         Brand.findOneAndUpdate = orig.brandFindOneAndUpdate;
         materializeDrain.startCatalogMaterializeDrain = orig.startDrain;
+        reviewIntake.startCatalogReviewIntake = orig.startReviewIntake;
         genericResolver.resolveGenericCatalog = orig.resolveGeneric;
         shopifyAccess.resolveShopifyAccess = orig.resolveShopify;
         apifyPull.pullShopifyProducts = orig.pullShopify;

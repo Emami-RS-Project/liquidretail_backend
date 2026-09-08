@@ -20,30 +20,11 @@
 
 const mongoose = require('mongoose');
 const Brand = require('../../models/Brand');
-const CatalogProduct = require('../../models/CatalogProduct');
-const refreshOne = require('../catalogProductReviewRefreshService').refreshOne;
-
-const MAX_CONCURRENCY = 3;
-const MAX_STEPS_PER_RUN = 100;    // per-run guard so a huge brand can't lock the SSE stream
-
-// ── Target selection (shared preview + execute) ─────────────────────
-
-// Products missing on-site reviews == not on the scraper source.
-// Tenant-guarded by the brand lookup upstream.
-async function selectTargets({ brandId }) {
-  return CatalogProduct.find({
-    brandId,
-    $or: [
-      { 'productReviews.source': { $exists: false } },
-      { 'productReviews.source': null },
-      { 'productReviews.source': { $ne: 'productReviewsScrape' } }
-    ]
-  })
-    .sort({ lastSyncedAt: -1, firstSeenAt: -1 })
-    .limit(MAX_STEPS_PER_RUN)
-    .select('_id title productUrl canonicalUrl source')
-    .lean();
-}
+const {
+  refreshOne,
+  selectTargets,
+  MAX_CONCURRENCY
+} = require('../catalogProductReviewRefreshService');
 
 async function resolveScope({ req, args }) {
   if (!req?.advertiserId) {

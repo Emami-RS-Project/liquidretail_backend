@@ -316,9 +316,10 @@ async function findProductMatches({
 
   // ── Lazy product-reviews (Phase E) ──
   // When a catalog product won (or both signals agreed on it), fire-and-
-  // forget a Gemini grounded search for product-specific reviews and
-  // cache on CatalogProduct.productReviews. Subsequent matches on the
-  // same SKU read the cache. Skipped when reviews are still fresh.
+  // forget a first-party scrape (then Gemini only if the scraper cannot
+  // extract data) and cache on CatalogProduct.productReviews. Subsequent
+  // matches on the same SKU read the cache. Skipped when reviews are still
+  // fresh.
   let productReviews = null;
   if (outcome === 'product_match' && catalogMatch?.product) {
     productReviews = await maybeFetchProductReviewsCached({
@@ -2891,16 +2892,107 @@ async function catalogFirstMatchOneRefined(refined, { brandId, brandName = null,
   return best;
 }
 
+// Gemini is the last-resort gap-fill — only when the free scraper cannot
+// extract data from the merchant site. Reasons that advance to Gemini
+// are the ones refreshOne uses for "we tried, nothing first-party came
+// back" (no URL, empty scrape, transport error). not-found does not:
+// there is no product to look up.
+const GEMINI_REVIEW_FALLBACK_REASONS = new Set([
+  'no-canonical-url',
+  'no-data',
+  'scraper-error'
+]);
+
+/**
+ * Step 3 of maybeFetchProductReviewsCached: scraper first, Gemini only
+ * on a genuine scrape miss. The detect caller does not await this.
+ */
+async function kickScraperThenGeminiFallback({
+  catalogProductId, productName, brandName, productUrl, brandId, title
+}) {
+  const { refreshOne } = require('./catalogProductReviewRefreshService');
+  let scrape;
+  try {
+    scrape = await refreshOne({ productId: catalogProductId });
+  } catch (err) {
+    scrape = {
+      ok: false,
+      reason: 'scraper-error',
+      error: err && err.message ? err.message : String(err)
+    };
+  }
+
+  if (scrape && scrape.ok) {
+    console.log(
+      `   · product-reviews: scraper hit for "${title}" ` +
+      `(${scrape.quotesCount || 0} quotes, platform=${scrape.platform || 'n/a'})`
+    );
+    return scrape;
+  }
+
+  const reason = scrape && scrape.reason;
+  if (!GEMINI_REVIEW_FALLBACK_REASONS.has(reason)) {
+    console.log(
+      `   · product-reviews: scraper miss for "${title}" ` +
+      `(reason=${reason || 'unknown'}) — not a Gemini fallback`
+    );
+    return null;
+  }
+
+  console.log(
+    `   · product-reviews: scraper miss for "${title}" ` +
+    `(reason=${reason}) — falling back to Gemini`
+  );
+
+  // Existing Gemini fire-and-forget — write-guard unchanged. LLM-derived
+  // web-wide sentiment must never replace a verbatim scrape snapshot.
+  return geminiSearch.lookupProductReviews({
+    productName, brandName, productUrl,
+    brandId:   brandId || null,
+    productId: catalogProductId
+  })
+    .then(async (fresh) => {
+      if (!fresh || !Array.isArray(fresh.quotes) || fresh.quotes.length === 0) return;
+      try {
+        // GUARD: this is LLM-derived, web-wide sentiment. It must never
+        // replace a snapshot scraped verbatim from the merchant's own review
+        // app — the filter makes the write a no-op once real reviews exist,
+        // even if this background fetch lands after a later scrape.
+        await CatalogProduct.updateOne(
+          {
+            _id: catalogProductId,
+            $or: [
+              { 'productReviews.quotesOrigin': { $ne: 'scraped' } },
+              { 'productReviews.quotes': { $size: 0 } },
+              { 'productReviews.quotes': { $exists: false } }
+            ]
+          },
+          { $set: { productReviews: Object.assign({}, fresh, {
+            fetchedAt: new Date(),
+            quotesOrigin: 'llm-web'
+          }) } }
+        );
+        console.log(`   · product-reviews: cached on CatalogProduct "${title}"`);
+      } catch (err) {
+        console.warn(`   ⚠️  product-reviews cache write failed for "${title}": ${err.message}`);
+      }
+    })
+    .catch(err => console.warn(`   ⚠️  product-reviews lookup failed for "${title}": ${err.message}`));
+}
+
 // Cache-aware product-reviews resolver:
 //   1. Read CatalogProduct.productReviews.
 //   2. If fresh (< 30 days), return immediately — caller surfaces on artifact.
-//   3. If stale or missing, kick off a fire-and-forget Gemini lookup and
-//      return null. The next match on this SKU picks up the cached value.
+//   3. If stale or missing, fire-and-forget the free on-site scraper, and
+//      only then Gemini, when the scraper cannot extract data. Return null.
+//      The next match on this SKU picks up the cached value.
 //
 // Fire-and-forget on miss means the current detect run finishes fast;
 // review quotes appear on subsequent runs / re-renders. Awaiting the
 // 10-15s Gemini call here would slow every detect that hits a fresh
-// catalog SKU.
+// catalog SKU. The scraper is ~4s on a JSON-LD hit but can stretch with
+// vendor-API / headless, so the WHOLE step-3 chain (scraper then optional
+// Gemini) is backgrounded rather than blocking detect.
 async function maybeFetchProductReviewsCached({ catalogProductId, productName, brandName, productUrl }) {
   if (!catalogProductId || !productName) return null;
 
@@ -2957,41 +3049,18 @@ async function maybeFetchProductReviewsCached({ catalogProductId, productName, b
     }
   }
 
-  // 3. Fire-and-forget Gemini fetch — don't block detect.
-  geminiSearch.lookupProductReviews({
-    productName, brandName, productUrl,
-    // Cost-ledger linkage. This is a fire-and-forget billable call, which is
-    // exactly the kind that goes unnoticed without a row to point at.
-    brandId:   row.brandId || null,
-    productId: catalogProductId
-  })
-    .then(async (fresh) => {
-      if (!fresh || !Array.isArray(fresh.quotes) || fresh.quotes.length === 0) return;
-      try {
-        // GUARD: this is LLM-derived, web-wide sentiment. It must never
-        // replace a snapshot scraped verbatim from the merchant's own review
-        // app — the filter makes the write a no-op once real reviews exist,
-        // even if this background fetch lands after a later scrape.
-        await CatalogProduct.updateOne(
-          {
-            _id: catalogProductId,
-            $or: [
-              { 'productReviews.quotesOrigin': { $ne: 'scraped' } },
-              { 'productReviews.quotes': { $size: 0 } },
-              { 'productReviews.quotes': { $exists: false } }
-            ]
-          },
-          { $set: { productReviews: Object.assign({}, fresh, {
-            fetchedAt: new Date(),
-            quotesOrigin: 'llm-web'
-          }) } }
-        );
-        console.log(`   · product-reviews: cached on CatalogProduct "${row.title}"`);
-      } catch (err) {
-        console.warn(`   ⚠️  product-reviews cache write failed for "${row.title}": ${err.message}`);
-      }
-    })
-    .catch(err => console.warn(`   ⚠️  product-reviews lookup failed for "${row.title}": ${err.message}`));
+  // 3. Free scraper first, Gemini only if the scraper cannot extract
+  //    data. Fire-and-forget the whole chain — don't block detect.
+  const pending = kickScraperThenGeminiFallback({
+    catalogProductId,
+    productName,
+    brandName,
+    productUrl,
+    brandId: row.brandId || null,
+    title:   row.title
+  });
+  maybeFetchProductReviewsCached._pending = pending;
+  pending.catch(err => console.warn(`   ⚠️  product-reviews scrape/fallback failed for "${row.title}": ${err.message}`));
 
   return null;
 }
@@ -3015,7 +3084,7 @@ module.exports = {
   findPerProductMatches,      // Phase 1.7 per-refined-product orchestrator
   findCatalogMatchByText,     // Phase 1.7 text-only catalog scorer with category scoping
   catalogFirstMatchOneRefined, // Phase 1.7 per-product catalog-first (text + visual)
-  maybeFetchProductReviewsCached, // cache-aware Gemini grounded-search reviews fetch; called by catalogProductEnrichmentService on sync
+  maybeFetchProductReviewsCached, // cache-aware scraper-then-Gemini reviews fetch; called by catalogProductEnrichmentService on sync
   visualMatchCacheStats,      // D2 — introspection for harness / ops (hits, misses, size)
   __test: {
     // Exposed for scripts/verifyVisualMatchCache.js — never call from prod.
@@ -3025,6 +3094,8 @@ module.exports = {
     _visualMatchCache,
     isVisualMatchCacheEnabled,
     VISUAL_MATCH_CACHE_MAX,
-    VISUAL_MATCH_CACHE_TTL_MS
+    VISUAL_MATCH_CACHE_TTL_MS,
+    kickScraperThenGeminiFallback,
+    GEMINI_REVIEW_FALLBACK_REASONS
   }
 };

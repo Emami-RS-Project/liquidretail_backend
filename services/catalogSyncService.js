@@ -422,6 +422,13 @@ async function syncCatalogForCred(cred, run = null) {
   // for the hero + up to MAX_ALT_IMAGES alt runs. Idempotent — re-syncs
   // skip products whose imageMediaId is already populated.
   progress.stage('queueing product detects');
+  // First-pass on-site review scrape — STARTS before detect enqueue so
+  // first-party quotes are in flight prior to YOLO. Not awaited (the
+  // scraper is seconds-per-SKU; detect enqueue is a cheap Mongo write
+  // and must not wait on it). Promise is collected onto backgroundWork
+  // below. Pure scraper — no Gemini.
+  const reviewIntakeP = require('./catalogReviewIntakeService')
+    .startCatalogReviewIntake({ brandId });
   try {
     const { enqueueBrandProductDetects } = require('./catalogProductDetectService');
     await enqueueBrandProductDetects(brandId);
@@ -458,6 +465,9 @@ async function syncCatalogForCred(cred, run = null) {
   // of the process anyway, which is why this was invisible until a
   // short-lived script hit it.
   const backgroundWork = [];
+
+  // First-pass on-site review scrape (kicked off before detect enqueue).
+  backgroundWork.push(reviewIntakeP);
 
   // Eager review + commerce enrichment (Phase: catalog-sync-enrichment).
   // Walks the brand's products and fires productReviews + productDetails

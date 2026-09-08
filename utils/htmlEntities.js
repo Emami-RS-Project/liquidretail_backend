@@ -350,6 +350,30 @@ function hasHtmlEntity(s) {
   return decodeHtmlEntities(str) !== str;
 }
 
+/**
+ * stripHtml(html, maxLen?) → text | null
+ * Long-body variant of cleanScrapedText: strips tags AND decodes entities,
+ * for description-shaped fields that may carry real markup (a store's own
+ * `<div class="rte">…</div>` product description), not just an occasional
+ * escaped ampersand. cleanScrapedText is for short display/matching fields
+ * and does NOT strip tags — do not use it on a body that can contain HTML.
+ *
+ * Two tag-strip passes around ONE decode pass: sites that escape their
+ * JSON-LD ship the description as encoded markup ("&lt;div&gt;Introducing
+ * the Austen Black 74&quot; …"), which is only strippable after decoding.
+ * Decoding twice is what we must avoid, not stripping twice.
+ *
+ * Moved here from services/shopifyPublicIngestService.js (2026-09-07) so
+ * services/productReviewsScrapeService.js can use the SAME implementation
+ * without requiring shopifyPublicIngestService.js — which already requires
+ * productReviewsScrapeService.js, so the reverse require would be a cycle.
+ */
+function stripHtml(html, maxLen = 2000) {
+  if (!html) return null;
+  const decoded = decodeHtmlEntities(String(html).replace(/<[^>]*>/g, ' '));
+  return tidyText(decoded.replace(/<[^>]*>/g, ' '), maxLen);
+}
+
 module.exports = {
   endsOnSentenceStop,
   finishesThought,
@@ -357,6 +381,7 @@ module.exports = {
   decodeHtmlEntities,
   cleanScrapedText,
   tidyText,
+  stripHtml,
   truncateWords,
   truncateSentences,
   splitSentences,
