@@ -1,0 +1,16 @@
+{
+  "name": "studio-vocab-gymshark-tshirt",
+  "notes": "Third, meaningfully different brand (Gymshark, athletic wear) to stress-test whether the on_figure_plain veto and prompt produce brand-appropriate (gym/fitness-context) backgrounds, not just footwear/lifestyle or fishing/outdoor ones. Real seed (product 6a8d1eedd9e1e0e1dccedbf6, background.sceneType 'Studio').",
+  "seed": { "productId": "6a8d1eedd9e1e0e1dccedbf6" },
+  "static": {
+    "surface": "meta_feed_1_1",
+    "intent": "product_first_lifestyle",
+    "productDesc": "men's black oversized t-shirt with a silver reflective logo, shown worn on a cropped male model against a plain studio backdrop",
+    "seedStyle": "lifestyle",
+    "seedClass": "on_figure_plain",
+    "variantKind": "product_image",
+    "copy": { "headline": "Train Different", "rating": 4.6, "reviewCount": 156, "cta": "SHOP NOW" },
+    "models": ["openai/gpt-image-2/edit"],
+    "variants": [ { "id": "fixed-1" } ]
+  }
+}

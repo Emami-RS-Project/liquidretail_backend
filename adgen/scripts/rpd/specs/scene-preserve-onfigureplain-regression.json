@@ -1,0 +1,23 @@
+{
+  "name": "scene-preserve-onfigureplain-regression",
+  "notes": "Regression check for the same-day on_figure_plain fix (see scene-preserve-onfigureplain-studio.json). This seed is a GENUINE real-environment on-model shot (Media 6a982dc2ce057530d979e6c1, shotType:on_model 0.9x conf, background scene 'Offshore Fishing' — an actual dramatic action photo of anglers on a boat deck, not a studio). The fix must NOT change behaviour here: 'before' (seedClass omitted) and 'after' (seedClass:'lifestyle_scene', the confident real-scene verdict) should both preserve the scene identically. If 'after' stops preserving here, the veto condition is too broad and is now also catching real lifestyle photos — that would be a regression, not a fix.",
+  "seed": {
+    "url": "https://res.cloudinary.com/reach-social-prod/image/upload/v1788358081/apify-demo/ig/product-1788358081271-19-jnb0wnuj.jpg",
+    "productTitle": "Pelagic performance fishing hoodie",
+    "refs": [],
+    "brandHex": "#0b2540"
+  },
+  "static": {
+    "surface": "meta_feed_4_5",
+    "intent": "product_first_lifestyle",
+    "productDesc": "a teal long-sleeve performance fishing hoodie with a white Pelagic logo on the back, worn by an angler leaning over a boat's transom fighting a large fish, another crew member in a light green Pelagic hoodie in the foreground",
+    "seedStyle": "lifestyle",
+    "variantKind": "product_image",
+    "copy": { "headline": "Built for the Fight", "rating": 4.8, "reviewCount": 10, "cta": "SHOP NOW" },
+    "models": ["openai/gpt-image-2/edit"],
+    "variants": [
+      { "id": "before-1" },
+      { "id": "after-1", "seedClass": "lifestyle_scene" }
+    ]
+  }
+}

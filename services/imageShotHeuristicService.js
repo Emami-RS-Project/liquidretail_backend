@@ -102,15 +102,44 @@ const LLM_PACKSHOT  = new Set(['product_only', 'flat_lay', 'detail', 'packaging'
 // classified "Yoga Studio", "Studio Apartment" and "mountain backdrop" as
 // photography studios — but those are real venues/scenery, exactly the shots
 // an activewear brand wants animated. The pattern below matches the survey's
-// studio vocabulary as WHOLE LABELS (optional fashion/apparel/beauty/photo
-// prefix, optional portrait/still-life/… suffix). "Yoga Studio" has a
-// non-photography prefix → environment. "Studio Apartment" has a suffix
-// outside the set → environment. Unseen studio phrasings therefore default
-// to environment (benefit of the doubt) — extend the suffix/prefix sets from
-// future surveys rather than loosening the anchor.
+// studio vocabulary as WHOLE LABELS (optional fashion/apparel/beauty/photo/
+// white prefix, optional portrait/still-life/floor/… suffix). "Yoga Studio"
+// has a non-photography prefix → environment. "Studio Apartment" has a
+// suffix outside the set → environment. Unseen studio phrasings therefore
+// default to environment (benefit of the doubt) — extend the suffix/prefix
+// sets from future surveys rather than loosening the anchor.
+//
+// EXTENDED 2026-09-08 — two more real production labels found by live
+// sampling of catalog seeds (Soludos, Pelagic): "White Studio" (prefix
+// "white", setting 'product-shot-on-solid') and "Studio Floor" (suffix
+// "floor", setting 'studio') both describe a plain photography-studio
+// backdrop by every other signal on the same doc, but neither prefix/suffix
+// was in the original survey's vocabulary, so both fell to the environment
+// default and reproduced the blank-backdrop-preserved bug on real data.
+// "white" and "floor" added below per the comment's own instruction above —
+// not a broadening of the anchor mechanism itself, and "Beach"/"Yoga
+// Studio"/"Studio Apartment" still correctly fall outside it (verified: no
+// existing check in scripts/verifySeedClass.js regressed).
+//
+// EXTENDED AGAIN, same day — a full frequency survey of every real
+// background.sceneType value on on_model/lifestyle catalog media (60
+// distinct labels) turned up two more confirmed-by-evidence gaps:
+// "Ecommerce Studio" and "Studio Detail" — both checked against their
+// OWN background.description + setting before adding (not guessed): every
+// sampled instance of each describes a plain seamless/white studio backdrop
+// with setting 'studio' or 'product-shot-on-solid'. Two candidates from the
+// SAME survey were checked and explicitly REJECTED despite sounding
+// studio-like: "Indoor Studio" (4 occurrences, setting 'indoor', every
+// description names a real wall/floor — genuinely a room, not a backdrop)
+// and "Minimal Studio" (setting 'indoor', description names a real
+// concrete-floor/plaster-wall room despite "Studio Minimal" already being
+// accepted in the OTHER word order) — label wording alone is not evidence;
+// the description + setting on the same doc is, and here it says
+// environment. Do not add "indoor" or a bare "minimal" prefix on the
+// strength of these two labels alone.
 const STUDIO_SCENE_RE = new RegExp(
-  '^\\s*(?:(?:fashion|apparel|beauty|photo(?:graphy)?)\\s+)?studio' +
-  '(?:\\s+(?:portrait|still\\s*life|close-?ups?|comparison|minimal|beauty|interior|floral|shots?|scenes?|sets?))?\\s*$',
+  '^\\s*(?:(?:fashion|apparel|beauty|photo(?:graphy)?|white|ecommerce)\\s+)?studio' +
+  '(?:\\s+(?:portrait|still\\s*life|close-?ups?|comparison|minimal|beauty|interior|floral|floor|detail|shots?|scenes?|sets?))?\\s*$',
   'i'
 );
 // Seamless/cyclorama are unambiguous studio equipment; a bare "Backdrop"

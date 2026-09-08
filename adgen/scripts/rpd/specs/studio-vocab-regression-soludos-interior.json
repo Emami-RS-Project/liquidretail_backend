@@ -1,0 +1,16 @@
+{
+  "name": "studio-vocab-regression-soludos-interior",
+  "notes": "Regression check — real environment seed (Soludos Ibiza Canvas Sneaker, product 6a889badb31cf7b2214a7777, sceneType 'Fashion Interior') must stay lifestyle_scene and be PRESERVED, not rebuilt. Confirms the vocab extension ('white'/'floor') did not widen the anchor enough to start misclassifying genuine environments.",
+  "seed": { "productId": "6a889badb31cf7b2214a7777" },
+  "static": {
+    "surface": "meta_feed_1_1",
+    "intent": "product_first_lifestyle",
+    "productDesc": "a women's olive green canvas sneaker, shown worn on a cropped model's feet against a warm off-white interior wall and concrete floor",
+    "seedStyle": "lifestyle",
+    "seedClass": "lifestyle_scene",
+    "variantKind": "product_image",
+    "copy": { "headline": "Classic, Reimagined", "rating": 4.6, "reviewCount": 88, "cta": "SHOP NOW" },
+    "models": ["openai/gpt-image-2/edit"],
+    "variants": [ { "id": "preserved-1" } ]
+  }
+}

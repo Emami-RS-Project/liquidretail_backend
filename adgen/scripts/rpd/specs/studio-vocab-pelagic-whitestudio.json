@@ -1,0 +1,16 @@
+{
+  "name": "studio-vocab-pelagic-whitestudio",
+  "notes": "Real production seed (Pelagic Gear 2 'Palomar', product 6a982e18ce057530d979e862) whose background.sceneType is 'White Studio' — previously misclassified lifestyle_scene (the anchor's prefix set lacked 'white'), now correctly on_figure_plain after extending STUDIO_SCENE_RE. Tests: does the new scene the model builds look appropriate for a fishing/outdoor apparel brand, not generic or mismatched.",
+  "seed": { "productId": "6a982e18ce057530d979e862" },
+  "static": {
+    "surface": "meta_feed_1_1",
+    "intent": "product_first_lifestyle",
+    "productDesc": "a men's casual fishing-brand button-up shirt, worn by a cropped male model against a plain white studio backdrop",
+    "seedStyle": "lifestyle",
+    "seedClass": "on_figure_plain",
+    "variantKind": "product_image",
+    "copy": { "headline": "Built for the Water", "rating": 4.7, "reviewCount": 42, "cta": "SHOP NOW" },
+    "models": ["openai/gpt-image-2/edit"],
+    "variants": [ { "id": "fixed-1" } ]
+  }
+}

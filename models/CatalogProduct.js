@@ -180,6 +180,25 @@ const catalogProductSchema = new mongoose.Schema({
 
   // Destination
   productUrl:   String,
+  // A second URL concept was already referenced throughout
+  // services/catalogProductReviewRefreshService.js (`product.canonicalUrl`
+  // as a fallback when productUrl is absent) with NO declared schema field
+  // behind it — Mongoose silently drops an undeclared `.select()`'d path,
+  // so that fallback was dead code (always undefined) on every product.
+  // Declared here to close that; no ingest path writes it yet.
+  canonicalUrl: { type: String, default: null },
+  // URL-path slug/handle (Shopify's "handle", or the last path segment on
+  // any other storefront) — e.g. "mako-shorts". Derived deterministically
+  // from productUrl/canonicalUrl by catalogProductReviewRefreshService's
+  // free scraper; not curated data, so it is always refreshed to track the
+  // current URL rather than gap-filled once.
+  slug:         { type: String, default: null, index: true, sparse: true },
+  // A per-product marketing tagline/slogan, scraped from the PDP's own
+  // JSON-LD Product.slogan (schema.org's real, defined property — most
+  // pages do not populate it, so coverage is best-effort/partial by
+  // design, not a bug). Never LLM-generated — a distinct, product-level
+  // concept from Brand.tagline (brand-level, used in Director prompts).
+  slogan:       { type: String, default: null },
 
   // Per-product video-generation settings — same shape and semantics as
   // Brand.videoSettings (see models/Brand.js); this level wins over the

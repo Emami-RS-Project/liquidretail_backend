@@ -228,19 +228,26 @@ async function readFromCatalogCache(catalogProductId) {
 async function writeThroughToCatalogProduct(catalogProductId, fetched) {
   if (!fetched) return;
   const cp = await CatalogProduct.findById(catalogProductId)
-    .select('description imageUrl price currency rating')
+    .select('description imageUrl price currency rating specs')
     .lean();
   if (!cp) return;
 
   const setOps = {
-    // ratingDistribution/reviews/specs/sellers/reviewSummary are
-    // cross-web data disjoint from what the scan captures, so they
-    // refresh in place. `rating`, by contrast, IS captured on-page by
-    // the catalog scan (AggregateRating JSON-LD) — gap-fill it only so
-    // enrichment can't clobber the brand's own on-page rating.
+    // ratingDistribution/reviews/sellers/reviewSummary are cross-web data
+    // disjoint from what the scan captures, so they refresh in place.
+    // `rating`, by contrast, IS captured on-page by the catalog scan
+    // (AggregateRating JSON-LD) — gap-fill it only so enrichment can't
+    // clobber the brand's own on-page rating. `specs` moved to the
+    // gap-fill block below (2026-09-07) — it is ALSO now captured for
+    // free at ingest time (services/catalogProductReviewRefreshService.js,
+    // from the same on-page JSON-LD this scan itself reads
+    // additionalProperty from), and an unconditional `fetched.specs || {}`
+    // here would silently wipe that free capture back to {} on any later
+    // Enrich call whose SerpAPI Immersive lookup has no specifications —
+    // a real regression this diff introduced, since specs never had
+    // another writer before now.
     ratingDistribution: fetched.ratingDistribution || [],
     reviews:            fetched.reviews || [],
-    specs:              fetched.specs || {},
     sellers:            fetched.sellers || [],
     reviewSummary:      fetched.reviewSummary || null,
     detailsRefreshedAt: new Date()
@@ -248,6 +255,10 @@ async function writeThroughToCatalogProduct(catalogProductId, fetched) {
   // Fill commerce gaps only — never overwrite curated / on-page brand data
   if (cp.rating == null && fetched.rating != null) setOps.rating = fetched.rating;
   if (!cp.description && fetched.description) setOps.description = fetched.description;
+  if ((!cp.specs || (typeof cp.specs === 'object' && !Object.keys(cp.specs).length)) &&
+      fetched.specs && Object.keys(fetched.specs).length) {
+    setOps.specs = fetched.specs;
+  }
   // 2026-08-18 fix: `fetched.thumbnail` can be a Google Shopping / Lens
   // thumbnail (SerpAPI `google_shopping` top result, or a Lens match via
   // productReasoner.js) served from gstatic's encrypted-tbn CDN — a tiny

@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "5bc521eefb606c3f57254c8b4093a3f1adb283e1",
-  "generatedAt": "2026-09-08T03:17:59.667Z",
+  "backendHead": "8fe94cae3851afd3fa4c7e5ebc49682817ee5daa",
+  "generatedAt": "2026-09-08T18:41:15.459Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
@@ -902,10 +902,10 @@
     },
     "services/directImageRenderService.js": {
       "backendHash": "7b43a590bbad5d12951813c8694da4f058981b31e5105c9086528484b6395146",
-      "adgenHash": "613ec2c8dc556bf9df8116cb39abc28a4fdeb2fb467dea3067a7ec1c73a78712",
+      "adgenHash": "592d577956189ba6bf121b1e9268e4d571c44eb738d91fca11bb6005d87ccec0",
       "backendSha": "0966924ad0ab7875dc5ca0ff3c9785826435e9bf",
       "status": "fork",
-      "reason": "Fork, not a copy -- adgen owns the live static renderer. This change ports only the segment-override plumbing on top of that fork: buildPrompt({segment}) with categoryPath from resolvedProduct.category || inferredBreadcrumb, CatalogProduct selects now include those two fields (otherwise categoryPath is always null on the DB path), and intentResolution.promptFlags.segmentOverrides stamps built.appliedOverrides. Remaining adgen-owned hunks, deliberately not flattened: logo LRU (optionalImageCached); ai_ugc_led -> objection_resolved; product.category threaded for the apparel role preamble; usableAttribution; composeCorrectiveOverride / buildQcRetryArgs; submitEditImageWithSeedFallback; resume-from-receipt (existingPredictionId / allowResume -- a money guard backend does not have). Backend commit 0966924a (#411) DELETED its entire dormant in-process render pipeline (2118 lines removed, 20 added, all non-functional/comments) -- this deletion includes the previously-documented backend-only promptSha256/seedStyle hunks, which no longer exist in backend at all, so there is nothing left to port either way. Confirmed adgen's file was NOT touched by this commit (0-line diff) and all its documented fork behaviors remain fully intact. Backend's live copy is now ~1050 lines of geometry/logo-compositing helpers only (finishPlate, deliveryGeometryFor, logoPlacementFor, etc.), since adgen owns rendering in production."
+      "reason": "2026-09-08: added description to both CatalogProduct .select() projections so describeProductForPrompt's product-fidelity fallback actually works (was a silent no-op); threaded seedClass into buildPrompt for the scene-preserve veto"
     },
     "services/faceSafeCrop.js": {
       "backendHash": "986126268359d4f9d28f8b8075e930689a541cf369025ffbe83c9a2f61cf90a5",
@@ -933,11 +933,10 @@
       "owedSince": null
     },
     "services/fontResolverService.js": {
-      "backendHash": "f978e12cf5dc6bff90a826205e49b952523904490b18402b7d7982778cd35c0b",
+      "backendHash": "15da026805c3929ae9287facc96d935646aa163961d8c50edbc68e61036a785e",
       "adgenHash": "15da026805c3929ae9287facc96d935646aa163961d8c50edbc68e61036a785e",
-      "backendSha": "6f5372fbcf7b7b58f4a18bc18cb1c899534f7b3b",
-      "status": "fork",
-      "reason": "resolveLibraryMatch's CSS fallback field now consults LIBRARY_SERIF_FACES (authoritative for the closed curated-face set) instead of the naive name-regex fallbackFor(), which missed the 4 script/handwritten faces (Great Vibes, Dancing Script, Pacifico, Caveat). Applied identically to both trees; still byte-identical."
+      "backendSha": "8fe94cae3851afd3fa4c7e5ebc49682817ee5daa",
+      "status": "synced"
     },
     "services/handoffContract.js": {
       "backendHash": "de310d4687251963d2fc8a51db6a7d07cf8ec9982c0d9415f0b4d850a62b955b",
@@ -957,11 +956,10 @@
     },
     "services/imageShotHeuristicService.js": {
       "backendHash": "3a9a4ea1b7ad95437b0374f1d4844c2c20c28c651c0a2d517b52f3171d17111b",
-      "adgenHash": "3a9a4ea1b7ad95437b0374f1d4844c2c20c28c651c0a2d517b52f3171d17111b",
+      "adgenHash": "6189779862da837ae0be1fcbe42910f52b6658882890b493f56f2e58fbb107a3",
       "backendSha": "9b482775e2f75324ca0dec26c9bb405bd1899093",
-      "status": "synced",
-      "portTo": null,
-      "owedSince": null
+      "status": "fork",
+      "reason": "2026-09-08: extended STUDIO_SCENE_RE prefix/suffix vocabulary (white/floor/ecommerce/detail) found via live seed sampling; applied identically to both copies, still byte-identical"
     },
     "services/ingestShotClassifyService.js": {
       "backendHash": "8e44a42bc6fc0b1be58abbef4d1bdb5facada4bf699b39a9dbef8f5360ddc03d",
@@ -1276,10 +1274,10 @@
     },
     "services/staticAdIntents.js": {
       "backendHash": "b1e1763ef7482c536ffd2a5a5e2e4a9361e0951977a7c57e247ec4c6be02ecdf",
-      "adgenHash": "157acd1dd0735042b05a82268a0fd696e4a507872a5e7a02079a14270bc2fd4a",
+      "adgenHash": "1f49daa755e83ac6a048a82b772265ece3a032026aa31f8ca9b3490582aa8d48",
       "backendSha": "7cc2c7dfbada49e800d3fd0cc1899e9735c425cb",
       "status": "fork",
-      "reason": "2026-09-07: port scrim-forbidden + CTA-removal fix from now-disconnected liquidretail_adgen repo into the live /adgen monorepo path"
+      "reason": "2026-09-08: PRODUCT_FIDELITY PERSON IN FRAME — MANDATORY opener + concrete add-person wording (still-life-plus-backdrop is not enough); applied identically to both copies. Files remain a fork for unrelated CTA/geometry/seedClass divergence. Scale-carve-out from earlier same day is kept."
     },
     "services/staticPipeline.js": {
       "backendHash": "52b48bf6fcbe9a7723c682dcf0c18e35f7819a8e27f6a39704807bec07e49927",
