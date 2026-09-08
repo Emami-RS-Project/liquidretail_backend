@@ -265,8 +265,20 @@ function build(mod, shape, operatorPrompt) {
 const EMPTY_OPERATORS = [
   ['undefined', undefined], ['null', null], ["''", ''], ["'   '", '   '], ["'\\n\\t '", '\n\t ']
 ];
-const CORE_SHA256 = 'bb6379651933e5abdc2709e1b4e5c3f59ca8c59cd41c132cf43782866015b041';
-const CORE_BYTES = 1158;
+// RETARGETED AGAIN 2026-09-07 (owner-directed): CORE now opens with an
+// explicit "exactly three distinct clips, ~3s each, edited into one seamless
+// master" structural constraint, replacing the old single continuous-camera
+// framing on the same lead sentence. Deliberately a small, additive change to
+// the MEASURED 2026-09-03 CORE (see the RETARGETED 2026-09-03 note above) —
+// not a new prompt: every other sentence (product-surface lock, on-garment
+// text, catalog-priority, no-morph/no-drift, audio, no-captions) is
+// byte-identical to what shipped then. Meta-vs-PMax customization was
+// explicitly considered and rejected here too, for the same reason #107
+// gave: CORE stays platform-neutral by design (measured null result on
+// rewriting fidelity prose; PR #61 rollback precedent). Same discipline as
+// before: sha/byte-count updated to the new measured artifact, not relaxed.
+const CORE_SHA256 = '442d22a94a2c8503df0333933fae91b3e50dbae21ddbd9866108afb420622aad';
+const CORE_BYTES = 1508;
 const CORE_MARK = 'The product surface is the only hard lock.';
 
 console.log('A. no-operator path emits exactly the CORE prompt, byte-for-byte');
@@ -450,12 +462,16 @@ console.log('D. the byte budget degrades the explanation, never the constraints'
   }
 
   // The explanation yields BEFORE the pre-existing optional lines.
-  // CAP RETARGETED 2026-09-03. 4200 was tight against the old ~3.3KB
-  // directive prompt; CORE is 1158B, so 4200 is now roomy and the
-  // degradation this asserts never triggered — the check was passing
-  // vacuously in the other direction (nothing to drop). Re-tightened
-  // relative to CORE so the budget is genuinely under pressure.
-  const tight = { name: 'tight', args: { caps: { paramShape: 'gemini-omni', promptByteCap: 2200 }, aspectRatio: '1:1', hasProductReference: true } };
+  // CAP RE-SWEPT AGAIN 2026-09-07. These caps are SYNTHETIC test fixtures,
+  // smaller than any real model (Omni 20,000 / Grok 4,096) — they exist only
+  // to exercise the degrade/fail-closed logic on purpose, since no real cap
+  // is tight enough to trigger it naturally. The 2026-09-07 CORE addition
+  // (+350 bytes, 1158→1508) shifted where these synthetic boundaries fall;
+  // re-swept the same way the 2026-09-03 retarget was done — measured, not
+  // guessed. 2200 (tuned for the OLD 1158B CORE) now throws instead of
+  // degrading; re-measured: 2500 is the tightest cap where a 600-byte
+  // operator still degrades gracefully (2480 B result, framing dropped).
+  const tight = { name: 'tight', args: { caps: { paramShape: 'gemini-omni', promptByteCap: 2500 }, aspectRatio: '1:1', hasProductReference: true } };
   const squeezed = build(current, tight, 'x'.repeat(600));
   check('D3 under pressure the framing explanation is dropped', !squeezed.includes(FRAMING_MARK));
   check('D4 the fence is retained when the explanation is dropped', squeezed.includes(FENCE_OPEN));
@@ -467,9 +483,19 @@ console.log('D. the byte budget degrades the explanation, never the constraints'
   // FAIL CLOSED at the extreme. A cap where the operator text alone would fit
   // but the safety blocks cannot: refuse rather than submit a prompt whose
   // guardrails were trimmed. A refused request costs nothing.
+  //
+  // RE-SWEPT 2026-09-07 (same reason as D3 above): the old 2300 cap, tuned
+  // for the 1158B CORE, now lands in the "pre-existing overflow" warn-and-
+  // send branch instead of throwing (compact form is 2880B regardless of
+  // cap; 2300 sits below the ~2600B threshold where the bare-fence probe
+  // itself stops overflowing, so buildVeoPrompt correctly reads it as
+  // pre-existing rather than caused by this change — see the
+  // preExistingOverflow comment in veoPromptBuilder.js). Re-measured: 2600 is
+  // the first cap where fail-closed fires again; 2700 gives real margin
+  // above that boundary while staying well below the 2880B compact size.
   let failedClosed = false, code = null;
   try {
-    build(current, { name: 'extreme', args: { caps: { paramShape: 'grok', promptByteCap: 2300 }, aspectRatio: '1:1', hasProductReference: true } }, 'x'.repeat(1000));
+    build(current, { name: 'extreme', args: { caps: { paramShape: 'grok', promptByteCap: 2700 }, aspectRatio: '1:1', hasProductReference: true } }, 'x'.repeat(1000));
   } catch (e) { failedClosed = true; code = e.code; }
   check('D9 the extreme case FAILS CLOSED rather than submitting', failedClosed);
   check('D10 the failure carries a machine-readable code', code === 'VEO_PROMPT_OVER_CAP', `got ${code}`);

@@ -338,22 +338,21 @@ function geometryBlock(s) {
       : `The platform covers the top ${s.platformReservePx.top}px and bottom ${s.platformReservePx.bottom}px of the frame with its own interface.`);
   }
   // Element-agnostic on purpose. Naming "the CTA" here asserted a CTA exists,
-  // which contradicted the absence list on any surface that strips it
-  // (Stories; PMax too before the 2026-08-24 CTA decision, and still under
-  // PMAX_STATIC_CTA_ALL_INTENTS=false) — the same empty-slot defect
-  // that produced a fabricated quote in v1.
+  // which contradicted the absence list on any surface that strips it — the
+  // same empty-slot defect that produced a fabricated quote in v1. As of the
+  // 2026-09-07 decision the CTA button is absent on EVERY static surface
+  // (resolveDrawCta always returns false), so it is dropped from this list
+  // entirely rather than named as a maybe-present element.
   //
-  // "Scrim or panel" named explicitly (2026-08-19) — measured live on a
-  // pmax_portrait_4_5 render: a translucent legibility scrim behind the
-  // headline bled flush off the LEFT edge (hard cut at x=0, no inset),
-  // reading as a rendering overflow rather than a design choice. "EVERY
-  // element" was already meant to cover it (the LATITUDE clause elsewhere
-  // explicitly permits "a soft scrim or panel behind type" as chrome), but
-  // nothing here said a scrim's own edges are subject to the same box —
-  // the model evidently treats a decorative backdrop panel as exempt from
-  // an instruction that reads, on a first pass, like it is about literal
-  // text/logo/CTA elements. Naming it removes that reading.
-  lines.push(`EVERY element you render other than the photograph itself — text, CTA button, the logo's reserved corner, and any soft scrim or panel placed behind type for legibility — must sit inside the box from ${s.box.left}% to ${s.box.right}% of width and ${s.box.top}% to ${s.box.bottom}% of height, with its OWN edges fully inside that box. A scrim or panel's edge must never touch or bleed past the canvas boundary, even where it fades or is partially transparent — inset it from the edge like every other element. The photograph should still fill the whole frame edge to edge.`);
+  // Scrim/panel dropped from this list 2026-09-07 too: it used to be named
+  // here (2026-08-19) because the LATITUDE clause elsewhere permitted "a soft
+  // scrim or panel behind type" as chrome and a stray one had bled off the
+  // frame edge. That permission is now revoked outright (buildScenePreserveBlock
+  // / decideBlock explicitly forbid a scrim/panel), so there is nothing left
+  // for this geometry line to bound — naming an always-forbidden element here
+  // would recreate the same "asserts it exists" defect the CTA fix above
+  // guards against.
+  lines.push(`EVERY element you render other than the photograph itself — text and the logo's reserved corner — must sit inside the box from ${s.box.left}% to ${s.box.right}% of width and ${s.box.top}% to ${s.box.bottom}% of height, with its OWN edges fully inside that box. The photograph should still fill the whole frame edge to edge.`);
   return lines.join(' ');
 }
 
@@ -431,21 +430,25 @@ function describeSurfaces() {
  * about the image" — and is enforced by sacrificing the lowest-value element,
  * never by truncating arbitrarily.
  */
+// 2026-09-07 owner decision: CTA button REMOVED from every static surface.
+// SURFACE_POLICY.drawCta is now false everywhere — see the unconditional
+// override in resolveDrawCta below for the actual enforcement (this table
+// alone is not sufficient, since PMAX_STATIC_CTA_ALL_INTENTS /
+// PMAX_DRAWCTA_QUOTE_ONLY_SOCIAL_PROOF could otherwise resurrect a CTA for
+// some PMax intents if either env flag is ever set away from its default).
 const SURFACE_POLICY = {
-  meta_feed_1_1:     { static: true,  drawCta: true,  maxTextElements: 4 },
-  meta_feed_4_5:     { static: true,  drawCta: true,  maxTextElements: 4 },
+  meta_feed_1_1:     { static: true,  drawCta: false, maxTextElements: 4 },
+  meta_feed_4_5:     { static: true,  drawCta: false, maxTextElements: 4 },
   meta_reels_9_16:   { static: false, skipReason: 'kinds:["video"] — Reels takes no static image' },
   meta_stories_9_16: { static: true,  drawCta: false, maxTextElements: 3,
                        ctaNote: 'the platform supplies the link affordance' },
-  pmax_16_9:         { static: true,  drawCta: true,  maxTextElements: 4 },
-  // Phase A live PMax statics. drawCta:true is the SURFACE default, and since
-  // the 2026-08-24 owner decision (PMAX_STATIC_CTA_ALL_INTENTS) it is also
-  // what resolveDrawCta returns — every intent draws. Turning that switch off
-  // restores the old intent-by-intent allowlist.
+  pmax_16_9:         { static: true,  drawCta: false, maxTextElements: 4 },
+  // Phase A live PMax statics. drawCta:false as of the 2026-09-07 decision
+  // (supersedes the 2026-08-24 PMAX_STATIC_CTA_ALL_INTENTS decision below).
   // maxTextElements 3 on the small 1.91:1 canvas — dense text hurts there.
-  pmax_landscape_1_91_1: { static: true, drawCta: true, maxTextElements: 3 },
-  pmax_square_1_1:       { static: true, drawCta: true, maxTextElements: 4 },
-  pmax_portrait_4_5:     { static: true, drawCta: true, maxTextElements: 4 }
+  pmax_landscape_1_91_1: { static: true, drawCta: false, maxTextElements: 3 },
+  pmax_square_1_1:       { static: true, drawCta: false, maxTextElements: 4 },
+  pmax_portrait_4_5:     { static: true, drawCta: false, maxTextElements: 4 }
 };
 
 /**
@@ -650,6 +653,15 @@ const PMAX_STATIC_CTA_ALL_INTENTS = process.env.PMAX_STATIC_CTA_ALL_INTENTS !== 
  * reads it, and an existing caller that omits it must not throw.
  */
 function resolveDrawCta({ surfaceKey, policy, intentKey, data = {} }) {
+  // 2026-09-07 owner decision: NO CTA button on any static surface, full
+  // stop. Unconditional — deliberately ahead of every flag below so a
+  // dashboard override of PMAX_STATIC_CTA_ALL_INTENTS or
+  // PMAX_DRAWCTA_QUOTE_ONLY_SOCIAL_PROOF (independent of this file's
+  // defaults) cannot resurrect a CTA on any pmax_* intent. Revert by
+  // deleting this line — SURFACE_POLICY and the flag cascade below are
+  // otherwise untouched and still describe the pre-2026-09-07 behaviour.
+  return false;
+  // eslint-disable-next-line no-unreachable
   if (!policy) return true;
   // Flag off → every surface uses the raw SURFACE_POLICY boolean (byte-identity).
   if (!PMAX_STATIC_PLATFORM_NOTES) return policy.drawCta;
@@ -1445,9 +1457,9 @@ PRESERVE EXACTLY, as the reference shows the product:
   — Details, including but not limited to: pockets, collars, sleeves, cuffs, necklines, hems, soles, heels, eyelets, handles, bezels, displays, screens, lenses, caps, applicators, chains, gemstones, watch faces, grips, blades, wheels, buttons, ports, vents and sensors. Every feature visible in the reference must appear unchanged; no feature absent from the reference may be added.
   — Condition: wrinkles, folds, creases, wear, polish, finish, surface imperfections, and the shadows the item casts on itself. Do not "improve" the item.
 
-COMPOSITING ONLY. Your job is to typeset the exact strings listed below into the safe box as advertisement chrome (type and optional soft scrim or panel behind type where legibility over a busy photograph demands it). A soft scrim or panel behind type IS permitted — that is chrome, not a change to the photograph. Inventiveness lives in typography and chrome treatment only, never in inventing a new scene. Do not invent a new photoshoot of a similar scene.
+COMPOSITING ONLY. Your job is to typeset the exact strings listed below into the safe box as advertisement chrome — type only. Do NOT add a scrim, panel, box, backing, gradient, vignette or any darkened/lightened region behind the text, even over a busy photograph or where a person is in frame — choose ink colour, weight and placement that read clearly against the photograph exactly as supplied instead. Inventiveness lives in typography and chrome treatment only, never in inventing a new scene. Do not invent a new photoshoot of a similar scene.
 
-WHAT MAY CHANGE: letterforms and any non-photo chrome required to set those strings (including a soft legibility scrim/panel).${mayChangeExtra} Nothing else about the photograph's pixels may change.
+WHAT MAY CHANGE: letterforms only.${mayChangeExtra} Nothing else about the photograph's pixels may change — no scrim, panel or backing of any kind.
 
 BEFORE YOU FINISH: a side-by-side with the reference should read as the same photograph with copy overlaid — not a new photoshoot of a similar scene.${finishExtra} Product identity, subject, pose, light and crop of the subject all match the reference; every supplied string appears exactly once; no other text appears.`;
 }
@@ -1789,9 +1801,9 @@ Set no other words, numerals or letterforms anywhere in the image — including 
   // (byte-identical when preserve is false).
   const decideBlock = preserve
     ? (kept.length
-      ? `COMPOSITING ONLY — you decide typeface and weight, the scale and colour of every text element, whether copy sits on a soft scrim or panel for legibility or in clear space, and where each element goes inside the safe box. The photograph is finished: inventiveness belongs only in typography and chrome, never in the pixels of the scene.`
+      ? `COMPOSITING ONLY — you decide typeface and weight, the scale and colour of every text element, and where each element goes inside the safe box. Set every text element directly against the photograph — no scrim, panel or backing behind it, for legibility or otherwise. The photograph is finished: inventiveness belongs only in typography and chrome, never in the pixels of the scene.`
       : `COMPOSITING ONLY — the photograph is finished and this ad carries no text. Inventiveness is not invited; leave the plate as the reference shows it.`)
-    : `YOU DECIDE EVERYTHING ELSE: composition and crop, camera angle and distance, ${personClause}lighting and mood${kept.length ? ', typeface and weight, the scale and colour of every text element, whether copy sits on a panel or in clear space, and where each element goes' : ''}. ${product.look ? `The brand's world is: ${product.look}. Work within it, and beyond that use your own judgement — ` : 'Use your own judgement — '}make it look like a campaign a good agency shipped, not a template that was filled in. Inventiveness belongs in the photography, the light and the typography — never in the claims.`;
+    : `YOU DECIDE EVERYTHING ELSE: composition and crop, camera angle and distance, ${personClause}lighting and mood${kept.length ? ', typeface and weight, the scale and colour of every text element, and where each element goes — set directly against the photograph, never on a scrim, panel or backing' : ''}. ${product.look ? `The brand's world is: ${product.look}. Work within it, and beyond that use your own judgement — ` : 'Use your own judgement — '}make it look like a campaign a good agency shipped, not a template that was filled in. Inventiveness belongs in the photography, the light and the typography — never in the claims.`;
 
   const prompt = `${rolePreamble}Produce a finished, ready-to-publish direct-response advertisement for ${s.label}.
 

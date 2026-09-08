@@ -114,6 +114,13 @@ check('C3 pure black on a pure white fill', direct.deriveCtaColors({ accentColor
 check('C3 pure white on a pure black fill', direct.deriveCtaColors({ accentColor: '#000000' }).text === '#FFFFFF');
 
 // ── C4: live integration — directives only append when a CTA is drawn ──
+// UPDATED 2026-09-07: resolveDrawCta now returns false unconditionally on
+// every static surface (CTA removed everywhere), so meta_feed_1_1 no longer
+// draws one either — it joins meta_stories_9_16 as a no-CTA surface. C1-C3
+// and C5's pure-function coverage of ctaCasingDirective/deriveCtaColors/
+// normalizeCtaCasing is untouched by this: those functions are unaffected,
+// simply unreachable via the live append path today (kept covered directly,
+// same as before, in case a future surface ever draws a CTA again).
 {
   const data = direct.buildIntentData({
     concept: { copy_picks: { headline: 'Move freely' } },
@@ -127,14 +134,14 @@ check('C3 pure white on a pure black fill', direct.deriveCtaColors({ accentColor
   check('C4 meta_stories_9_16 does not carry a CTA BUTTON role (drawCta:false by design)',
     storiesHasCta === false);
 
-  // meta_feed_1_1: SURFACE_POLICY.drawCta === true — CTA role present.
+  // meta_feed_1_1: as of 2026-09-07, drawCta is false here too (CTA removed
+  // from every static surface) — no CTA role present.
   const builtFeed = intents.buildPrompt({
     intentKey: 'product_first_lifestyle', data, product: {}, surface: 'meta_feed_1_1'
   });
   const feedCta = builtFeed.text.find(([role]) => role === 'CTA BUTTON');
-  check('C4 meta_feed_1_1 DOES carry a CTA BUTTON role', !!feedCta);
-  check('C4 the CTA role text is the exact derived string ("Shop the tee")',
-    !!feedCta && feedCta[1] === 'Shop the tee', `got ${JSON.stringify(feedCta)}`);
+  check('C4 meta_feed_1_1 does not carry a CTA BUTTON role either (CTA removed everywhere, 2026-09-07)',
+    !feedCta, `got ${JSON.stringify(feedCta)}`);
 
   // Simulate the exact append logic from renderDirectImage: only fires
   // when the role is present.
@@ -152,9 +159,9 @@ check('C3 pure white on a pure black fill', direct.deriveCtaColors({ accentColor
   check('C4 [THE ABSENCE CASE] stories prompt gets NO CTA colour/casing directive (would contradict the "no CTA" instruction)',
     storiesPrompt === builtStories.prompt);
   const feedPrompt = appendCtaDirectivesIfDrawn(builtFeed.prompt, builtFeed.text, VUORI_BRAND);
-  check('C4 feed prompt DOES get both directives appended',
-    feedPrompt.includes('CTA BUTTON CASING') && feedPrompt.includes('CTA BUTTON COLOUR'));
-  check('C4-revert-prove: without the built.text gate, the directive would have been appended to Stories too (the regression this guards)',
+  check('C4 feed prompt ALSO gets no CTA colour/casing directive now (no surface draws a CTA any more)',
+    feedPrompt === builtFeed.prompt);
+  check('C4-revert-prove: without the built.text gate, the directive would still be appendable in principle (the pure function itself still works — proves the gate, not the function, is what suppresses it)',
     `${builtStories.prompt}\n\n${direct.ctaCasingDirective('Shop the tee')}`.includes('CTA BUTTON CASING'));
 }
 

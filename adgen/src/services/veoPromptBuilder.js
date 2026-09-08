@@ -692,25 +692,38 @@ function lifestyleVideoGuidanceForIntent(intentKey) {
 // long note at its push site inside buildVeoPrompt for why this replaced
 // 14,883 bytes of directive objects and what that deliberately gave up.
 //
-// Byte-exact to the measured artifact
-// (scratchpad/gemini-direct/native-generic/CORE.txt, 1159 B,
-// sha256 67899bcfdf16…) EXCEPT the leading duration, which is interpolated
-// so the prompt can never claim a length the render is not. At the
-// production default of 10s this function reproduces that file byte-for-byte
-// — pinned by scripts/verifyCorePrompt.js, which holds the sha256 rather
-// than a paraphrase.
+// UPDATED 2026-09-07 (owner-directed): the lead sentence now opens with an
+// explicit "exactly three distinct clips, ~3s each, edited into one seamless
+// master" structural constraint, replacing the single continuous-camera
+// framing that was there. Every other sentence is untouched, byte-identical
+// to the 2026-09-02/03 measured artifact below. This is the one deliberate
+// exception to "test a variant, do not edit in place" two paragraphs down —
+// a direct, explicit owner instruction to modify this exact text, not an
+// unmeasured tweak. New measured artifact: 1508 B at duration=10,
+// sha256 442d22a9… — pinned in scripts/verifyOperatorPromptPrecedence.js
+// (not scripts/verifyCorePrompt.js, which does not exist in this repo —
+// that was always a stale reference in the original 2026-09-03 comment).
 //
-// DO NOT reword this to tidy it up. Two precedents: PR #61 hardened the video
-// prompt and was rolled back in full ("the previous output was better"), and
-// static-fidelity-block-ab measured rewriting a fidelity block as a NULL
-// RESULT across 4 cells. It also deliberately says "Meta" on PMax
-// destinations — kept because that is the text that was measured. Test a
-// variant against this one; do not edit it in place.
+// Byte-exact to the ORIGINAL measured artifact
+// (scratchpad/gemini-direct/native-generic/CORE.txt, 1159 B,
+// sha256 67899bcfdf16…) for every sentence EXCEPT the new lead above and the
+// leading duration, which is interpolated so the prompt can never claim a
+// length the render is not.
+//
+// DO NOT reword the rest of this to tidy it up. Two precedents: PR #61
+// hardened the video prompt and was rolled back in full ("the previous
+// output was better"), and static-fidelity-block-ab measured rewriting a
+// fidelity block as a NULL RESULT across 4 cells. It also deliberately says
+// "Meta" on PMax destinations — kept because that is the text that was
+// measured; Meta-vs-PMax customization was reconsidered 2026-09-07 and
+// rejected again for the same reason.
 function corePromptText(durationSec) {
   const secs = Number(durationSec) > 0 ? Number(durationSec) : 10;
   const dur = Number.isInteger(secs) ? String(secs) : secs.toFixed(1);
   return (
-    `${dur}-second premium Meta product commercial. Photoreal. Social-ad energy is welcome: camera may push, pull, pan, orbit, or cut; a wearer may turn, walk, or shift weight. None of that is a problem.\n` +
+    `${dur}-second premium Meta product commercial composed of exactly three distinct clips. The final master video must contain only these three clips — no additional shots, scenes, inserts, cutaways, split screens, or montage frames. Each clip should run approximately 3 seconds, and the three clips should be edited together to create one seamless ${dur}-second master video.\n` +
+    `\n` +
+    `Photoreal. Social-ad energy is welcome: camera may push, pull, pan, orbit, or cut between the three clips; a wearer may turn, walk, or shift weight. None of that is a problem.\n` +
     `\n` +
     `The product surface is the only hard lock. The supplied photos are the sole source of truth for every logo, wordmark, printed letter, graphic, seam, stitch, zipper, button, grommet, drawcord, mesh panel, hardware, and colourway. Copy those marks from the photos. Do not redraw, restyle, sharpen-with-fill, or substitute a "similar" icon.\n` +
     `\n` +
