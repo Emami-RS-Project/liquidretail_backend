@@ -574,7 +574,23 @@ export function resolveSlotContentCore(slot, meta, ctx = null) {
         const itemCharCap = 40;
         const items = arr
           .filter((v) => v != null && String(v).trim() !== '')
-          .map((v) => truncateWordSafe(String(v).trim(), itemCharCap))
+          .map((v) => {
+            const rawItem = String(v).trim();
+            const out = truncateWordSafe(rawItem, itemCharCap);
+            if (out !== rawItem && ctx && typeof ctx.onClamp === 'function') {
+              try {
+                ctx.onClamp({
+                  slot: slot.key,
+                  kind: 'clip',
+                  fromChars: rawItem.length,
+                  toChars: out.length,
+                  cap: itemCharCap,
+                  method: 'truncateWordSafe',
+                });
+              } catch (_) { /* telemetry must never fail paint */ }
+            }
+            return out;
+          })
           .slice(0, cap);
         if (items.length > 0) return items;
       }
@@ -619,15 +635,35 @@ export function resolveSlotContentCore(slot, meta, ctx = null) {
       }
       const charCap = deriveCharCap(slot.key, capCtx);
       if (!charCap) return raw;
-      // productName gets the noun-preserving fitter (drop leading modifiers
-      // before ever clamping the tail) — every other slot (quote, headline,
-      // …) keeps the plain tail-safe cap unchanged. A customer quote or a
-      // Director headline is not "[modifiers][noun]" shaped, and PR #250
-      // depends on the quote's OPENING clause surviving untouched — this
-      // must stay scoped to productName alone.
-      return slot.key === 'productName'
+      // The noun-preserving fitter's whole justification (see its docstring
+      // above, and backend PR #254) is that a CATALOG TITLE reads as
+      // "[modifiers][noun]" — dropping leading words trades adjectives for
+      // legibility while the noun that identifies the product survives.
+      // That assumption is true of the `productName` META FIELD, not of the
+      // `productName` SLOT KEY it happens to render into. On a brand-mode
+      // endcard, DEFAULT_BRAND_MODE_BIND substitutes the brand TAGLINE into
+      // this slot (chain = ['brandTagline','headline']) — prose, not a
+      // modifier-stacked catalog title. Dropping ITS leading words can flip
+      // meaning ("Not for everyone…" → "for everyone…"). Gate the fitter on
+      // which FIELD supplied the text (`entry`), not on the slot key. Ported
+      // from adgen 2026-09-08 (Lane B) so the two remotion copies agree.
+      const isCatalogProductTitle = slot.key === 'productName' && entry === 'productName';
+      const out = isCatalogProductTitle
         ? fitProductNameToCap(raw, charCap)
         : truncateWordSafe(raw, charCap);
+      if (out !== raw && capCtx && typeof capCtx.onClamp === 'function') {
+        try {
+          capCtx.onClamp({
+            slot: slot.key,
+            kind: 'clip',
+            fromChars: raw.length,
+            toChars: out.length,
+            cap: charCap,
+            method: isCatalogProductTitle ? 'fitProductNameToCap' : 'truncateWordSafe',
+          });
+        } catch (_) { /* telemetry must never fail paint */ }
+      }
+      return out;
     }
   }
   return null;

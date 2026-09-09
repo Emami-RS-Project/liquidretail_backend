@@ -153,8 +153,8 @@ async function run() {
     && /'description-sentence'/.test(schemaSrc)
     && /'flash'/.test(schemaSrc)
   );
-  check('A6b adgen CatalogProduct omits marketingLineSource (backend-only ingest fork)',
-    !/marketingLineSource:/.test(adgenSchemaSrc)
+  check('A6b adgen CatalogProduct declares marketingLineSource for claim-ceiling T2 reads',
+    /marketingLineSource:/.test(adgenSchemaSrc)
   );
   check('A6c adgen still declares marketingLine (shared field, not the ingest source stamp)',
     /marketingLine:/.test(adgenSchemaSrc)

@@ -415,8 +415,8 @@ function runStructural() {
   check('B7 DIRECTOR_PRODUCT_BENEFITS=true in defaults.env',
     /^DIRECTOR_PRODUCT_BENEFITS=true$/m.test(envSrc));
 
-  check('B8 DIRECTOR_SIGNALS_VERSION is 3.6.0',
-    /const DIRECTOR_SIGNALS_VERSION = '3\.6\.0'/.test(directorSrc));
+  check('B8 DIRECTOR_SIGNALS_VERSION is 3.7.0',
+    /const DIRECTOR_SIGNALS_VERSION = '3\.7\.0'/.test(directorSrc));
   check('B8b PERSONAS rule forbids quote authors',
     /Never use a persona as a quote author/.test(directorSrc));
   check('B8c assembleSignals assigns personas only inside directorBrandPersonasEnabled()',
@@ -461,14 +461,14 @@ function runStructural() {
     let failedAsExpected = false;
     withTempMutation(
       DIRECTOR_PATH,
+      "const DIRECTOR_SIGNALS_VERSION = '3.7.0';",
       "const DIRECTOR_SIGNALS_VERSION = '3.6.0';",
-      "const DIRECTOR_SIGNALS_VERSION = '3.5.0';",
       (mutSrc) => {
-        failedAsExpected = /const DIRECTOR_SIGNALS_VERSION = '3\.5\.0'/.test(mutSrc)
-          && !/const DIRECTOR_SIGNALS_VERSION = '3\.6\.0'/.test(mutSrc);
+        failedAsExpected = /const DIRECTOR_SIGNALS_VERSION = '3\.6\.0'/.test(mutSrc)
+          && !/const DIRECTOR_SIGNALS_VERSION = '3\.7\.0'/.test(mutSrc);
       }
     );
-    check('RP-B8 [REVERT-PROOF] leaving version at 3.5.0 fails B8',
+    check('RP-B8 [REVERT-PROOF] leaving version at 3.6.0 fails B8',
       failedAsExpected);
   }
 

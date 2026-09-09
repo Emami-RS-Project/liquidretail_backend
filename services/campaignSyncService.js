@@ -10,6 +10,30 @@
 const IntegrationCredential = require('../models/IntegrationCredential');
 const Campaign = require('../models/Campaign');
 const { concurrency: CONC } = require('./concurrency');
+const { GOOGLE_ADS_API_VERSION } = require('./googleAdsApiVersion');
+
+const ALERTABLE_SYNC_CLASSES = Object.freeze(['version-rejected', 'unauthorized']);
+const ERROR_MESSAGE_CAP = 500;
+
+let _alertService = null;
+let _IntegrationCredential = null;
+let _adapters = null;
+let _progressService = null;
+
+function _setDeps(deps = {}) {
+  if ('alertService' in deps) _alertService = deps.alertService;
+  if ('IntegrationCredential' in deps) _IntegrationCredential = deps.IntegrationCredential;
+  if ('adapters' in deps) _adapters = deps.adapters;
+  if ('progressService' in deps) _progressService = deps.progressService;
+}
+
+function alerts() {
+  return _alertService || require('./alertService');
+}
+
+function credModel() {
+  return _IntegrationCredential || IntegrationCredential;
+}
 
 // Adapter registry. Each adapter exports:
 //   syncForCredential(credDoc) → { ok, campaigns: [normalizedCampaign], errors: [] }
@@ -22,7 +46,152 @@ const ADAPTERS = {
 };
 
 function adapterFor(type) {
+  if (_adapters && Object.prototype.hasOwnProperty.call(_adapters, type)) {
+    return _adapters[type];
+  }
   return ADAPTERS[type] || null;
+}
+
+function extractErrorBits(errOrReason) {
+  if (errOrReason == null) return { httpStatus: null, status: '', message: '', code: '' };
+  if (typeof errOrReason === 'string') {
+    return { httpStatus: null, status: '', message: errOrReason, code: '' };
+  }
+  const data = errOrReason.response?.data || {};
+  const apiErr = data.error || {};
+  const message = apiErr.message
+    || data.error_description
+    || (typeof apiErr === 'string' ? apiErr : '')
+    || errOrReason.reason
+    || errOrReason.message
+    || '';
+  const status = (typeof apiErr === 'object' && apiErr.status) ? apiErr.status : '';
+  const httpStatus = errOrReason.response?.status
+    || errOrReason.httpStatus
+    || (typeof apiErr === 'object' && typeof apiErr.code === 'number' ? apiErr.code : null)
+    || null;
+  const code = (typeof apiErr === 'object' && apiErr.status)
+    || (typeof data.error === 'string' ? data.error : '')
+    || errOrReason.code
+    || '';
+  return {
+    httpStatus,
+    status: String(status || ''),
+    message: String(message || ''),
+    code: String(code || '')
+  };
+}
+
+function looksLikeVersionRejected(blob, httpStatus) {
+  if (/unimplemented|not implemented/.test(blob)) return true;
+  if (/requested api version|api version is not|unsupported (api )?version|no such version|unknown api version|has been sunset|version is deprecated/.test(blob)) return true;
+  if (/unrecognized field|unknown field|invalid field name|query.?error/.test(blob)) return true;
+  if (httpStatus === 404 && /googleads\.googleapis\.com|\bv1\d\b|version/.test(blob)) return true;
+  return false;
+}
+
+function looksLikeUnauthorized(blob, httpStatus) {
+  if (httpStatus === 401 || httpStatus === 403) return true;
+  if (/unauthenticated|permission_denied|invalid_grant|unauthorized|authenticationerror|authorizationerror/.test(blob)) return true;
+  if (/developer.?token not set|access-token refresh failed/.test(blob)) return true;
+  return false;
+}
+
+function looksLikeTransient(blob, httpStatus) {
+  if (httpStatus === 429 || (httpStatus >= 500 && httpStatus < 600)) return true;
+  if (/timeout|econnreset|enotfound|eai_again|rate.?limit|etimedout|socket hang up/.test(blob)) return true;
+  return false;
+}
+
+// CLASSIFY_VERSION_REJECTED_MARK — unique so the harness can mutate it.
+function classifyCampaignSyncError(errOrReason) {
+  const bits = extractErrorBits(errOrReason);
+  const blob = `${bits.httpStatus || ''} ${bits.status} ${bits.code} ${bits.message}`.toLowerCase();
+  if (looksLikeVersionRejected(blob, bits.httpStatus)) {
+    return { class: 'version-rejected', ...bits };
+  }
+  if (looksLikeUnauthorized(blob, bits.httpStatus)) {
+    return { class: 'unauthorized', ...bits };
+  }
+  if (looksLikeTransient(blob, bits.httpStatus)) {
+    return { class: 'transient', ...bits };
+  }
+  return { class: 'other', ...bits };
+}
+
+function isAlertableCampaignSyncError(classified) {
+  return ALERTABLE_SYNC_CLASSES.includes(classified && classified.class);
+}
+
+// Credential-persisted de-dupe. alertService.minCount=2 cannot page a
+// 6-hourly job (ALERT_THRESHOLD_WINDOW_MIN default 30m < cadence), so
+// the first alertable failure pages and lastCampaignSyncAlertedAt
+// suppresses repeats of the SAME class until a successful sync clears it.
+function shouldPageCampaignSyncFailure({ errorClass, prevClass, prevAlertedAt }) {
+  if (!ALERTABLE_SYNC_CLASSES.includes(errorClass)) return false;
+  if (prevAlertedAt && prevClass === errorClass) return false;
+  return true;
+}
+
+function clipErrorMessage(s) {
+  const str = String(s || '');
+  return str.length <= ERROR_MESSAGE_CAP ? str : `${str.slice(0, ERROR_MESSAGE_CAP - 1)}…`;
+}
+
+async function saveCredSafe(cred) {
+  if (!cred || typeof cred.save !== 'function') return;
+  try { await cred.save(); }
+  catch (err) {
+    console.warn(`   ⚠️  campaign-sync breadcrumb save failed for cred=${cred._id}: ${err.message}`);
+  }
+}
+
+function clearCampaignSyncErrorFields(cred) {
+  cred.lastCampaignSyncError = null;
+  cred.lastCampaignSyncErrorAt = null;
+  cred.lastCampaignSyncErrorClass = null;
+  cred.lastCampaignSyncAlertedAt = null;
+}
+
+async function recordCampaignSyncFailure(cred, { platform, err, reason }) {
+  const classified = classifyCampaignSyncError(err || reason);
+  const prevClass = cred.lastCampaignSyncErrorClass || null;
+  const prevAlertedAt = cred.lastCampaignSyncAlertedAt || null;
+  cred.lastCampaignSyncError = clipErrorMessage(classified.message || reason || 'unknown');
+  cred.lastCampaignSyncErrorAt = new Date();
+  cred.lastCampaignSyncErrorClass = classified.class;
+
+  const page = shouldPageCampaignSyncFailure({
+    errorClass: classified.class,
+    prevClass,
+    prevAlertedAt
+  });
+  if (page) {
+    try {
+      const delivered = await alerts().notify({
+        level: 'error',
+        title: classified.class === 'version-rejected'
+          ? `${platform} campaign sync rejected — API version or query dialect`
+          : `${platform} campaign sync unauthorized`,
+        detail: clipErrorMessage(classified.message || reason || 'unknown'),
+        fields: {
+          platform,
+          credentialId: String(cred._id || ''),
+          brandId:      String(cred.brandId || ''),
+          errorClass:   classified.class,
+          errorCode:    classified.code || classified.status || '-',
+          httpStatus:   classified.httpStatus == null ? '-' : String(classified.httpStatus),
+          ...(platform === 'google-ads' ? { apiVersion: GOOGLE_ADS_API_VERSION } : {})
+        },
+        key: `campaign-sync:${platform}:${classified.class}:${cred._id}`,
+      });
+      if (delivered) cred.lastCampaignSyncAlertedAt = new Date();
+    } catch (alertErr) {
+      console.warn(`   ⚠️  campaign-sync alert threw for cred=${cred._id}: ${alertErr.message}`);
+    }
+  }
+  await saveCredSafe(cred);
+  return classified;
 }
 
 // Public entry — sync one credential, or every active credential of
@@ -39,7 +208,7 @@ async function syncCampaigns({ brandId, platform, credentialId }) {
 
   const filter = { brandId, type: platform, status: 'active' };
   if (credentialId) filter._id = credentialId;
-  const creds = await IntegrationCredential.find(filter);
+  const creds = await credModel().find(filter);
   if (!creds.length) {
     return { ok: false, reason: `no active ${platform} credential for this brand${credentialId ? ` matching ${credentialId}` : ''}` };
   }
@@ -48,7 +217,8 @@ async function syncCampaigns({ brandId, platform, credentialId }) {
   const summary = { ok: true, perCredential: [], totalUpserted: 0, totalErrors: 0 };
 
   // Unified progress row (ActivityDock) — cancellable between credentials.
-  const { startRun, CancelledError } = require('./progressService');
+  const progress = _progressService || require('./progressService');
+  const { startRun, CancelledError } = progress;
   const run = await startRun({ kind: 'campaign-sync', advertiserId: creds[0].advertiserId, brandId, label: `${platform} campaign sync` });
 
   for (const cred of creds) {
@@ -66,12 +236,27 @@ async function syncCampaigns({ brandId, platform, credentialId }) {
       result = await adapter.syncForCredential(cred);
     } catch (err) {
       console.warn(`   ⚠️  campaign sync threw for cred=${cred._id}: ${err.message}`);
-      summary.perCredential.push({ credentialId: String(cred._id), ok: false, reason: err.message });
+      const classified = await recordCampaignSyncFailure(cred, { platform, err, reason: err.message });
+      summary.perCredential.push({
+        credentialId: String(cred._id),
+        ok: false,
+        reason: err.message,
+        errorClass: classified.class
+      });
       summary.totalErrors++;
       continue;
     }
     if (!result?.ok) {
-      summary.perCredential.push({ credentialId: String(cred._id), ok: false, reason: result?.reason || 'unknown' });
+      const classified = await recordCampaignSyncFailure(cred, {
+        platform,
+        reason: result?.reason || 'unknown'
+      });
+      summary.perCredential.push({
+        credentialId: String(cred._id),
+        ok: false,
+        reason: result?.reason || 'unknown',
+        errorClass: classified.class
+      });
       summary.totalErrors++;
       continue;
     }
@@ -92,7 +277,8 @@ async function syncCampaigns({ brandId, platform, credentialId }) {
     }
     cred.lastUsedAt = new Date();
     cred.lastCampaignSyncAt = new Date();
-    await cred.save();
+    clearCampaignSyncErrorFields(cred);
+    await saveCredSafe(cred);
     summary.perCredential.push({
       credentialId: String(cred._id),
       ok: true,
@@ -225,5 +411,10 @@ module.exports = {
   ADAPTERS,
   syncCampaigns,
   upsertCampaign,
-  getCampaignStatus
+  getCampaignStatus,
+  classifyCampaignSyncError,
+  isAlertableCampaignSyncError,
+  shouldPageCampaignSyncFailure,
+  ALERTABLE_SYNC_CLASSES,
+  _setDeps
 };

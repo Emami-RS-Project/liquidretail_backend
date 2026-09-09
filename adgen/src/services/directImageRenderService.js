@@ -1650,7 +1650,7 @@ function selectRotatedQuote(proof, campaignRunId, opts = {}) {
   });
 }
 
-function buildIntentData({ concept, layoutInput, brand, product = null, cta, campaignRunId = null, media = null, funnelStage = null }) {
+function buildIntentData({ concept, layoutInput, brand, product = null, cta, campaignRunId = null, media = null, funnelStage = null, claimCorpus = null }) {
   // Dual-read v3 copy / v2 copy_picks. Never invent a headline from product name.
   const copy = renderableCopy(concept);
   let proof = layoutInput?.social_proof || {};
@@ -1900,6 +1900,28 @@ function buildIntentData({ concept, layoutInput, brand, product = null, cta, cam
   } else {
     headline = copy.headline ? String(copy.headline).trim() : undefined;
     // subhead stays undefined — pre-change shape
+  }
+
+  // Advertiser claim ceiling — after the 3-tier cascade so a T3 tagline
+  // fallback is licensed, and a Director paraphrase is not. Flag-off is
+  // identity. Quotes are not gated here (toPrintableCustomerQuote above).
+  {
+    const {
+      claimCeilingEnforced,
+      assembleAdvertiserClaimCorpus,
+      applyClaimCeilingToText,
+    } = require('./advertiserClaimCorpus');
+    if (claimCeilingEnforced()) {
+      const corpus = claimCorpus || assembleAdvertiserClaimCorpus({
+        brand,
+        product,
+      });
+      const productId = product && (product._id || product.id) || null;
+      const h = applyClaimCeilingToText(headline, corpus, { productId });
+      headline = h == null || h === '' ? undefined : h;
+      const s = applyClaimCeilingToText(subhead, corpus, { productId });
+      subhead = s == null || s === '' ? undefined : s;
+    }
   }
 
   // ── ONE tier-coherence chokepoint, now shared with the video path ────────
@@ -2589,7 +2611,7 @@ async function renderDirectImage(callArgs = {}) {
     LayoutInputArtifact.findById(layoutInputArtifactId).select('input brandId productId').lean(),
     resolveConcept({ adConceptArtifactId, adConceptId, expectedProductId: productId }),
     brandId ? Brand.findById(brandId).lean() : null,
-    productId ? CatalogProduct.findById(productId).select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb contentIndex').lean() : null,
+    productId ? CatalogProduct.findById(productId).select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb contentIndex pdpMaterialFacts pdpSpecFacts pdpFaqAnswers marketingLine marketingLineSource').lean() : null,
     // classification + technicalInsights feed resolveSeedStyle for the
     // lifestyle scene-preserve branch (STATIC_LIFESTYLE_PRESERVE).
     // width + height feed seedAspectFromDims → resolveAspectTreatment's
@@ -2646,7 +2668,7 @@ async function renderDirectImage(callArgs = {}) {
       { alertLevel: 'fatal', alertKey: 'direct-image:no-credentials' }
     );
   }
-  const resolvedProduct = product || (effectiveLayout.productId ? await CatalogProduct.findById(effectiveLayout.productId).select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb contentIndex').lean() : null);
+  const resolvedProduct = product || (effectiveLayout.productId ? await CatalogProduct.findById(effectiveLayout.productId).select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb contentIndex pdpMaterialFacts pdpSpecFacts pdpFaqAnswers marketingLine marketingLineSource').lean() : null);
   // Delivery dims are NOT derived here any more: they come from the surface the
   // prompt is built from, a few lines below, so the size Sharp writes and the
   // size the geometry block promised the model cannot disagree.
@@ -2732,6 +2754,22 @@ async function renderDirectImage(callArgs = {}) {
   // derivable from "1:1".
   adStage(adId, `building prompt + geometry (${surface})`);
   const intentKey = intentForTemplate(template);
+  let claimCorpus = null;
+  {
+    const { claimCeilingEnforced, loadAdvertiserClaimCorpus } = require('./advertiserClaimCorpus');
+    if (claimCeilingEnforced()) {
+      try {
+        claimCorpus = await loadAdvertiserClaimCorpus({
+          brandId: resolvedBrand && (resolvedBrand._id || resolvedBrand.id),
+          productId: resolvedProduct && (resolvedProduct._id || resolvedProduct.id),
+          brand: resolvedBrand,
+          product: resolvedProduct,
+        });
+      } catch (_) {
+        claimCorpus = { spans: [], absent: true, assembledAt: new Date() };
+      }
+    }
+  }
   const intentData = buildIntentData({
     concept,
     layoutInput: effectiveLayout.input || {},
@@ -2741,7 +2779,8 @@ async function renderDirectImage(callArgs = {}) {
     // Same quote on every size of this run, a different one next run.
     campaignRunId,
     media,
-    funnelStage
+    funnelStage,
+    claimCorpus,
   });
   // Lifestyle/UGC scene preserve — intent still owns copy; only the scene
   // fidelity opening swaps when the flag is on (staticAdIntents).

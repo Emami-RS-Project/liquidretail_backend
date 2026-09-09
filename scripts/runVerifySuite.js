@@ -193,6 +193,7 @@ const UNSAFE_FOR_PARALLEL = new Set([
   //   services/layoutInputService.js,
   //   services/contentInventory.js,
   //   services/metaCascadeConfig.js      ← verifyContentAtomDualRead
+  //   services/aiCreativeDirectorService ← verifyDirectorPrompt
   // Two of those files have TWO mutators each, both of which were in the
   // parallel pool — a direct write-check-restore collision on one file, plus
   // the wider hazard that any pooled harness fresh-requiring one of them
@@ -203,9 +204,16 @@ const UNSAFE_FOR_PARALLEL = new Set([
   'verifyContentAtomCompile.js',
   'verifyContentAtomDualRead.js',
   'verifyContentSufficiency.js',
+  'verifyDirectorPrompt.js',
   'verifyMarketingLine.js',
   'verifySpecFacts.js',
   'verifyBackfillPdpContent.js',
+  'verifyCopyBudgets.js',
+  // mutates services/googleAdsApiVersion.js, services/campaignSyncService.js,
+  // services/googleAdsCampaignService.js
+  'verifyGoogleAdsCampaignSync.js',
+  // mutates services/advertiserClaimCorpus.js + claimSubstantiationService.js
+  'verifyAdvertiserClaimCeiling.js',
 ]);
 
 // macOS has no `timeout(1)` binary, so this is a JS timer + child.kill(),

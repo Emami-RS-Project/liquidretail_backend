@@ -574,7 +574,23 @@ export function resolveSlotContentCore(slot, meta, ctx = null) {
         const itemCharCap = 40;
         const items = arr
           .filter((v) => v != null && String(v).trim() !== '')
-          .map((v) => truncateWordSafe(String(v).trim(), itemCharCap))
+          .map((v) => {
+            const rawItem = String(v).trim();
+            const out = truncateWordSafe(rawItem, itemCharCap);
+            if (out !== rawItem && ctx && typeof ctx.onClamp === 'function') {
+              try {
+                ctx.onClamp({
+                  slot: slot.key,
+                  kind: 'clip',
+                  fromChars: rawItem.length,
+                  toChars: out.length,
+                  cap: itemCharCap,
+                  method: 'truncateWordSafe',
+                });
+              } catch (_) { /* telemetry must never fail paint */ }
+            }
+            return out;
+          })
           .slice(0, cap);
         if (items.length > 0) return items;
       }
@@ -643,9 +659,22 @@ export function resolveSlotContentCore(slot, meta, ctx = null) {
       // excluded for the same shape reason (PR #250's quote-opening-clause
       // guarantee) — this closes the same gap for the tagline substitution.
       const isCatalogProductTitle = slot.key === 'productName' && entry === 'productName';
-      return isCatalogProductTitle
+      const out = isCatalogProductTitle
         ? fitProductNameToCap(raw, charCap)
         : truncateWordSafe(raw, charCap);
+      if (out !== raw && capCtx && typeof capCtx.onClamp === 'function') {
+        try {
+          capCtx.onClamp({
+            slot: slot.key,
+            kind: 'clip',
+            fromChars: raw.length,
+            toChars: out.length,
+            cap: charCap,
+            method: isCatalogProductTitle ? 'fitProductNameToCap' : 'truncateWordSafe',
+          });
+        } catch (_) { /* telemetry must never fail paint */ }
+      }
+      return out;
     }
   }
   return null;

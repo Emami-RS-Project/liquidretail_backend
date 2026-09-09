@@ -19,6 +19,11 @@
 //   B2ADD1          atoms may still fill a genuinely empty Mixed tier
 //   R3              primedAtomsByProduct is TTL+LRU bounded; empty inventory
 //                   unprimes
+//   R1              atom path runs colourway/printable/rating gates; a colour-
+//                   language inherited quote cannot beat a colour-free product
+//                   quote; mismatch falls through to Mixed
+//   R5              per-list caps; a product at compile caps (80+40) still
+//                   yields a non-empty inherited tier
 //   RATINGAGREE1    contentIndex.ratingPolicy matches live ratingDisplay
 //   BENEFITCASCADE1 flag-off cascade has no atoms entry; flag-on wins then
 //                   falls through
@@ -105,11 +110,12 @@ function makeAtom({
   rating = 5,
   printable = true,
   c50,
+  _id,
 } = {}) {
   const full = String(text);
   const snip = c50 != null ? c50 : (full.length <= 50 ? full : full.slice(0, 47).replace(/\s+\S*$/, '').trim());
   return {
-    _id: oid(),
+    _id: _id || oid(),
     type,
     status: 'active',
     owner: { kind: ownerKind, id: ownerId || oid() },
@@ -143,6 +149,7 @@ const { resolveField } = require('../services/metaCascadeResolver');
 const { resolveCoherentSocialProof, formatDisplayRating, normalizeReviewCount, RATING_STAR_MIN, RATING_STAR_VOLUME_MIN, RATING_STAR_VOLUME_COUNT_MIN, BRAND_VOLUME_EXCEPTION_ENABLED } = require('../services/ratingDisplay');
 const { quoteFingerprint, reviewKey } = require('../services/quoteRotationService');
 const compiler = require('../services/contentCompiler');
+const { withMutatedSource } = require('./lib/harnessMutate');
 const adgenInv = require('../adgen/src/services/contentInventory');
 const adgenCfg = require('../adgen/src/services/metaCascadeConfig');
 const adgenLis = require('../adgen/src/services/layoutInputService');
@@ -644,6 +651,96 @@ async function run() {
   inv._setModels(null);
   inv._resetCache();
 
+  // ── R1 selection-time colourway/printable/rating gates on the atom path ──
+  const GREEN_QUOTE = 'These green sneakers are the most comfortable shoes I have ever worn. I bought a second pair the next week.';
+  const COLOURWAY_TITLE = 'Roma Sneaker | White - Wine';
+  setFlag('true');
+  inv._resetCache();
+  const colourFreeAtom = makeAtom({ ownerKind: 'product', ownerId: productId, text: QUOTE_TEXT });
+  const greenProductAtom = makeAtom({ ownerKind: 'product', ownerId: productId, text: GREEN_QUOTE });
+  const greenInheritedAtom = makeAtom({ ownerKind: 'brand', ownerId: brandId, text: GREEN_QUOTE });
+  inv.primeProductAtoms(productId, [colourFreeAtom, greenInheritedAtom]);
+  const r1Pick = lis.pickPrimaryProductQuote(PRODUCT_REVIEWS, { productId, productTitle: COLOURWAY_TITLE });
+  check('R1 colour-free product atom wins over inherited colour-language',
+    !!(r1Pick && r1Pick.text === QUOTE_TEXT));
+  check('R1 winner is not the green inherited quote',
+    !!(r1Pick && r1Pick.text !== GREEN_QUOTE));
+  const r1BrandPool = lis.prepareQuotePool(null, [], 'brand', COLOURWAY_TITLE, { productId });
+  check('R1 inherited colour-language quote is not in the brand pool',
+    Array.isArray(r1BrandPool) && !r1BrandPool.some((q) => /green/i.test(q && q.text)));
+  inv.primeProductAtoms(productId, [greenProductAtom]);
+  const r1Rescue = lis.pickPrimaryProductQuote(PRODUCT_REVIEWS, { productId, productTitle: COLOURWAY_TITLE });
+  check('R1 colour-mismatch product atom falls through to Mixed colour-free',
+    !!(r1Rescue && r1Rescue.text === QUOTE_TEXT));
+  check('R1 flag-on mismatch does not select the green atom as primary',
+    !!(r1Rescue && r1Rescue.text !== GREEN_QUOTE));
+  adgenInv._resetCache();
+  adgenInv.primeProductAtoms(productId, [greenProductAtom]);
+  const r1AdgenRescue = adgenLis.pickPrimaryProductQuote(PRODUCT_REVIEWS, { productId, productTitle: COLOURWAY_TITLE });
+  check('R1 adgen colour-mismatch also falls through to Mixed colour-free',
+    !!(r1AdgenRescue && r1AdgenRescue.text === QUOTE_TEXT));
+  setFlag(undefined);
+  inv._resetCache();
+  adgenInv._resetCache();
+
+  // ── R5 READ_CAP cannot starve the inherited tier ──────────────────
+  check('R5 PRODUCT_READ_CAP is 80 (compile ATOM_IDS_CAP)', inv.PRODUCT_READ_CAP === 80);
+  check('R5 INHERITED_READ_CAP is 40 (compile INHERITED_IDS_CAP)', inv.INHERITED_READ_CAP === 40);
+  check('R5 READ_CAP is the sum, not a global 50', inv.READ_CAP === 120);
+  check('R5 PRIME_CACHE_MAX is still 256', inv.PRIME_CACHE_MAX === 256);
+  const capProductIds = Array.from({ length: inv.PRODUCT_READ_CAP }, () => oid());
+  const capInheritedIds = Array.from({ length: inv.INHERITED_READ_CAP }, () => oid());
+  const capProductAtoms = capProductIds.map((id) => makeAtom({
+    _id: id,
+    ownerKind: 'product',
+    ownerId: productId,
+    text: QUOTE_TEXT,
+  }));
+  const capInheritedAtoms = capInheritedIds.map((id) => makeAtom({
+    _id: id,
+    ownerKind: 'brand',
+    ownerId: brandId,
+    text: 'Everyone in the shop raves about the quality of these sneakers across the whole line.',
+  }));
+  inv._resetCache();
+  inv._setModels({
+    CatalogProduct: {
+      findOne() {
+        return {
+          select() { return this; },
+          lean() {
+            return Promise.resolve({
+              contentIndex: {
+                compiledAt: new Date(),
+                atomIds: capProductIds,
+                inheritedAtomIds: capInheritedIds,
+              },
+            });
+          },
+        };
+      },
+    },
+    ContentAtom: {
+      find(q) {
+        const wanted = new Set(((q && q._id && q._id.$in) || []).map(String));
+        const all = capProductAtoms.concat(capInheritedAtoms);
+        return { lean() { return Promise.resolve(all.filter((a) => wanted.has(String(a._id)))); } };
+      },
+    },
+  });
+  const capInv = await inv.loadInventory(productId);
+  const capProductTier = inv.loadPrintableQuoteAtomsForProduct(productId, { tier: 'product' });
+  const capInheritedTier = inv.loadPrintableQuoteAtomsForProduct(productId, { tier: 'brand' });
+  check('R5 compile-cap load hydrates product-owned atoms',
+    Array.isArray(capProductTier) && capProductTier.length === inv.PRODUCT_READ_CAP);
+  check('R5 compile-cap load yields a non-empty inherited tier',
+    Array.isArray(capInheritedTier) && capInheritedTier.length === inv.INHERITED_READ_CAP,
+    `inherited=${capInheritedTier && capInheritedTier.length}`);
+  check('R5 ordered atoms include both lists',
+    Array.isArray(capInv.atoms) && capInv.atoms.length === inv.READ_CAP);
+  inv._setModels(null);
+  inv._resetCache();
+
   // ── R revert-prove ────────────────────────────────────────────────
   const lisOrig = fs.readFileSync(LIS_PATH, 'utf8');
   const invOrig = fs.readFileSync(INV_PATH, 'utf8');
@@ -946,6 +1043,104 @@ async function run() {
   check('R cmp layoutInputService clean', fs.readFileSync(LIS_PATH, 'utf8') === lisOrig);
   check('R cmp contentInventory clean', fs.readFileSync(INV_PATH, 'utf8') === invOrig);
   check('R cmp metaCascadeConfig clean', fs.readFileSync(CFG_PATH, 'utf8') === cfgOrig);
+
+  // New pins use withMutatedSource (mutate real source, re-require, assert
+  // behaviour, restore, cmp). The hand-rolled block above is the pre-existing
+  // revert-prove; do not convert it in this lane.
+  const r1GateFn = [
+    'function applySelectionGates(quotes, productTitle, tierName) {',
+    '  return stampTier(',
+    '    gateQuotesByColourway(',
+    '      gateQuotesByRating(printableQuotes(quotes, tierName), tierName),',
+    '      productTitle,',
+    '      tierName',
+    '    ),',
+    '    tierName',
+    '  );',
+    '}',
+  ].join('\n');
+  const r1GateBroken = [
+    'function applySelectionGates(quotes, productTitle, tierName) {',
+    '  return stampTier(quotes, tierName);',
+    '}',
+  ].join('\n');
+  await withMutatedSource(LIS_PATH, r1GateFn, r1GateBroken, async (mutatedLis) => {
+    setFlag('true');
+    // The hand-rolled block above reload()s contentInventory, so the
+    // top-level `inv` binding is a stale Map. mutatedLis require()s the
+    // currently-cached copy — prime THAT one.
+    const liveInv = require(INV_PATH);
+    liveInv._resetCache();
+    liveInv.primeProductAtoms(productId, [greenProductAtom]);
+    const ungated = mutatedLis.pickPrimaryProductQuote(PRODUCT_REVIEWS, { productId, productTitle: COLOURWAY_TITLE });
+    check('R-R1 skipping selection gates lets the colour-mismatch atom win primary',
+      !!(ungated && ungated.text === GREEN_QUOTE));
+    console.log('\n── R-R1 revert transcript ──');
+    console.log(JSON.stringify({
+      title: COLOURWAY_TITLE,
+      mixedText: QUOTE_TEXT,
+      atomText: GREEN_QUOTE,
+      ungatedWinner: ungated && ungated.text,
+    }, null, 2));
+    console.log('── end R-R1 ──\n');
+    setFlag(undefined);
+    liveInv._resetCache();
+  });
+
+  const r5SliceNeedle = [
+    '  const ids = []',
+    '    .concat((Array.isArray(index.atomIds) ? index.atomIds : []).filter(Boolean).slice(0, PRODUCT_READ_CAP))',
+    '    .concat((Array.isArray(index.inheritedAtomIds) ? index.inheritedAtomIds : []).filter(Boolean).slice(0, INHERITED_READ_CAP));',
+  ].join('\n');
+  const r5SliceBroken = [
+    '  const ids = []',
+    '    .concat(Array.isArray(index.atomIds) ? index.atomIds : [])',
+    '    .concat(Array.isArray(index.inheritedAtomIds) ? index.inheritedAtomIds : [])',
+    '    .filter(Boolean)',
+    '    .slice(0, 50);',
+  ].join('\n');
+  await withMutatedSource(INV_PATH, r5SliceNeedle, r5SliceBroken, async (mutatedInv) => {
+    mutatedInv._resetCache();
+    mutatedInv._setModels({
+      CatalogProduct: {
+        findOne() {
+          return {
+            select() { return this; },
+            lean() {
+              return Promise.resolve({
+                contentIndex: {
+                  compiledAt: new Date(),
+                  atomIds: capProductIds,
+                  inheritedAtomIds: capInheritedIds,
+                },
+              });
+            },
+          };
+        },
+      },
+      ContentAtom: {
+        find(q) {
+          const wanted = new Set(((q && q._id && q._id.$in) || []).map(String));
+          const all = capProductAtoms.concat(capInheritedAtoms);
+          return { lean() { return Promise.resolve(all.filter((a) => wanted.has(String(a._id)))); } };
+        },
+      },
+    });
+    await mutatedInv.loadInventory(productId);
+    const starved = mutatedInv.loadPrintableQuoteAtomsForProduct(productId, { tier: 'brand' });
+    check('R-R5 global slice(0,50) empties the inherited tier at compile caps',
+      Array.isArray(starved) && starved.length === 0,
+      `inherited=${starved && starved.length}`);
+    console.log('\n── R-R5 revert transcript ──');
+    console.log(JSON.stringify({
+      productCap: capProductIds.length,
+      inheritedCap: capInheritedIds.length,
+      inheritedAfterGlobalSlice50: starved && starved.length,
+    }, null, 2));
+    console.log('── end R-R5 ──\n');
+    mutatedInv._setModels(null);
+    mutatedInv._resetCache();
+  });
 
   // adgen copies of the dual-read helpers stay byte-identical to backend
   // for the files that are supposed to match (contentInventory, cascade,

@@ -50,6 +50,7 @@ const { formatBrandReviewsText, formatProductReviewsText } = require('./ratingDi
 const { resolveDirectorProductRatingPair } = require('./ratingPairAtomic');
 const { ratingFurnitureEnabled, copyFailsCompliance } = require('./adCopyGuards');
 const { normalizeBenefitList } = require('./titleSpecContentSample');
+const contentInventory = require('./contentInventory');
 
 // Master switch for the proof MENU (category tier + social_proof_signal.
 // proof_options[] + routing.proof_pick). Default OFF: assembleSignals'
@@ -114,10 +115,12 @@ function shouldEmitFunnelStage(platformFormat) {
 }
 
 function mapArrivalReview(r) {
-  return {
+  const row = {
     text:   r.text || r.body || r.content,
     author: r.author || r.reviewer || r.user_name
   };
+  if (r.stage) row.stage = r.stage;
+  return row;
 }
 
 /**
@@ -171,10 +174,12 @@ function pickDirectorPrimaryQuote(product, opts) {
   };
   const picked = pickPrimaryProductQuote(product?.productReviews, opts || {});
   if (!picked || !picked.text) return null;
-  return {
+  const row = {
     text:   picked.text,
     author: picked.author_name || picked.author || null
   };
+  if (picked.stage) row.stage = picked.stage;
+  return row;
 }
 
 /**
@@ -205,12 +210,16 @@ function productQuotesForDirector(product) {
     'product',
     product?.title || null,
     (product && product._id) ? { productId: product._id } : undefined
-  ).map((q) => ({
-    text:   q.text,
-    author: q.author_name || q.author || null,
-    rating: q.rating,
-    origin: q.origin
-  })).filter((q) => typeof q.text === 'string' && q.text.trim().length > 30);
+  ).map((q) => {
+    const row = {
+      text:   q.text,
+      author: q.author_name || q.author || null,
+      rating: q.rating,
+      origin: q.origin
+    };
+    if (q.stage) row.stage = q.stage;
+    return row;
+  }).filter((q) => typeof q.text === 'string' && q.text.trim().length > 30);
 }
 
 /**
@@ -405,7 +414,11 @@ function buildDirectorProofOptions({ product, category, brand }) {
         .map(q => ({ q, score: scoreQuoteSafe(q.text) }))
         .sort((a, b) => b.score - a.score)
         .slice(0, MAX_QUOTES_PER_TIER)
-        .map(({ q }) => ({ text: snippetText(q.text, 200), author: q.author || null }))
+        .map(({ q }) => {
+          const row = { text: snippetText(q.text, 200), author: q.author || null };
+          if (q.stage) row.stage = q.stage;
+          return row;
+        })
         .filter(q => q.text)
     };
   };
@@ -427,7 +440,8 @@ const MAX_TOKENS  = 3500;         // bumped from 2000 — each concept ~300-400 
 // invalidates existing CreativeDirectionArtifact rows so the Director
 // re-runs and emits the new count / shape. Mirrors aiCanvasSpec-
 // Service.SPEC_SCHEMA_VERSION.
-const DIRECTOR_SIGNALS_VERSION = '3.6.0';   // BUMPED 2026-09-04: brand_signal.personas from Brand.demographics (DIRECTOR_BRAND_PERSONAS). Voice/objection framing only — never quote authors. Flag-off omits the key and the PERSONAS rule so inputSummary + round prompt stay byte-identical. Live path re-assembles every round; the bump is the SHADOW directConcepts cache-hit gate (one paid re-derive per cached product).
+const DIRECTOR_SIGNALS_VERSION = '3.7.0';   // BUMPED 2026-09-08: product_signal.content_sufficiency + marketing_line (provenance-aware) + pdpSpecFacts/pdpMaterialFacts/pdpFaqAnswers filling product_signal.specs + quotes[].stage carried through. CONTENT_ATOM_READ gates the new keys and the prompt sentences (flag-off Meta prompt stays byte-identical). Also primes contentInventory before quote dual-read so proof_options match the renderer. Live path re-assembles every round; the bump is the SHADOW directConcepts cache-hit gate (one paid re-derive per cached product).
+// 3.6: brand_signal.personas from Brand.demographics (DIRECTOR_BRAND_PERSONAS). Voice/objection framing only — never quote authors. Flag-off omits the key and the PERSONAS rule so inputSummary + round prompt stay byte-identical.
 // 3.5: product_signal.benefits from CatalogProduct.shortBenefits (DIRECTOR_PRODUCT_BENEFITS). Same product → same brief on first generate and every regenerate; empty until ingest/backfill has derived. Never a derivation, never an artifact read.
 // 3.4: aligned proof_options pool + quotes_by_stage (QUOTE_STAGE_AWARE).
 // 3.3: PMax-only round brief adds FUNNEL SPREAD (one concept each of awareness /
@@ -657,6 +671,92 @@ async function directConcepts({
 // the input_summary block. Deterministic (no LLM) — just bucket counts
 // into high/medium/low strength labels.
 
+// json-ld / description-sentence are merchant text. flash is gemini-2.5-flash
+// authored — generated copy, not a first-party slogan. Mirror of
+// contentCompiler.marketingLineProvenance (kept local so Director does not
+// import the compiler).
+function marketingLineProvenanceForDirector(source) {
+  const s = source == null ? '' : String(source).trim();
+  if (s === 'json-ld' || s === 'description-sentence') {
+    return { origin: 'store-import', verbatim: true };
+  }
+  if (s === 'flash') {
+    return { origin: 'synthesized', verbatim: false };
+  }
+  return { origin: 'unknown', verbatim: false };
+}
+
+function catalogSpecsForDirector(product) {
+  const fromSpecs = normalizeProductSpecs(product?.specs);
+  if (fromSpecs.length) return fromSpecs;
+  const rows = [];
+  for (const f of product?.pdpSpecFacts || []) {
+    if (f && (f.key != null || f.value != null)) rows.push({ key: f.key, value: f.value });
+  }
+  for (const f of product?.pdpMaterialFacts || []) {
+    if (f && (f.key != null || f.value != null || f.kind != null)) {
+      rows.push({ key: f.key || f.kind, value: f.value });
+    }
+  }
+  for (const f of product?.pdpFaqAnswers || []) {
+    if (f && (f.question != null || f.answer != null)) {
+      rows.push({ key: f.question, value: f.answer });
+    }
+  }
+  return normalizeProductSpecs(rows);
+}
+
+function marketingLineForDirector(product, inventory) {
+  const fromProduct = typeof product?.marketingLine === 'string' ? product.marketingLine.trim() : '';
+  const fromAtom = inventory && inventory.productLine && typeof inventory.productLine.text === 'string'
+    ? inventory.productLine.text.trim()
+    : '';
+  const text = fromProduct || fromAtom;
+  if (!text) return null;
+  const source = product?.marketingLineSource || null;
+  const prov = marketingLineProvenanceForDirector(source);
+  if (inventory && inventory.productLine && inventory.productLine.provenance && !source) {
+    const atomProv = inventory.productLine.provenance;
+    if (atomProv.origin) {
+      return {
+        text: snippetText(text, 140),
+        origin: atomProv.origin,
+        verbatim: atomProv.verbatim !== undefined ? atomProv.verbatim : undefined,
+        source: atomProv.source || null
+      };
+    }
+  }
+  return {
+    text: snippetText(text, 140),
+    origin: prov.origin,
+    verbatim: prov.verbatim,
+    source: source || null
+  };
+}
+
+function contentSufficiencyForDirector(product, inventory) {
+  const raw = (inventory && inventory.sufficiency)
+    || (product && product.contentIndex && product.contentIndex.sufficiency)
+    || null;
+  if (!raw || typeof raw !== 'object') return null;
+  const overall = Number(raw.overall);
+  const by = raw.byStage && typeof raw.byStage === 'object' ? raw.byStage : null;
+  const byStage = by ? {
+    awareness: Number(by.awareness) || 0,
+    consideration: Number(by.consideration) || 0,
+    conversion: Number(by.conversion) || 0,
+    retention: Number(by.retention) || 0
+  } : undefined;
+  const blockers = Array.isArray(raw.blockers)
+    ? raw.blockers.filter((b) => typeof b === 'string' && b.trim()).slice(0, 8)
+    : [];
+  return {
+    overall: Number.isFinite(overall) ? overall : 0,
+    ...(byStage ? { byStage } : {}),
+    blockers
+  };
+}
+
 async function assembleSignals({ brandId, productId, campaignKind, seededUniverse } = {}) {
   const [brand, product] = await Promise.all([
     Brand.findById(brandId).lean(),
@@ -675,9 +775,24 @@ async function assembleSignals({ brandId, productId, campaignKind, seededUnivers
   // unbounded billable path fired on every ad generation. This must stay a
   // read of an existing field, never a trigger for categoryReviewsService's
   // own fetchAndCache.
+  //
+  // CONTENT_ATOM_READ prime: loadInventory is async, cached, $0 (compile
+  // has no LLM). The sync dual-read (loadPrintableQuoteAtomsForProduct)
+  // only sees the in-process Map this primes. Mint order is Director
+  // THEN layout assembleInput, so without this prime the Director ranks
+  // Mixed while the renderer hydrates atoms.
   const category = (directorProofMenuEnabled() && product?.categoryRef)
     ? await Category.findById(product.categoryRef).select('categoryReviews breadcrumb name').lean()
     : null;
+
+  let contentInv = null;
+  if (productId && contentInventory.contentAtomReadEnabled()) {
+    try {
+      contentInv = await contentInventory.loadInventory(productId);
+    } catch {
+      contentInv = null;
+    }
+  }
 
   // Pull matched media via ProductMatchArtifact (the canonical match
   // store — one row per (mediaId, productId/brand) match). The previous
@@ -771,7 +886,9 @@ async function assembleSignals({ brandId, productId, campaignKind, seededUnivers
     // concept needs in order to say something specific instead of falling
     // through to the brand tagline. Empty array when absent — never null, so
     // the prompt can test `.length` without a null guard.
-    specs: normalizeProductSpecs(product?.specs),
+    specs: contentInventory.contentAtomReadEnabled()
+      ? catalogSpecsForDirector(product)
+      : normalizeProductSpecs(product?.specs),
     priority:       !productId ? 'absent' :
                     campaignKind === 'product' ? 'high' :
                     campaignKind === 'brand'   ? 'medium' :
@@ -799,6 +916,17 @@ async function assembleSignals({ brandId, productId, campaignKind, seededUnivers
     productSignal.benefits = productId
       ? normalizeBenefitList(product?.shortBenefits)
       : [];
+  }
+
+  // CONTENT_ATOM_READ: sufficiency + marketing_line are NEW keys — omit
+  // entirely with the flag off so JSON.stringify of the signal stays
+  // byte-identical to 3.6.0. Flag-on always sets them when the product
+  // actually holds the data (never a dummy empty object).
+  if (contentInventory.contentAtomReadEnabled()) {
+    const sufficiency = contentSufficiencyForDirector(product, contentInv);
+    if (sufficiency) productSignal.content_sufficiency = sufficiency;
+    const line = marketingLineForDirector(product, contentInv);
+    if (line) productSignal.marketing_line = line;
   }
 
   // ── Category signal — new tier, previously absent from the Director brief
@@ -1911,7 +2039,7 @@ function schemaErrors(value, schema, at = '') {
  *    a rationale that merely discusses the product name or mentions a discount
  *    strategy, and a false reject costs a full re-ask on ~30k vision tokens.
  */
-function validateDirectorPayload(parsed, { schema = null, nConcepts = 3, forbiddenStrings = [] } = {}) {
+function validateDirectorPayload(parsed, { schema = null, nConcepts = 3, forbiddenStrings = [], claimCorpus = null } = {}) {
   const reasons = [];
 
   if (schema) reasons.push(...schemaErrors(parsed, schema.schema || schema, ''));
@@ -1980,6 +2108,14 @@ function validateDirectorPayload(parsed, { schema = null, nConcepts = 3, forbidd
       if (fail) {
         reasons.push(`concepts[${i}].copy ${fail.message}`);
       }
+    }
+    // Advertiser claim ceiling. Flag-off (CLAIM_CEILING_ENFORCED !== 'true')
+    // is a no-op so this scan cannot change a round the existing pins cover.
+    // Pricing/product-name scans above stay ABOVE the verbatim allowance:
+    // a verbatim "20% off" is still refused.
+    {
+      const { claimCeilingReasonsForCopy } = require('./advertiserClaimCorpus');
+      reasons.push(...claimCeilingReasonsForCopy(copy, claimCorpus, { conceptIndex: i }));
     }
   });
 
@@ -2516,6 +2652,21 @@ async function directConceptsRound({
   // chaining keeps a missing signal from throwing.
   const forbiddenStrings = [inputSummary?.product_signal?.name].filter(Boolean);
 
+  // Advertiser claim corpus for the ceiling scan. Flag-off: skip the load
+  // entirely (no extra Mongo). Flag-on + load failure → empty corpus, which
+  // fail-closes every claim rather than passing it.
+  let claimCorpus = null;
+  {
+    const { claimCeilingEnforced, loadAdvertiserClaimCorpus } = require('./advertiserClaimCorpus');
+    if (claimCeilingEnforced()) {
+      try {
+        claimCorpus = await loadAdvertiserClaimCorpus({ brandId, productId });
+      } catch (_) {
+        claimCorpus = { spans: [], absent: true, assembledAt: new Date() };
+      }
+    }
+  }
+
   // ── CONTENT-FAILURE CLASSIFICATION SLOT ───────────────────────────────
   //
   // WHY A SLOT AND NOT `throw makeLlmError(...)` AT EACH SITE. Five failures
@@ -2718,7 +2869,7 @@ async function directConceptsRound({
       continue;
     }
 
-    reasons = validateDirectorPayload(parsed, { schema: responseSchema, nConcepts: N_CONCEPTS_ROUND, forbiddenStrings });
+    reasons = validateDirectorPayload(parsed, { schema: responseSchema, nConcepts: N_CONCEPTS_ROUND, forbiddenStrings, claimCorpus });
     if (!reasons.length || attempt >= 1) break;
 
     console.warn(
@@ -2731,6 +2882,14 @@ async function directConceptsRound({
                reasons.map(r => `- ${r}`).join('\n')
     });
     attempt++;
+  }
+
+  // Corrective re-ask is one-shot (M2). On the retry result, hard copy bans
+  // (pricing / product-name / rating-furniture / claim ceiling) still must
+  // not PRINT. Flag-off: sanitizeDirectorCopy is identity.
+  {
+    const { sanitizeDirectorCopy } = require('./advertiserClaimCorpus');
+    parsed = sanitizeDirectorCopy(parsed, { forbiddenStrings, claimCorpus });
   }
 
   /**
@@ -3128,6 +3287,11 @@ function buildPromptRound({ inputSummary, creativeIntent, platformFormat, univer
     `    brand_led         → brand_signal (tone, summary, tagline). This is the ONLY style that should lean on brand voice — it is the fallback of last resort for every other style, not their first move.`,
     ...(directorBrandPersonasEnabled() ? [
       `- PERSONAS: brand_signal.personas (when present) inform voice and objection framing ONLY. Never use a persona as a quote author, never invent a testimonial, never attribute a persona name to social_proof_signal.primary_quote or copy. A persona is who the ad is FOR, not who is speaking.`
+    ] : []),
+    ...(contentInventory.contentAtomReadEnabled() ? [
+      `- CONTENT SUFFICIENCY: product_signal.content_sufficiency (when present) is 0–6 overall plus byStage and blockers[] — how many honest distinct rounds this SKU supports. Do not invent proof, specs, or slogans to fill a blocked stage.`,
+      `- MARKETING LINE: product_signal.marketing_line (when present) is a product slogan. origin "store-import" is merchant text — you MAY use it as a slogan. origin "synthesized" is generated copy — you may reuse the wording as copy you wrote, but MUST NOT present it as the merchant's own slogan or Brand.tagline.`,
+      `- QUOTE STAGE: proof_options[].quotes[].stage is the ingest funnel label when present (awareness|consideration|conversion|retention|conquest). Prefer a quote whose stage matches this concept's funnel_stage when one exists; never invent a stage or a quote.`
     ] : []),
     ...(allowedStyles.includes(PROMOTIONAL_STYLE) ? [
       `    promotional       → urgency or scarcity grounded in the PRODUCT — a limited colourway, a seasonal window, a use-case moment — plus one hard fact from product_signal (a spec, a material, availability). Verbs first. NOT a price and NOT a discount: this style is subject to the pricing ban below exactly like every other.`
@@ -3813,6 +3977,10 @@ module.exports = {
   N_CONCEPTS_ROUND,
   DIRECTOR_ROUND_TOKENS,
   // exposed for testing
+  catalogSpecsForDirector,
+  marketingLineForDirector,
+  contentSufficiencyForDirector,
+  marketingLineProvenanceForDirector,
   buildPromptRound,
   buildResponseSchemaRound,
   validateConceptsRound,

@@ -435,6 +435,24 @@ const catalogProductSchema = new mongoose.Schema({
     default: undefined,
   },
 
+  // Paid lifestyle render (gpt-image-2/edit → Cloudinary), written by
+  // services/catalogProductLifestyleImageService.js:172.
+  //
+  // DECLARED 2026-09-09 because it was NOT, and Mongoose strict was
+  // silently dropping the write. That is a money bug, not a tidiness one:
+  // the service selects this path back at :66 and uses it at :74 as its
+  // IDEMPOTENCE GUARD ("product already has lifestyle_image (clear the
+  // field to regenerate)"). With the write dropped the guard could never
+  // fire, so every invocation of the agent capability
+  // catalogGenerateLifestyleImages re-paid for products that already had
+  // an image — bounded at ~$2/run by MAX_STEPS_PER_RUN=50 but UNBOUNDED
+  // across runs, while reporting success each time. Found by
+  // scripts/verifyMongooseContracts.js.
+  lifestyle_image:    { type: String, default: null },
+  // Companion stamp. Replaces an undeclared `updatedAt` in the same $set
+  // (this schema has firstSeenAt/lastSyncedAt and no updatedAt; reusing
+  // lastSyncedAt would misreport a catalog sync).
+  lifestyleImageAt:   { type: Date, default: null },
   firstSeenAt:  { type: Date, default: Date.now },
   lastSyncedAt: { type: Date, default: Date.now }
 });

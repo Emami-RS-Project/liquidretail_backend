@@ -14,7 +14,13 @@
 
 const mongoose = require('mongoose');
 
-const READ_CAP = 50;
+// Per-list caps match contentCompiler.ATOM_IDS_CAP / INHERITED_IDS_CAP.
+// A single concat-then-slice(50) starved the inherited tier on any SKU
+// compiled at those caps (80 product ids fill the old READ_CAP alone).
+const PRODUCT_READ_CAP = 80;
+const INHERITED_READ_CAP = 40;
+// Ceiling on atoms hydrated per product (product-owned + inherited).
+const READ_CAP = PRODUCT_READ_CAP + INHERITED_READ_CAP;
 const FUNNEL_STAGES = ['awareness', 'consideration', 'conversion', 'retention'];
 const QUOTE_ATOM_TYPES = new Set(['verbatim_quote', 'comment']);
 const TIER_OWNER_KINDS = new Set(['product', 'brand', 'category']);
@@ -230,11 +236,13 @@ async function loadInventory(productId) {
     return emptyInventory();
   }
 
+  // Slice EACH list, then concat. A global slice after concat lets a
+  // rich product-owned pool empty the inherited tier; that is the R5
+  // starvation. Memory: worst case 256 LRU entries × 120 lean atoms
+  // (~1–2KB each) ≈ 30–60MB; PRIME_CACHE_MAX / TTL are unchanged.
   const ids = []
-    .concat(Array.isArray(index.atomIds) ? index.atomIds : [])
-    .concat(Array.isArray(index.inheritedAtomIds) ? index.inheritedAtomIds : [])
-    .filter(Boolean)
-    .slice(0, READ_CAP);
+    .concat((Array.isArray(index.atomIds) ? index.atomIds : []).filter(Boolean).slice(0, PRODUCT_READ_CAP))
+    .concat((Array.isArray(index.inheritedAtomIds) ? index.inheritedAtomIds : []).filter(Boolean).slice(0, INHERITED_READ_CAP));
 
   const atoms = ids.length
     ? await ContentAtom.find({ _id: { $in: ids }, status: 'active' }).lean()
@@ -387,6 +395,8 @@ function benefitTextsFromAtoms(atoms, { type } = {}) {
 module.exports = {
   loadInventory,
   READ_CAP,
+  PRODUCT_READ_CAP,
+  INHERITED_READ_CAP,
   PRIME_CACHE_MAX,
   PRIME_CACHE_TTL_MS,
   contentAtomReadEnabled,

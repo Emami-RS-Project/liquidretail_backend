@@ -556,9 +556,11 @@ async function loadContext(mediaId, options = {}) {
   //       keep categoryId / brandReviews / recommendedProducts as-is
   //       (those are scene-context, not product-identity)
   let productHero = null;
+  let catalogProduct = null;
   if (options.productId) {
     const cp = await CatalogProduct.findById(options.productId).lean();
     if (cp) {
+      catalogProduct = cp;
       if (!match) {
         match = synthesizeMatchFromCatalogProduct(cp);
       } else {
@@ -845,7 +847,7 @@ async function loadContext(mediaId, options = {}) {
     .lean()
     .catch(err => { console.warn(`   ⚠️  top comments fetch failed: ${err.message}`); return []; });
 
-  return { media, detection, crops, extended, match, overlayZones, brand, runId, categoryPool, productHero, raffle, topComments };
+  return { media, detection, crops, extended, match, overlayZones, brand, runId, categoryPool, productHero, raffle, topComments, catalogProduct };
 }
 
 // Identification block built from a CatalogProduct. Mirrors the
@@ -1322,6 +1324,12 @@ function buildDerivationPrompt(ctx, template, aspectRatio, options) {
     // prompt produces, but the prompt should not be inviting the fabrication
     // in the first place.
     lines.push(`- "badges" 0–4 items, each 1–3 words, and ONLY when the data above supports one: "<rating>★ rated" or "Top rated" ONLY if Rating ≥ 4.5 AND Review count ≥ 100 were BOTH given above; "<count>+ reviews" ONLY restating a review-count figure actually given above. If Rating/Review count were not given above, or don't clear those bars, output an EMPTY array — that is the correct, expected answer for most products, not a fallback to avoid. NEVER emit a sales-rank or endorsement claim ("Best seller", "Top seller", "#1", "Most popular", "Editor's pick", "Staff pick", "Trending") — this pipeline has no sales-rank or editorial data for any product, ever. NEVER emit an environmental, ethical or certification claim ("Sustainably made", "Eco-friendly", "Organic", "Cruelty-free", etc.) — these are regulated advertising claims (e.g. FTC Green Guides) this pipeline cannot substantiate from catalog data, for any product.`);
+    // Flag-off omits this line so existing derivation-prompt byte-identity
+    // pins stay green. Flag-on closes the headline/subheadline asymmetry:
+    // the same sales-rank / environmental bans already applied to badges.
+    if (require('./advertiserClaimCorpus').claimCeilingEnforced()) {
+      lines.push(`- The sales-rank, endorsement, and environmental/ethical bans above also apply to copy.headline, copy.subheadline, copy.headline_lead, copy.headline_main, and short_benefits — not only to badges. Prefer the advertiser's own published wording (live ad copy, PDP facts, brand tagline/summary) as it appears; do not paraphrase a claim into a stronger one.`);
+    }
   }
 
   // CASING — stated once, explicitly, because nothing else in this prompt
@@ -1812,6 +1820,7 @@ const STAGE_TERMS = {
   conversion: /\b(worth (every penny|the money|it)|bought (another|a second|two|more)|reorder(ed|ing)?|repurchas(ed|ing)|buy(ing)? again|wish i('?d| had) (bought|ordered)|no regrets|best purchase|highly recommend|10\/10)\b/gi,
 };
 const STAGE_ALIASES = { awareness: 'awareness', consideration: 'consideration', conversion: 'conversion',
+  retention: 'retention', conquest: 'conquest',
   top: 'awareness', mid: 'consideration', middle: 'consideration', bottom: 'conversion', bofu: 'conversion',
   tofu: 'awareness', mofu: 'consideration' };
 function normalizeStage(v) {
@@ -2185,7 +2194,7 @@ function normalizeQuote(q) {
   const firstParty = isFirstPartyQuote(q);
   // Resolved BEFORE the byline, because the byline asserts it.
   const verified = q.verified !== undefined ? q.verified : firstParty;
-  return {
+  const out = {
     text:        String(q.text).trim(),
     // A REAL name, or nothing at all. Every fallback that used to live here
     // manufactured a person:
@@ -2222,6 +2231,13 @@ function normalizeQuote(q) {
     verbatim:    q.verbatim !== undefined ? q.verbatim : undefined,
     scope:       q.scope || undefined
   };
+  // Ingest stamps quotes[].stage (awareness|consideration|conversion|
+  // retention|conquest). Dropping it here was the whitelist that made
+  // the paid Gemini label unreachable to pickStrongestQuote / Director.
+  // Only set when present so quotes without a stage stay key-identical.
+  const stage = normalizeStage(q.stage);
+  if (stage) out.stage = stage;
+  return out;
 }
 
 // Shared with assembleInput AND the Director-aligned primary_quote
@@ -2321,12 +2337,29 @@ function gateQuotesByColourway(quotes, productTitle, tierName) {
   return kept;
 }
 
+// Selection-time gates shared by Mixed and the atom dual-read. Brand /
+// category compile passes productTitle:null so colourwayOk is null and
+// printable stays true on a colour-language inherited quote — re-running
+// the live gates here is what stops that quote becoming PRIMARY. Do not
+// reimplement toPrintableCustomerQuote / usableColourwayQuote.
+function applySelectionGates(quotes, productTitle, tierName) {
+  return stampTier(
+    gateQuotesByColourway(
+      gateQuotesByRating(printableQuotes(quotes, tierName), tierName),
+      productTitle,
+      tierName
+    ),
+    tierName
+  );
+}
+
 function prepareQuotePool(container, quotes, tierName, productTitle, atomOpts) {
-  // CONTENT_ATOM_READ dual-read: skip re-deriving printable/star/colourway
-  // gates (already compiled onto the atom) and hydrate into the shape
-  // pickStrongestQuote already ranks. Flag-off, missing opts, empty pool,
-  // or an uncompiled product all fall through to the Mixed composition
-  // below — byte-identical to the pre-fork 4-arg function.
+  // CONTENT_ATOM_READ dual-read: hydrate compiled atoms into the shape
+  // pickStrongestQuote already ranks, then run the SAME printable / star /
+  // colourway gates as Mixed. Flag-off, missing opts, empty pool, uncompiled
+  // product, or a pool the gates empty all fall through to Mixed —
+  // byte-identical to the pre-fork 4-arg function when the atom branch
+  // does not win.
   if (contentInventory.contentAtomReadEnabled() && atomOpts) {
     const atomPool = Array.isArray(atomOpts.atomPool)
       ? atomOpts.atomPool
@@ -2334,17 +2367,15 @@ function prepareQuotePool(container, quotes, tierName, productTitle, atomOpts) {
         ? contentInventory.loadPrintableQuoteAtomsForProduct(atomOpts.productId, { tier: tierName })
         : null);
     if (atomPool && atomPool.length) {
-      return contentInventory.hydrateAtomsToQuoteShape(atomPool, tierName);
+      const gated = applySelectionGates(
+        contentInventory.hydrateAtomsToQuoteShape(atomPool, tierName),
+        productTitle,
+        tierName
+      );
+      if (gated.length) return gated;
     }
   }
-  return stampTier(
-    gateQuotesByColourway(
-      gateQuotesByRating(printableQuotes(stampQuoteOrigins(container, quotes), tierName), tierName),
-      productTitle,
-      tierName
-    ),
-    tierName
-  );
+  return applySelectionGates(stampQuoteOrigins(container, quotes), productTitle, tierName);
 }
 
 // Render's product-tier winner: productReviews.quotes → stamp →
@@ -2356,13 +2387,15 @@ function pickPrimaryProductQuote(productReviews, opts = {}) {
     const atomPool = opts.atomPool
       || contentInventory.loadPrintableQuoteAtomsForProduct(opts.productId, { tier: 'product' });
     if (atomPool && atomPool.length) {
-      return pickStrongestQuote(
+      const gated = applySelectionGates(
         contentInventory.hydrateAtomsToQuoteShape(atomPool, 'product'),
-        opts
+        opts.productTitle,
+        'product'
       );
+      if (gated.length) return pickStrongestQuote(gated, opts);
     }
-    // atoms not compiled yet for this product, or empty — fall through
-    // to legacy, do NOT return null
+    // atoms not compiled yet, empty, or emptied by selection gates —
+    // fall through to Mixed, do NOT return null
   }
   if (!productReviews || !Array.isArray(productReviews.quotes) || !productReviews.quotes.length) {
     return null;
@@ -3318,6 +3351,41 @@ async function assembleInput(ctx, template, aspectRatio, options, derivation, pr
         if (placement) input.placement = placement;
       } catch (err) {
         console.warn(`   ⚠️  overlay placement failed for ${template} ${aspectRatio}: ${err.message}`);
+      }
+    }
+  }
+
+  // Advertiser claim ceiling on Gemini-derived copy.headline/subheadline
+  // (and T5 short_benefits). Flag-off is identity so prompt-byte and
+  // pixel pins stay green. Quotes are not gated here.
+  {
+    const corpusMod = require('./advertiserClaimCorpus');
+    if (corpusMod.claimCeilingEnforced()) {
+      const product = ctx.catalogProduct || null;
+      const productId = (product && (product._id || product.id)) || options.productId || null;
+      let campaigns = ctx.claimCampaigns;
+      if (campaigns === undefined && brand && (brand._id || brand.id)) {
+        try {
+          const Campaign = require('../models/Campaign');
+          campaigns = await Campaign.find({
+            brandId: brand._id || brand.id,
+            platform: { $in: ['meta-ads', 'google-ads'] },
+          }).select('adSets lastSyncedAt status platform insights.fetchedAt').lean();
+        } catch (_) {
+          campaigns = [];
+        }
+      }
+      const corpus = corpusMod.assembleAdvertiserClaimCorpus({
+        brand,
+        product,
+        campaigns: campaigns || [],
+      });
+      const ceilOpts = { productId };
+      if (input.copy) input.copy = corpusMod.applyClaimCeilingToCopy(input.copy, corpus, ceilOpts);
+      if (input.product && Array.isArray(input.product.short_benefits)) {
+        input.product.short_benefits = corpusMod.applyClaimCeilingToList(
+          input.product.short_benefits, corpus, ceilOpts
+        );
       }
     }
   }

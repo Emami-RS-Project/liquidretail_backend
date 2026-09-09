@@ -704,8 +704,8 @@ async function runAsync() {
       && !/q\.verified/.test(vbdSrc) && !/q\.source/.test(vbdSrc));
   const directorSrc = fs.readFileSync(
     path.join(ROOT, 'services/aiCreativeDirectorService.js'), 'utf8');
-  check('P-src DIRECTOR_SIGNALS_VERSION unchanged (consumption-only; no assembleSignals shape change)',
-    /const DIRECTOR_SIGNALS_VERSION = '3\.6\.0'/.test(directorSrc));
+  check('P-src DIRECTOR_SIGNALS_VERSION is 3.7.0 (content_sufficiency / marketing_line / pdp specs)',
+    /const DIRECTOR_SIGNALS_VERSION = '3\.7\.0'/.test(directorSrc));
 
   function withTempMutation(filePath, find, replace, runCheck) {
     const original = fs.readFileSync(filePath, 'utf8');

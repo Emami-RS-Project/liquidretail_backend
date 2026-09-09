@@ -600,7 +600,6 @@ const CATALOG_SELECT_ALLOWLIST = new Map([
   ['canonicalUrl', 'catalogProductReviewRefreshService: dead second arm of `productUrl || canonicalUrl`; productUrl (:118) is real and covers it'],
   ['createdAt',    'routes/catalog.js: schema sets no `timestamps`, so this is only present on rows some other writer stamped'],
   ['productImages', 'catalogProductLifestyleImageService: no writer anywhere in the repo — almost certainly fully dead'],
-  ['lifestyle_image', 'catalogProductLifestyleImageService: written on layoutInput/spec objects, not on CatalogProduct'],
   ['size',         'routes/catalog.js: not declared; likely a legacy variant field'],
 ]);
 

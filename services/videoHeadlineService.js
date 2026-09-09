@@ -132,7 +132,21 @@ const HEADLINE_CHAR_BUDGET = Object.freeze({
   square:    LANDSCAPE_HEADLINE_BUDGET_CHARS,
 });
 
-function budgetForFormat(format) {
+function budgetForFormat(format, platformFormat) {
+  // When a platformFormat is supplied, the live Remotion cap (deriveCharCap
+  // via copyBudgets.videoBudgets) wins over this file's coarser per-canvas
+  // table — that table predates per-surface safe-zone caps. Callers that
+  // only pass `format` (layoutInput fallbackDerivation) keep the historical
+  // 32/46 numbers byte-identical.
+  if (platformFormat) {
+    try {
+      const { videoBudgets } = require('./copyBudgets');
+      const b = videoBudgets(platformFormat, format);
+      if (b && b.hasHeadlineSlot && Number.isFinite(b.headline) && b.headline > 0) {
+        return b.headline;
+      }
+    } catch (_) { /* copyBudgets unavailable — fall through to the table */ }
+  }
   const budget = HEADLINE_CHAR_BUDGET[format];
   return Number.isFinite(budget) && budget > 0 ? budget : LANDSCAPE_HEADLINE_BUDGET_CHARS;
 }
@@ -179,10 +193,10 @@ function classifyHeadlineFormat(aspectRatio) {
 // another — it only knows how to find the first one that fits — so the
 // ranking policy ("prefer copy.headline, then shorter alternates" — owner
 // directive 2) lives in exactly one place and is independently testable.
-function selectVideoHeadline({ candidates, format, budgetChars } = {}) {
+function selectVideoHeadline({ candidates, format, budgetChars, platformFormat } = {}) {
   const budget = Number.isFinite(budgetChars) && budgetChars > 0
     ? budgetChars
-    : budgetForFormat(format);
+    : budgetForFormat(format, platformFormat);
   if (!Array.isArray(candidates)) return null;
   for (const raw of candidates) {
     if (typeof raw !== 'string') continue;

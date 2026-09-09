@@ -1358,7 +1358,23 @@ function buildPrompt({ intentKey, data, product, surface, seedStyle = null, vari
   if (!policy) return { error: `unknown surface ${surface}` };
   if (!policy.static) return { skipped: policy.skipReason, surfaceKey: surface };
 
-  const resolved = resolveIntent(intentKey, data);
+  // Fit-before-write (flag-on only): pick a quote variant that already fits
+  // the static cap, or drop the quote. Flag-off is a no-op so every existing
+  // prompt stays byte-identical. Density drops below are recorded as
+  // sacrificedRoles regardless (telemetry, not a pixel change).
+  let dataForIntent = data;
+  try {
+    const copyBudgets = require('./copyBudgets');
+    if (copyBudgets.isFitBeforeWriteEnabled()) {
+      const fitted = copyBudgets.applyFitBeforeWriteToStaticData(data, surface);
+      dataForIntent = fitted.data;
+      if ((fitted.clampFired && fitted.clampFired.length) || (fitted.sacrificedRoles && fitted.sacrificedRoles.length)) {
+        copyBudgets.recordClamp(data && (data.adId || data.ad_id), fitted);
+      }
+    }
+  } catch (_) { /* copyBudgets is an enhancement; never fail a paid static render */ }
+
+  const resolved = resolveIntent(intentKey, dataForIntent);
   if (!resolved.key) return { error: resolved.why };
   const spec = resolved.spec;
 
@@ -1376,9 +1392,17 @@ function buildPrompt({ intentKey, data, product, surface, seedStyle = null, vari
         ctaNote: policy.ctaNote || 'the platform supplies the link affordance'
       };
 
-  let text = spec.text({ ...data, cta: data.cta });
+  let text = spec.text({ ...dataForIntent, cta: dataForIntent.cta });
   if (!effectivePolicy.drawCta) text = text.filter(([r]) => r !== 'CTA BUTTON');
   const { kept, dropped } = applyDensity(text, spec, effectivePolicy);
+  if (dropped && dropped.length) {
+    try {
+      require('./copyBudgets').recordClamp(data && (data.adId || data.ad_id), {
+        clampFired: dropped.map((role) => ({ slot: role, kind: 'drop', method: 'applyDensity' })),
+        sacrificedRoles: dropped,
+      });
+    } catch (_) { /* telemetry must never fail the prompt */ }
+  }
 
   const keptRoles = new Set(kept.map(([r]) => r));
   const kept_ = (role) => keptRoles.has(role);
@@ -1387,9 +1411,9 @@ function buildPrompt({ intentKey, data, product, surface, seedStyle = null, vari
   // documentation-only and never reaches the prompt.
   const goalCtx = { preserve };
   const goalText = typeof spec.goal === 'function' ? spec.goal(kept_, goalCtx) : spec.goal;
-  const emphasis = spec.emphasis(data, kept_, { preserve });
+  const emphasis = spec.emphasis(dataForIntent, kept_, { preserve });
   const furnitureRating = RATING_FURNITURE && resolved.key === 'social_proof_led' && kept_('RATING');
-  const absent = absences(data, spec.renders, dropped, effectivePolicy, { furnitureRating });
+  const absent = absences(dataForIntent, spec.renders, dropped, effectivePolicy, { furnitureRating });
   const s = computeSurface(surface);
 
   /**

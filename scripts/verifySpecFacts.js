@@ -125,10 +125,11 @@ async function run() {
   check('A9 pdpMaterialFacts kind enum is labelled|feature|composition',
     /enum:\s*\['labelled',\s*'feature',\s*'composition'\]/.test(schemaSrc)
   );
-  check('A10 adgen CatalogProduct omits pdpSpecFacts/pdpMaterialFacts/pdpFaqAnswers (backend-only ingest fork)',
-    !/pdpSpecFacts:/.test(adgenSchemaSrc)
-    && !/pdpMaterialFacts:/.test(adgenSchemaSrc)
-    && !/pdpFaqAnswers:/.test(adgenSchemaSrc)
+  check('A10 adgen CatalogProduct declares pdpSpecFacts/pdpMaterialFacts/pdpFaqAnswers for claim-ceiling reads',
+    /pdpSpecFacts:/.test(adgenSchemaSrc)
+    && /pdpMaterialFacts:/.test(adgenSchemaSrc)
+    && /pdpFaqAnswers:/.test(adgenSchemaSrc)
+    && /marketingLineSource:/.test(adgenSchemaSrc)
   );
   check('A11 adgen still declares marketingLine + contentIndex (shared, not ingest extract fields)',
     /marketingLine:/.test(adgenSchemaSrc)

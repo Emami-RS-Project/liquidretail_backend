@@ -1,15 +1,15 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "b564f6555f7707011f9cec1ca9e73094c449043f",
-  "generatedAt": "2026-09-08T23:54:44.556Z",
+  "backendHead": "6d071f219a385c41d7d0b585a5cec635cba011e3",
+  "generatedAt": "2026-09-09T06:29:07.679Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
-      "adgenHash": "76cbe21b26cf70e54b693ab2fc7aa08852557ecfa362befbd8833eb3930ab633",
+      "adgenHash": "799149c941124b3a45fb945bcacca004f43d0137a47b6ce9850ab29653620abe",
       "backendSha": "6cee8eac343fe07493fa83c049d8c468343a0ffd",
       "status": "fork",
-      "reason": "This PR adds Ad.videoQcRetry (Mixed, default null) on BOTH copies: adgen's live renderer claim-lock for the one-shot QC-triggered 720p retry, and backend models/Ad.js in the same PR so Mongoose strict on the API process cannot silently drop the field (same trap as renderError.predictionId). Remaining fork unchanged (adgen-only render/titling fields). Automatic retry is gated OFF by QC_RETRY_720P_ENABLED (strict === 'true')."
+      "reason": "Lane B: both copies declare Ad.clampTelemetry Mixed so Mongoose strict cannot drop fit-before-write backstop events. Remaining fork: adgen-only render/titling fields (videoQcRetry etc.)."
     },
     "models/Advertiser.js": {
       "backendHash": "0a7e1bb9ca5e0fbbfc6972f9c96d87f839b0a86175831b5446ae27095137ba3f",
@@ -92,11 +92,11 @@
       "owedSince": null
     },
     "models/CatalogProduct.js": {
-      "backendHash": "12dec5e217a1c3eb9ada3eaddced75606de8677cab36d15c789b83bad5d46ee3",
-      "adgenHash": "f50e146b3903bb029ab6d52bab7b71da3fc641ff1847bf47cdcbdfca97684ebf",
-      "backendSha": "b7812f4f243842990e3f60bf6ed605f09d03a66a",
+      "backendHash": "9ed50ef6c59ca91edad31abe1d5f5005a89e50f01594bbbc2db55a1a8dfb59f9",
+      "adgenHash": "1da3dd293cdb7396b706ded5d0be1bc6a7359f8fd02a5dc3fdb4979a47fd570a",
+      "backendSha": "0d2c593810012297c5f7ed0862303b76de7f9082",
       "status": "fork",
-      "reason": "Backend-only ingest fork (intentional). Backend CatalogProduct declares marketingLineSource + pdpSpecFacts/Source + pdpMaterialFacts/Source + pdpFaqAnswers/Source so Mongoose strict does not drop Stage-3 Shopify ingest $sets. Adgen is the renderer and never writes those fields (compile runs in backend; adgen reads ContentAtom + contentIndex). Shared fields (marketingLine, colourway, colourwaySource, contentIndex) stay on both trees. Do not port the ingest extract fields unless adgen starts compiling."
+      "reason": "Lane I: adgen now DECLARES marketingLineSource + pdpSpecFacts/Source + pdpMaterialFacts/Source + pdpFaqAnswers/Source so Mongoose .select() on the render path returns T2 facts for the advertiser claim ceiling. Adgen still never WRITES those fields (ingest/compile remain backend-only). Remaining fork: backend-only ingest writers and any other backend-only CatalogProduct fields."
     },
     "models/Category.js": {
       "backendHash": "58e0c5c2b9b4bae826ef12adf04425b52d527818b2968191633c4bf4b2218583",
@@ -304,10 +304,10 @@
     },
     "remotion/compositions/Canonical.jsx": {
       "backendHash": "557e4564e5878a6298dd13a02e21660dc1d88608c8498325bbe019e855314ef2",
-      "adgenHash": "27ae7d595f21809652e9e696d7d25060ca81011ead1402ca03585039a90d8d88",
+      "adgenHash": "6c16cb8569a66ae1bab7c197d8b523d96c026143e4a30fccc36617ad5337189e",
       "backendSha": "47be257c468e85c3f1d1c562abd087ea8625e98c",
       "status": "unported",
-      "reason": "Re-attest at backend SHA 47be257c. containerStrokeBleedGuard (PR #98 outer-clip fix) still absent from backend's copy -- confirmed via grep, zero occurrences. PR #383 (47be257c) merged the itemLayout/itemGap/maxItems/itemStyle wiring to backend's origin/main, byte-identical to adgen -- that half of the prior debt is now resolved and no longer owed. Remaining gap is containerStrokeBleedGuard only.",
+      "reason": "Lane B clamp telemetry (console.warn on clip + stackFit shrink/drop) applied to both copies. Remaining debt: containerStrokeBleedGuard still absent from backend.",
       "portTo": "backend",
       "owedSince": "2026-08-31T23:20:03.277Z"
     },
@@ -354,12 +354,10 @@
     },
     "remotion/lib/slotContent.js": {
       "backendHash": "8cb75a6656409058080570adc64a1fbeb640fc944c6db7fdd03a04c3d9d175a1",
-      "adgenHash": "a2e8d71c983876e47cc12f73eb8d8ca28f403589c3665c2afd8dfaf287ff1804",
+      "adgenHash": "c0d3cade141dbb07c480132c44cc005cc363257ea9df7f98d9ef728021530eab",
       "backendSha": "d3a8fe74ae1f6e704efb326c33c76a946e703b88",
       "status": "fork",
-      "reason": "Backend counterpart is dormant generation code slated for REMOVAL (owner 2026-09-04: adgen is the only generator; strip backend's copy, don't sync it). adgen's copy is the live one; nothing is owed to backend.",
-      "portTo": null,
-      "owedSince": null
+      "reason": "Lane B: both copies emit ctx.onClamp when truncateWordSafe/fitProductNameToCap actually shorten. Backend also gained adgen's brand-tagline fitter gate (entry===productName). Remaining fork: adgen is the live renderer; backend remotion is preview/debug."
     },
     "remotion/lib/stackFit.js": {
       "backendHash": "9a747dfd9cdda3cd13218f299c60d39ae63c97b782124f774ff3ea1d47cb9ce4",
@@ -667,6 +665,15 @@
       "portTo": "backend",
       "owedSince": "2026-09-05T00:18:02.460Z"
     },
+    "services/advertiserClaimCorpus.js": {
+      "backendHash": "eac4c4ee794279cec33fdee49d3c68b69c6803412b23698e7696e8efa83b15d9",
+      "adgenHash": "eac4c4ee794279cec33fdee49d3c68b69c6803412b23698e7696e8efa83b15d9",
+      "backendSha": "0d2c593810012297c5f7ed0862303b76de7f9082",
+      "status": "synced",
+      "portTo": null,
+      "owedSince": null,
+      "reason": "Lane I: advertiser claim ceiling corpus. Byte-identical with backend. Pure assembler + flag-gated helpers. CLAIM_CEILING_ENFORCED parser strictly === 'true'."
+    },
     "services/aiCreativeDirectorService.js": {
       "backendHash": "1690dafafcb828b14c7e3bf457c069f92a5746326705d78116cf188a2a81643b",
       "adgenHash": "fbaca1561ff6fd43f7256524e7b85be85038ca2115f062022da6b97afe50017a",
@@ -782,10 +789,10 @@
     },
     "services/brandScriptExecutor.js": {
       "backendHash": "ec53050310b215d9390567cb27a15173fc84a53354fcd814e9ee744aabddaade",
-      "adgenHash": "a6c6876a8558e47c355ee0d9a5a445ffd8e50e796c8bfeee46cd645ee40fe68c",
+      "adgenHash": "a194582c4ed969e5554fa6b58353326490617d0a5594159db42f8fc4270c9a5c",
       "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
       "status": "unported",
-      "reason": "Phase 0b CONTENT_ATOM_READ dual-read: contentIndex added to CatalogProduct select (silent-.select() class); applyAtomRatingPairs overlays contentIndex.ratingPolicy onto the Mixed product/brand snapshots BEFORE the unmodified resolveCoherentSocialProof; type:atoms benefits loaded into cascade context. Prior unported debt (titlingOnlyGate / stampTitlingFailureAndThrow / TITLING_ATTEMPTS_MAX) carries forward untouched.",
+      "reason": "Lane B: both copies consume copyBudgets for quote fit-before-write + clamp alarms. Prior unported debt (titlingOnlyGate / stampTitlingFailureAndThrow / TITLING_ATTEMPTS_MAX / CONTENT_ATOM_READ) carries forward.",
       "portTo": "backend",
       "owedSince": "2026-08-28T17:47:48.113Z"
     },
@@ -854,12 +861,13 @@
       "owedSince": null
     },
     "services/claimSubstantiationService.js": {
-      "backendHash": "95f94af72f3e32a9a6a3d278204ce5d523e1e8c56e2b884baa7707c2b986e987",
-      "adgenHash": "95f94af72f3e32a9a6a3d278204ce5d523e1e8c56e2b884baa7707c2b986e987",
-      "backendSha": "1f1f77931b73f9fc11f218d16a7ac63e50fb5280",
+      "backendHash": "e18683eaaceae1345906e2dc03b95c615297f638a72f5236c5409e8c9db68f9a",
+      "adgenHash": "e18683eaaceae1345906e2dc03b95c615297f638a72f5236c5409e8c9db68f9a",
+      "backendSha": "0d2c593810012297c5f7ed0862303b76de7f9082",
       "status": "synced",
       "portTo": null,
-      "owedSince": null
+      "owedSince": null,
+      "reason": "Lane I: performance_attribute category (UPF/SPF/waterproof). Badge-path unclassified pass-through preserved when no PDP-fact key is on evidence. Trees kept byte-identical."
     },
     "services/cloudinaryService.js": {
       "backendHash": "beae067289d9324a3fee11ad86b7243c30181a6ae1d332fb023d28cf0b11f7f4",
@@ -1272,11 +1280,11 @@
       "owedSince": null
     },
     "services/staticAdIntents.js": {
-      "backendHash": "b1e1763ef7482c536ffd2a5a5e2e4a9361e0951977a7c57e247ec4c6be02ecdf",
-      "adgenHash": "157acd1dd0735042b05a82268a0fd696e4a507872a5e7a02079a14270bc2fd4a",
-      "backendSha": "7cc2c7dfbada49e800d3fd0cc1899e9735c425cb",
+      "backendHash": "e0b11a523e6ac53f24635d39e6c53934d5e55fe8a18e2087eef106b22482caa3",
+      "adgenHash": "7c4e87eea36447cb1e06285b602980935847cd9778c947ea49419be291f3a254",
+      "backendSha": "b7812f4f243842990e3f60bf6ed605f09d03a66a",
       "status": "fork",
-      "reason": "2026-09-07: port scrim-forbidden + CTA-removal fix from now-disconnected liquidretail_adgen repo into the live /adgen monorepo path"
+      "reason": "Lane B: flag-on FIT_BEFORE_WRITE quote fit/drop before resolveIntent; applyDensity drops recorded as sacrificedRoles. Remaining fork: adgen-owned CTA/scrim/intent differences from 2026-09-07."
     },
     "services/staticPipeline.js": {
       "backendHash": "52b48bf6fcbe9a7723c682dcf0c18e35f7819a8e27f6a39704807bec07e49927",
@@ -1375,11 +1383,10 @@
     },
     "services/videoHeadlineService.js": {
       "backendHash": "568b6409d5c81f8290aea4f9566294ab3b65e55fa5e1f5df2fad903b704eaa46",
-      "adgenHash": "568b6409d5c81f8290aea4f9566294ab3b65e55fa5e1f5df2fad903b704eaa46",
+      "adgenHash": "577b1d1b85db8490d807367447c0abafcc1634344fa8cc5eeb4e629d7a478654",
       "backendSha": "11c58bd01b8c34d8f8de1a1e365bec1d37aabccc",
-      "status": "synced",
-      "portTo": null,
-      "owedSince": null
+      "status": "fork",
+      "reason": "Lane B: budgetForFormat consults copyBudgets.videoBudgets when platformFormat is set; format-only callers stay on the historical 32/46 table. Worktree twins are cmp-identical; origin/main does not yet have this change."
     },
     "services/videoProductAnchor.js": {
       "backendHash": "a4624bd2eb4fa3641e356a5e9276faf27e2987889c186080b6332e5926308e3e",
