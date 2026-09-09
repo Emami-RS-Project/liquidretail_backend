@@ -81,6 +81,7 @@ const { extractSnippet, PROOF_LINE_MAX_CHARS, usableProofCommentsOrNone } = requ
 // the best-fitting copy string instead of a templated headline. See
 // services/videoHeadlineService.js for the full design rationale.
 const { resolveVideoHeadline } = require('./videoHeadlineService');
+const contentInventory = require('./contentInventory');
 // Same evidence thresholds the render-time claim gate uses (see
 // buildMetaForAd in brandScriptExecutor.js) — reused here so this
 // deterministic default never asserts a claim the gate would strip anyway.
@@ -2320,7 +2321,22 @@ function gateQuotesByColourway(quotes, productTitle, tierName) {
   return kept;
 }
 
-function prepareQuotePool(container, quotes, tierName, productTitle) {
+function prepareQuotePool(container, quotes, tierName, productTitle, atomOpts) {
+  // CONTENT_ATOM_READ dual-read: skip re-deriving printable/star/colourway
+  // gates (already compiled onto the atom) and hydrate into the shape
+  // pickStrongestQuote already ranks. Flag-off, missing opts, empty pool,
+  // or an uncompiled product all fall through to the Mixed composition
+  // below — byte-identical to the pre-fork 4-arg function.
+  if (contentInventory.contentAtomReadEnabled() && atomOpts) {
+    const atomPool = Array.isArray(atomOpts.atomPool)
+      ? atomOpts.atomPool
+      : (atomOpts.productId
+        ? contentInventory.loadPrintableQuoteAtomsForProduct(atomOpts.productId, { tier: tierName })
+        : null);
+    if (atomPool && atomPool.length) {
+      return contentInventory.hydrateAtomsToQuoteShape(atomPool, tierName);
+    }
+  }
   return stampTier(
     gateQuotesByColourway(
       gateQuotesByRating(printableQuotes(stampQuoteOrigins(container, quotes), tierName), tierName),
@@ -2336,6 +2352,18 @@ function prepareQuotePool(container, quotes, tierName, productTitle) {
 // (DIRECTOR_QUOTE_POOL_ALIGNED) calls this so both paths rank the
 // same pool. opts is the same shape assembleInput hands the scorer.
 function pickPrimaryProductQuote(productReviews, opts = {}) {
+  if (contentInventory.contentAtomReadEnabled() && (opts.productId || opts.atomPool)) {
+    const atomPool = opts.atomPool
+      || contentInventory.loadPrintableQuoteAtomsForProduct(opts.productId, { tier: 'product' });
+    if (atomPool && atomPool.length) {
+      return pickStrongestQuote(
+        contentInventory.hydrateAtomsToQuoteShape(atomPool, 'product'),
+        opts
+      );
+    }
+    // atoms not compiled yet for this product, or empty — fall through
+    // to legacy, do NOT return null
+  }
   if (!productReviews || !Array.isArray(productReviews.quotes) || !productReviews.quotes.length) {
     return null;
   }
@@ -2750,9 +2778,22 @@ async function assembleInput(ctx, template, aspectRatio, options, derivation, pr
   const colourwayTitle = (options && options.productId)
     ? (details.title || ident.productName || null)
     : null;
-  const tierProduct = prepareQuotePool(productReviewsForMatch, productReviewsForMatch?.quotes, 'product', colourwayTitle);
+  const atomReadOn = contentInventory.contentAtomReadEnabled();
+  const atomProductId = (options && options.productId) || ctx.match?.catalogProductId || null;
+  let atomByTier = { product: null, category: null, brand: null };
+  if (atomReadOn && atomProductId) {
+    try {
+      const inv = await contentInventory.loadInventory(atomProductId);
+      const atoms = (inv && inv.atoms) || [];
+      atomByTier.product = contentInventory.filterPrintableQuotesByTier(atoms, 'product');
+      atomByTier.category = contentInventory.filterPrintableQuotesByTier(atoms, 'category');
+      atomByTier.brand = contentInventory.filterPrintableQuotesByTier(atoms, 'brand');
+    } catch { /* uncompiled / load miss → Mixed fallthrough */ }
+  }
+  const atomOptsFor = (tier) => (atomReadOn ? { atomPool: atomByTier[tier] || [] } : undefined);
+  const tierProduct = prepareQuotePool(productReviewsForMatch, productReviewsForMatch?.quotes, 'product', colourwayTitle, atomOptsFor('product'));
   const catReviewsForMatch = await loadCategoryReviewsForMatch(ctx.match);
-  const tierCategory = prepareQuotePool(catReviewsForMatch, catReviewsForMatch?.quotes, 'category', colourwayTitle);
+  const tierCategory = prepareQuotePool(catReviewsForMatch, catReviewsForMatch?.quotes, 'category', colourwayTitle, atomOptsFor('category'));
   // Brand-tier reviews are catalog-wide: they are about whatever the reviewer
   // bought, which on a multi-SKU brand is usually NOT this product. Rendering
   // one under this product's photo presents another item's praise as if it
@@ -2786,7 +2827,7 @@ async function assembleInput(ctx, template, aspectRatio, options, derivation, pr
   const withholdBrandOnProductAd = isProductScoped && !QUOTE_BRAND_TIER_FALLBACK;
   const tierBrandUnscoped = withholdBrandOnProductAd
     ? []
-    : prepareQuotePool(brandReviewsContainer, brandQuotesRaw, 'brand', colourwayTitle);
+    : prepareQuotePool(brandReviewsContainer, brandQuotesRaw, 'brand', colourwayTitle, atomOptsFor('brand'));
   // Noun-scope the brand pool ONLY when this run has no CatalogProduct
   // attached (options.productId). A PMA catalogProductId is not that —
   // media-driven ads often carry a product_match PMA (the Vuori case)

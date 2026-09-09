@@ -300,6 +300,79 @@ const catalogProductSchema = new mongoose.Schema({
     _id: false
   }],
 
+  // Per-SKU marketing line (PDP slogan / metafield). Distinct from
+  // Brand.tagline. Phase 0 declares the field; Phase 2 writes it from the PDP.
+  // default undefined so "never compiled" is distinguishable from null.
+  marketingLine:   { type: String, default: undefined },
+  // Flash last-resort stamp. A set stamp with an empty/absent line means
+  // "tried, genuinely nothing" — do not re-derive. Mirrors shortBenefitsDerivedAt.
+  marketingLineDerivedAt: { type: Date, default: null },
+  colourway:       { type: [String], default: undefined },
+  colourwaySource: {
+    type: String,
+    enum: ['shopify_options', 'title_parse', 'none'],
+    default: undefined,
+  },
+
+  // Compiled content rollup (ContentAtom ids + sufficiency + seeds +
+  // rating-policy snapshot). default undefined — an uncompiled product is
+  // distinguishable from "compiled, empty". Nested defaults are also
+  // undefined so Mongoose does not materialise an empty subdoc on read.
+  // MUST stay declared: Mongoose strict drops undeclared $set paths.
+  contentIndex: {
+    type: new mongoose.Schema({
+      compileVersion: { type: String, default: undefined },
+      compiledAt:     { type: Date, default: undefined },
+      sufficiency: {
+        overall: { type: Number, default: undefined },
+        byStage: {
+          awareness:     { type: Number, default: undefined },
+          consideration: { type: Number, default: undefined },
+          conversion:    { type: Number, default: undefined },
+          retention:     { type: Number, default: undefined },
+        },
+        blockers: { type: [String], default: undefined },
+      },
+      atomIds:          { type: [mongoose.Schema.Types.ObjectId], default: undefined },
+      inheritedAtomIds: { type: [mongoose.Schema.Types.ObjectId], default: undefined },
+      marketingLine:    { type: String, default: undefined },
+      colourway:        { type: [String], default: undefined },
+      colourwaySource:  {
+        type: String,
+        enum: ['shopify_options', 'title_parse', 'none'],
+        default: undefined,
+      },
+      seeds: [{
+        mediaId:   { type: mongoose.Schema.Types.ObjectId, ref: 'Media', default: undefined },
+        feedIndex: { type: Number, default: undefined },
+        shotStyle: {
+          type: String,
+          enum: ['packshot', 'lifestyle', 'ambiguous', 'unknown'],
+          default: undefined,
+        },
+        shotType: {
+          type: String,
+          enum: ['lifestyle', 'on_model', 'product_only', 'flat_lay', 'detail', 'packaging', 'unknown'],
+          default: undefined,
+        },
+        role: { type: String, enum: ['hero', 'alt'], default: undefined },
+        _id: false,
+      }],
+      ratingPolicy: {
+        productStars:   { type: String, default: undefined },
+        productCount:   { type: Number, default: undefined },
+        productPctFive: { type: Number, default: undefined },
+        brandStars:     { type: String, default: undefined },
+        brandCount:     { type: Number, default: undefined },
+        eligibleForms:  {
+          type: [{ type: String, enum: ['stars+count', 'count-only', 'brand-scoped'] }],
+          default: undefined,
+        },
+      },
+    }, { _id: false }),
+    default: undefined,
+  },
+
   firstSeenAt:  { type: Date, default: Date.now },
   lastSyncedAt: { type: Date, default: Date.now }
 });

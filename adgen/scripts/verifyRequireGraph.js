@@ -111,7 +111,7 @@ const { assertBackendRoot } = require('./lib/siblingBackend');
 // diff added zero new require() edges (parameters/logic only, no new
 // require statements), so the merged total equals this branch's own
 // pre-merge count. Re-measured via this harness itself: 543/543 resolved.
-const FREEZE_N = 543;
+const FREEZE_N = 549;
 const {
   fileExists,
   dirExists,

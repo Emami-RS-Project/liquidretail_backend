@@ -180,6 +180,32 @@ const CORE_DIRS = new Set(['models', 'routes', 'services', 'middleware', 'config
 const UNSAFE_FOR_PARALLEL = new Set([
   'verifyCampaignRunHeartbeat.js',
   'verifyConcurrencyConfig.js',
+  // EVERY harness that mutates the real checked-out source during a
+  // revert-prove and re-requires it belongs here — failure class (1) above,
+  // which this repo has already been burned by. Measured 2026-09-08 (the
+  // content-layer work): the mutated real files and their mutators are
+  //   services/contentCompiler.js        ← verifyContentAtomCompile,
+  //                                        verifyContentSufficiency
+  //   services/pdpContentExtractService  ← verifyMarketingLine, verifySpecFacts
+  //   services/productBenefitsService.js ← verifyMarketingLine
+  //                                        (verifyProductBenefits requires it)
+  //   scripts/backfillPdpContent.js      ← verifyBackfillPdpContent
+  //   services/layoutInputService.js,
+  //   services/contentInventory.js,
+  //   services/metaCascadeConfig.js      ← verifyContentAtomDualRead
+  // Two of those files have TWO mutators each, both of which were in the
+  // parallel pool — a direct write-check-restore collision on one file, plus
+  // the wider hazard that any pooled harness fresh-requiring one of them
+  // observes a deliberate bug and fails an unrelated assertion. Serialised
+  // after the pool drains. Serialisation does not cover a SIGKILL
+  // mid-mutation; scripts/lib/harnessMutate.js installs SIGINT/SIGTERM/exit
+  // restore handlers for the rest.
+  'verifyContentAtomCompile.js',
+  'verifyContentAtomDualRead.js',
+  'verifyContentSufficiency.js',
+  'verifyMarketingLine.js',
+  'verifySpecFacts.js',
+  'verifyBackfillPdpContent.js',
 ]);
 
 // macOS has no `timeout(1)` binary, so this is a JS timer + child.kill(),

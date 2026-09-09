@@ -1838,7 +1838,7 @@ function buildIntentData({ concept, layoutInput, brand, product = null, cta, cam
   // headline only; subhead undefined). Flag-on: cascade through layoutInput
   // then brand.tagline so ai_brand_led still has a brand line when Director
   // nulls the headline. Do NOT cascade product name/title or description —
-  // resolvedProduct is .select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb') so description is not loaded,
+  // resolvedProduct is .select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb contentIndex') so description is not loaded,
   // and the product name is forbidden as ad copy by owner directive and
   // fenced in absences.
   //
@@ -1949,7 +1949,7 @@ function buildIntentData({ concept, layoutInput, brand, product = null, cta, cam
     // the R2 rule. A productReviews holding only a count loses nothing, because a
     // count never renders without a rating beside it (staticAdIntents.js:460).
     const prHasRating = !!pr && typeof pr.rating === 'number';
-    const productPair = prHasRating
+    let productPair = prHasRating
         ? { rating: pr.rating, reviewCount: pr.reviewCount ?? null }
       : (typeof product?.rating === 'number')
         ? { rating: product.rating, reviewCount: null }
@@ -1980,7 +1980,12 @@ function buildIntentData({ concept, layoutInput, brand, product = null, cta, cam
         && (typeof brand.brandReviews.rating === 'number' || typeof brand.brandReviews.reviewCount === 'number'))
       ? { rating: brand.brandReviews.rating ?? null, reviewCount: brand.brandReviews.reviewCount ?? null }
       : null;
-    const brandPair = brandDocPair || (liIsBrand ? liPair : null);
+    let brandPair = brandDocPair || (liIsBrand ? liPair : null);
+    {
+      const swapped = require('./contentInventory').applyAtomRatingPairs(product, productPair, brandPair);
+      productPair = swapped.product;
+      brandPair = swapped.brand;
+    }
     // An UNSTAMPED artifact pair still has to reach the ad, or this change would
     // withhold proof from every pre-`rating_source` artifact. There is no tier
     // claim to cohere in that case, so it is only used when no quote prints —
@@ -2584,7 +2589,7 @@ async function renderDirectImage(callArgs = {}) {
     LayoutInputArtifact.findById(layoutInputArtifactId).select('input brandId productId').lean(),
     resolveConcept({ adConceptArtifactId, adConceptId, expectedProductId: productId }),
     brandId ? Brand.findById(brandId).lean() : null,
-    productId ? CatalogProduct.findById(productId).select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb').lean() : null,
+    productId ? CatalogProduct.findById(productId).select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb contentIndex').lean() : null,
     // classification + technicalInsights feed resolveSeedStyle for the
     // lifestyle scene-preserve branch (STATIC_LIFESTYLE_PRESERVE).
     // width + height feed seedAspectFromDims → resolveAspectTreatment's
@@ -2641,7 +2646,7 @@ async function renderDirectImage(callArgs = {}) {
       { alertLevel: 'fatal', alertKey: 'direct-image:no-credentials' }
     );
   }
-  const resolvedProduct = product || (effectiveLayout.productId ? await CatalogProduct.findById(effectiveLayout.productId).select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb').lean() : null);
+  const resolvedProduct = product || (effectiveLayout.productId ? await CatalogProduct.findById(effectiveLayout.productId).select('title imageUrl imageMediaId additionalImageMediaIds rating productReviews recentQuoteKeys lastQuoteRunId lastQuoteFingerprint category inferredBreadcrumb contentIndex').lean() : null);
   // Delivery dims are NOT derived here any more: they come from the surface the
   // prompt is built from, a few lines below, so the size Sharp writes and the
   // size the geometry block promised the model cannot disagree.

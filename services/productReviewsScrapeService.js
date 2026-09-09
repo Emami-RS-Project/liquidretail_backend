@@ -821,6 +821,15 @@ async function captureForProduct(row, {
   if (productReviews.rating != null) $set.rating = productReviews.rating;
   await CatalogProduct.updateOne({ _id: row._id }, { $set });
 
+  // $0, flag-gated. Compile has no LLM. A review refresh that does not
+  // recompile leaves contentIndex.ratingPolicy frozen; applyAtomRatingPairs
+  // still fail-closes to Mixed via compiledAt < fetchedAt, but quote atoms
+  // would also go stale without this. scheduleForProduct no-ops unless
+  // CONTENT_ATOM_COMPILE === 'true'.
+  if (process.env.CONTENT_ATOM_COMPILE === 'true') {
+    require('./contentCompiler').scheduleForProduct({ productId: row._id });
+  }
+
   return { captured: true, reason: null, productReviews };
 }
 
@@ -1006,6 +1015,9 @@ module.exports = {
   extractOnPageReviews,
   reviewsFromProductNode,
   fetchProductReviews,
+  parseLdBlocks,
+  flattenLdNodes,
+  isType,
   // persistence
   buildProductReviews,
   captureForProduct,

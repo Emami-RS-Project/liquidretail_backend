@@ -117,12 +117,15 @@ function productTextChanged(prevDoc, nextFields) {
 // Shared helper for every catalog writer's upsert path (and manual/detect
 // $set of title/description). Compare NORMALISED title+description.
 //
-// If different: caller must $unset shortBenefitsDerivedAt on the same
-// write (applyBenefitsStaleToUpdate) and enqueue through collectIfStale.
-// shortBenefits is KEPT on the Mongo doc so a generate during the
-// derive window still has the old list; collectIfStale hands derive
-// an in-memory view with the list cleared so already-has-benefits
-// does not refuse. If identical: no write, no enqueue.
+// If different: caller must $unset shortBenefitsDerivedAt AND
+// marketingLineDerivedAt on the same write (applyBenefitsStaleToUpdate)
+// and enqueue through collectIfStale. shortBenefits / marketingLine are
+// KEPT on the Mongo doc so a generate during the derive window still
+// has the old values; collectIfStale hands derive an in-memory view
+// with the list cleared so already-has-benefits does not refuse. The
+// marketing-line flash path (Stage 3) re-reads the row after this
+// unset — a decided-empty SKU (no line + stamp cleared) re-derives
+// once. If identical: no write, no enqueue.
 //
 // prevDoc = the PRE-upsert row (or null on insert). nextFields = the
 // title/description that will actually be $set (not the raw feed).
@@ -133,7 +136,11 @@ function markBenefitsStaleIfTextChanged(prevDoc, nextFields) {
 
 function applyBenefitsStaleToUpdate(update, changed) {
   if (!changed || !update) return update;
-  update.$unset = { ...(update.$unset || {}), shortBenefitsDerivedAt: 1 };
+  update.$unset = {
+    ...(update.$unset || {}),
+    shortBenefitsDerivedAt: 1,
+    marketingLineDerivedAt: 1,
+  };
   return update;
 }
 

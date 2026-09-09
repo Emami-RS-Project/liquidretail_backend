@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "5bc521eefb606c3f57254c8b4093a3f1adb283e1",
-  "generatedAt": "2026-09-08T03:17:59.667Z",
+  "backendHead": "b564f6555f7707011f9cec1ca9e73094c449043f",
+  "generatedAt": "2026-09-08T23:54:44.556Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
@@ -92,12 +92,11 @@
       "owedSince": null
     },
     "models/CatalogProduct.js": {
-      "backendHash": "53ddad6046cb0de67a74ab33bbf045b82c2a8e9371d398a3554b71ccdc475fc1",
-      "adgenHash": "53ddad6046cb0de67a74ab33bbf045b82c2a8e9371d398a3554b71ccdc475fc1",
-      "backendSha": "47be257c468e85c3f1d1c562abd087ea8625e98c",
-      "status": "synced",
-      "portTo": null,
-      "owedSince": null
+      "backendHash": "12dec5e217a1c3eb9ada3eaddced75606de8677cab36d15c789b83bad5d46ee3",
+      "adgenHash": "f50e146b3903bb029ab6d52bab7b71da3fc641ff1847bf47cdcbdfca97684ebf",
+      "backendSha": "b7812f4f243842990e3f60bf6ed605f09d03a66a",
+      "status": "fork",
+      "reason": "Backend-only ingest fork (intentional). Backend CatalogProduct declares marketingLineSource + pdpSpecFacts/Source + pdpMaterialFacts/Source + pdpFaqAnswers/Source so Mongoose strict does not drop Stage-3 Shopify ingest $sets. Adgen is the renderer and never writes those fields (compile runs in backend; adgen reads ContentAtom + contentIndex). Shared fields (marketingLine, colourway, colourwaySource, contentIndex) stay on both trees. Do not port the ingest extract fields unless adgen starts compiling."
     },
     "models/Category.js": {
       "backendHash": "58e0c5c2b9b4bae826ef12adf04425b52d527818b2968191633c4bf4b2218583",
@@ -670,10 +669,10 @@
     },
     "services/aiCreativeDirectorService.js": {
       "backendHash": "1690dafafcb828b14c7e3bf457c069f92a5746326705d78116cf188a2a81643b",
-      "adgenHash": "4aafee2c1d7cc90487d59d1983df38c0e6b7fb872315cc980161818486decc22",
+      "adgenHash": "fbaca1561ff6fd43f7256524e7b85be85038ca2115f062022da6b97afe50017a",
       "backendSha": "d994c2433fe047f91d68d5ca48afe3bd411f1307",
       "status": "fork",
-      "reason": "2026-09-06: backend #390 (d994c243) forwards catalog/brand data into the static Director: DIRECTOR_SIGNALS_VERSION 3.5.0→3.6.0, brand_signal.personas from Brand.demographics (DIRECTOR_BRAND_PERSONAS), Media.rights.approved (was platformStats.rights_approved), makeAssembleSignalsOnce generate-scoped memo, PERSONAS rule in buildPromptRound. Adgen does not mint static ads / does not run the Director round — expansion stays backend. Deliberately not porting (same as the recorded #386 static COPY 'never invent' skip). Remaining fork: comment-only reserved-proof-slot annotation (PR #34) plus those static-prompt/signal deltas. Adgen still at DIRECTOR_SIGNALS_VERSION 3.4.0."
+      "reason": "Phase 0b CONTENT_ATOM_READ dual-read: pickDirectorPrimaryQuote threads productId; productQuotesForDirector passes {productId} into prepareQuotePool so the atoms fork can fire. Remaining fork: DIRECTOR_SIGNALS_VERSION / personas / mint-side prompt — adgen does not run the Director round."
     },
     "services/aiCreativeV2Helpers.js": {
       "backendHash": "52130701af3ed3c383e084355cf898e48bd170e072fc3df193b9948416e2c013",
@@ -783,10 +782,10 @@
     },
     "services/brandScriptExecutor.js": {
       "backendHash": "ec53050310b215d9390567cb27a15173fc84a53354fcd814e9ee744aabddaade",
-      "adgenHash": "e04d522d1de961e26394cc71d43712c2182d4deb2b8d2f3d75d6974ce913a587",
+      "adgenHash": "a6c6876a8558e47c355ee0d9a5a445ffd8e50e796c8bfeee46cd645ee40fe68c",
       "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
       "status": "unported",
-      "reason": "2026-09-07: two new commits in range are unrelated to the existing titling-attempts debt -- one deletes dead code (qcAndStampVideoAd, no longer called anywhere), the other is a comment-only rewrite (explicitly stated in its own commit message, no behavior change). Prior unported debt carries forward COMPLETELY UNTOUCHED: 2026-09-06 faceKeepOut spread now documents that faceSamples[i].subject (full LTRB) rides the existing object -- no placement behaviour change, no parallel path, live path is adgen. Leftover 8s duration fallbacks now read META_VIDEO_DURATION_SEC via videoDurationPolicy.js. 2026-09-04: adgen commit fcf3709 added titlingOnlyGate=!!ad.deriveFromMaster so derive-only ads gate on TITLING_CATEGORIES only -- backend's adVisionQcService.js has no titlingOnlyGate. Pre-existing: backend still lacks stampTitlingFailureAndThrow/TITLING_ATTEMPTS_MAX; confirmed via grep backend still has zero implementation, only one comment mentioning the gap. owedSince carries forward at 2026-08-28 for the titling-attempts gap.",
+      "reason": "Phase 0b CONTENT_ATOM_READ dual-read: contentIndex added to CatalogProduct select (silent-.select() class); applyAtomRatingPairs overlays contentIndex.ratingPolicy onto the Mixed product/brand snapshots BEFORE the unmodified resolveCoherentSocialProof; type:atoms benefits loaded into cascade context. Prior unported debt (titlingOnlyGate / stampTitlingFailureAndThrow / TITLING_ATTEMPTS_MAX) carries forward untouched.",
       "portTo": "backend",
       "owedSince": "2026-08-28T17:47:48.113Z"
     },
@@ -901,10 +900,10 @@
     },
     "services/directImageRenderService.js": {
       "backendHash": "7b43a590bbad5d12951813c8694da4f058981b31e5105c9086528484b6395146",
-      "adgenHash": "613ec2c8dc556bf9df8116cb39abc28a4fdeb2fb467dea3067a7ec1c73a78712",
+      "adgenHash": "e25376eb44b988313ca13f03e0d577673a688bc4d0476caf0d5bc46ab63dc9e5",
       "backendSha": "0966924ad0ab7875dc5ca0ff3c9785826435e9bf",
       "status": "fork",
-      "reason": "Fork, not a copy -- adgen owns the live static renderer. This change ports only the segment-override plumbing on top of that fork: buildPrompt({segment}) with categoryPath from resolvedProduct.category || inferredBreadcrumb, CatalogProduct selects now include those two fields (otherwise categoryPath is always null on the DB path), and intentResolution.promptFlags.segmentOverrides stamps built.appliedOverrides. Remaining adgen-owned hunks, deliberately not flattened: logo LRU (optionalImageCached); ai_ugc_led -> objection_resolved; product.category threaded for the apparel role preamble; usableAttribution; composeCorrectiveOverride / buildQcRetryArgs; submitEditImageWithSeedFallback; resume-from-receipt (existingPredictionId / allowResume -- a money guard backend does not have). Backend commit 0966924a (#411) DELETED its entire dormant in-process render pipeline (2118 lines removed, 20 added, all non-functional/comments) -- this deletion includes the previously-documented backend-only promptSha256/seedStyle hunks, which no longer exist in backend at all, so there is nothing left to port either way. Confirmed adgen's file was NOT touched by this commit (0-line diff) and all its documented fork behaviors remain fully intact. Backend's live copy is now ~1050 lines of geometry/logo-compositing helpers only (finishPlate, deliveryGeometryFor, logoPlacementFor, etc.), since adgen owns rendering in production."
+      "reason": "Phase 0b CONTENT_ATOM_READ dual-read: contentIndex added to CatalogProduct selects; applyAtomRatingPairs overlays contentIndex.ratingPolicy onto Mixed product/brand pairs before the unmodified resolveCoherentSocialProof. Remaining adgen-owned fork unchanged (logo LRU, QC retry, resume-from-receipt, etc.). Backend copy has no buildIntentData (in-process static render deleted)."
     },
     "services/faceSafeCrop.js": {
       "backendHash": "986126268359d4f9d28f8b8075e930689a541cf369025ffbe83c9a2f61cf90a5",
@@ -981,10 +980,10 @@
     },
     "services/layoutInputService.js": {
       "backendHash": "06c2670a907b52ef2b01885b0b5e225c238b2f9f1791e761ff634d3e84a7e805",
-      "adgenHash": "b72f89371b19e3fdecec8abd3d361a97fee421947d39e425e4f0e264fb521091",
+      "adgenHash": "3c477e32eac5927cc10b7af30457c7f5b6f09bd3ee4efdd4bc40aa85f3752a85",
       "backendSha": "d994c2433fe047f91d68d5ca48afe3bd411f1307",
       "status": "fork",
-      "reason": "2026-09-06: backend #390 (d994c243) seeds layout derivation from CatalogProduct.shortBenefits when non-empty (catalogShortBenefitsOf / resolveLayoutShortBenefits / seedCatalogShortBenefits; skips the Gemini emit-short_benefits instruction; INPUT_SCHEMA_VERSION stays 4.2). Backend's own comment: existing artifacts remain valid; titling already prefers catalog benefits via DEFAULT_META_CASCADES.benefits. Adgen live titling already catalog-first on that cascade — this is a derivation-cost optimization of a field the cascade overwrites, not a missing burned-in-title fix. Remaining adgen-owned fork unchanged: findBrandByName inlined so adgen no longer requires brandCatalogService; startStageTimer/layoutInputMs; four-field top-level args. Nothing owed either way."
+      "reason": "Phase 0b CONTENT_ATOM_READ dual-read: prepareQuotePool / pickPrimaryProductQuote gain a flag-gated atoms fork (hydrate printable product/brand/category atoms into the existing pickStrongestQuote shape; flag-off is the pre-change 4-arg composition). Remaining adgen-owned fork unchanged: findBrandByName inlined; startStageTimer/layoutInputMs; four-field top-level args; catalogShortBenefitsOf is backend-only."
     },
     "services/llmError.js": {
       "backendHash": "589fd87ece50784d1620ac2db054d92911c880d21d2a34be4db3f4df8aaf7f8f",
@@ -1021,19 +1020,17 @@
     },
     "services/metaCascadeConfig.js": {
       "backendHash": "5605fea3914ab15d6b5783cd8d1db29b51d9ab870de098133a5d5bf5a228b9e5",
-      "adgenHash": "5605fea3914ab15d6b5783cd8d1db29b51d9ab870de098133a5d5bf5a228b9e5",
+      "adgenHash": "6bebd30e1095e702e16f2757c36aa05e3fe83fc3a500cc8684b9533a8b31d257",
       "backendSha": "fba815887c3240d617c9c3a1bbfd6daecd791215",
-      "status": "synced",
-      "portTo": null,
-      "owedSince": null
+      "status": "fork",
+      "reason": "Phase 0b CONTENT_ATOM_READ dual-read: flag-gated atoms source prepended onto the benefits cascade via a getter (flag-off returns the pre-change array with no atoms entry). Working-tree backend and adgen copies are byte-identical; origin/main does not have this yet so the entry is fork until this backend file lands on trunk."
     },
     "services/metaCascadeResolver.js": {
       "backendHash": "5eb1c61fd3c9d19b79c832f93a31153b4597f7fedc0d4a06c800a7186573063c",
-      "adgenHash": "5eb1c61fd3c9d19b79c832f93a31153b4597f7fedc0d4a06c800a7186573063c",
+      "adgenHash": "1434ea5a89feb95171c9a54d586fe9fef61cafe4bc4952ab595d74179ccfd672",
       "backendSha": "21da82d711a808e4067e548ea24f70415bffb4d6",
-      "status": "synced",
-      "portTo": null,
-      "owedSince": null
+      "status": "fork",
+      "reason": "Phase 0b CONTENT_ATOM_READ dual-read: extractSource handles type:'atoms' (benefit texts from context.contentAtoms); buildContext accepts contentAtoms. Working-tree backend and adgen copies are byte-identical; origin/main does not have this yet so the entry is fork until this backend file lands on trunk."
     },
     "services/moderationSeedFallback.js": {
       "backendHash": "a84aaa641292abeaa3a553c85f0aaa0f856a0ccd7d279d6999432d5a31a8005e",

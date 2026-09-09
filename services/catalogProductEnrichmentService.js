@@ -188,6 +188,9 @@ async function enrichOne(product, { includeDetails = false } = {}) {
 
   const ms = Date.now() - t0;
   console.log(`   ✓ enriched ${label} in ${ms}ms`);
+  if (process.env.CONTENT_ATOM_COMPILE === 'true' && product && product._id) {
+    require('./contentCompiler').scheduleForProduct({ productId: product._id });
+  }
   return { enriched };
 }
 

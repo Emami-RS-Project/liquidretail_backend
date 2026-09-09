@@ -136,7 +136,8 @@ function pickDirectorPrimaryQuote(product, opts) {
   // `pickPrimaryProductQuote(product?.productReviews, opts`.
   opts = {
     ...(opts || {}),
-    productTitle: product?.title || (opts && opts.productTitle) || null
+    productTitle: product?.title || (opts && opts.productTitle) || null,
+    productId: product?._id || (opts && opts.productId) || null
   };
   const picked = pickPrimaryProductQuote(product?.productReviews, opts || {});
   if (!picked || !picked.text) return null;
@@ -172,7 +173,8 @@ function productQuotesForDirector(product) {
     product?.productReviews,
     product?.productReviews?.quotes,
     'product',
-    product?.title || null
+    product?.title || null,
+    (product && product._id) ? { productId: product._id } : undefined
   ).map((q) => ({
     text:   q.text,
     author: q.author_name || q.author || null,

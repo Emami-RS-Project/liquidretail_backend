@@ -576,7 +576,7 @@ async function buildMetaForAd(ad, brand, opts = {}) {
       // Without it the cascade's catalogProduct.shortBenefits source is
       // permanently undefined (silent .select() omission) and video falls
       // through to a stale LayoutInputArtifact.
-      catalogProduct = await CatalogProduct.findById(ad.productId).select('title description price rating productReviews imageUrl titleStyleSpec categoryRef recentQuoteKeys lastQuoteRunId lastQuoteFingerprint shortBenefits').lean();
+      catalogProduct = await CatalogProduct.findById(ad.productId).select('title description price rating productReviews imageUrl titleStyleSpec categoryRef recentQuoteKeys lastQuoteRunId lastQuoteFingerprint shortBenefits contentIndex').lean();
     } catch { /* optional */ }
   }
 
@@ -665,7 +665,14 @@ async function buildMetaForAd(ad, brand, opts = {}) {
     resolveMeta, mergeCascades, buildContext,
     DEFAULT_META_CASCADES,
   } = require('./metaCascadeResolver');
-  const context = buildContext({ ad, brand, catalogProduct, layoutInput, catalogMedias, igCredential });
+  let contentAtoms = null;
+  if (process.env.CONTENT_ATOM_READ === 'true' && catalogProduct && catalogProduct.contentIndex && catalogProduct.contentIndex.compiledAt) {
+    try {
+      const inv = await require('./contentInventory').loadInventory(catalogProduct._id);
+      contentAtoms = (inv && inv.benefits) || [];
+    } catch { contentAtoms = []; }
+  }
+  const context = buildContext({ ad, brand, catalogProduct, layoutInput, catalogMedias, igCredential, contentAtoms });
   const merged  = mergeCascades(DEFAULT_META_CASCADES, brand?.metaCascades || null);
   const cascaded = resolveMeta(merged, context);
 
@@ -929,10 +936,16 @@ async function buildMetaForAd(ad, brand, opts = {}) {
   // written together by enrichment) — never averaged from CatalogProduct
   // rows, never the layoutInput brand-fallback pair (that exists only so a
   // no-SKU ad isn't blank; the video path always has this real snapshot).
-  const brandSnapshot = brand?.brandReviews && typeof brand.brandReviews === 'object'
+  let brandSnapshot = brand?.brandReviews && typeof brand.brandReviews === 'object'
     ? { rating: brand.brandReviews.rating ?? null, reviewCount: brand.brandReviews.reviewCount ?? null }
     : null;
   const brandAttribution = brandAttributionLabel(brand);
+
+  {
+    const swapped = require('./contentInventory').applyAtomRatingPairs(catalogProduct, productSnapshot, brandSnapshot);
+    productSnapshot = swapped.product;
+    brandSnapshot = swapped.brand;
+  }
 
   const coherent = resolveCoherentSocialProof({
     quote: pq || null,
