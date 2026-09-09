@@ -183,6 +183,7 @@ async function resolveAdsByIds({ brandId, adIds }) {
       price:       cat?.price ?? null,
       currency:    null,
       sku:         cat?.retailerId ?? null,
+      productUrl:  cat?.productUrl ?? null,
       headline:    ad.copy?.headline ?? null,
       primary:     ad.copy?.quote ?? null,
       description: cat?.shortBenefits?.[0] ?? null
