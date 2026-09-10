@@ -994,6 +994,16 @@ router.get('/ads-summary', async (req, res) => {
     const adsInFlight      = productsOut.reduce((s, p) => s + p.inFlightCount, 0);
     const adsReadyToExport = productsOut.reduce((s, p) => s + p.readyToExport, 0);
 
+    // Pagination — bound the wire payload. Summary tiles stay computed
+    // over the full match set (above); only the products page slice is
+    // returned. Sort keys (lastActivityAt desc, coveragePct asc) are
+    // stable so `offset` remains meaningful across pages.
+    const rawLimit  = parseInt(req.query.limit,  10);
+    const rawOffset = parseInt(req.query.offset, 10);
+    const limit  = Number.isFinite(rawLimit)  && rawLimit  > 0 ? Math.min(rawLimit, 100) : 20;
+    const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+    const pageProducts = productsOut.slice(offset, offset + limit);
+
     res.json({
       summary: {
         totalProducts,
@@ -1013,7 +1023,13 @@ router.get('/ads-summary', async (req, res) => {
         // Phase 2 placeholder — opportunity bucket counts.
         goodOpportunities: null
       },
-      products: productsOut
+      products: pageProducts,
+      pagination: {
+        total:   totalProducts,
+        offset,
+        limit,
+        hasMore: offset + limit < totalProducts
+      }
     });
   } catch (err) {
     console.error(`❌ GET /api/catalog/ads-summary: ${err.message}\n${err.stack || ''}`);
