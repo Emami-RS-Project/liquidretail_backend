@@ -126,7 +126,18 @@ settable via POST/PATCH/sync.
 
 PoC extractor + the 28-product dataset: `/tmp/athleta/deep_scrape.py`, `athleta_30.json`.
 
-### Implementation (same session, NOT committed, NOT deployed, ingest NOT run)
+### Implementation — MERGED + DEPLOYED 2026-09-10 (ingest still NOT run)
+
+Landed as PR #434, squash `f930ea8b`. Render auto-deploy carried it to backend WEB
+(`srv-d1vuktqli9vc73ft07ng`), WORKER (`srv-d8128c1o3t8c73e8kb30`) and the adgen services;
+all `live` on `f930ea8b`, `/api/health` 200. **The Athleta brand was NOT created and no
+ingest has been run** — steps 1-5 below still stand, starting at step 2.
+
+⚠️ CI note: the `adgen` job was red on that PR for a **pre-existing, unrelated** reason —
+`verifyVendorDrift` `unported 12 (1 overdue)`, the `ADGEN_UNPORTED_GRACE_DAYS` window
+expiring on an unported backend fix to `services/atlasImageService.js`. `main` was already
+failing the same way at `9ca4ec42` before this branch existed, and the files this PR touched
+reported `drift 0`. **That port debt is still open and needs deliberate action.**
 
 Built by Grok (grok-4.6, effort high), reviewed line-by-line here. All three fixes are
 **additive and fail-closed** — no existing store changes behaviour.
@@ -159,9 +170,9 @@ The BV adapter already sorts `SubmissionTime:desc` (not `Helpfulness`) and suppo
 an unfiltered page. So the 1-star-top-quote hazard I measured in my own PoC is a property of
 *my* `Helpfulness:desc` PoC query, not of the repo's adapter.
 
-### Sequencing for the actual onboarding (not yet executed)
+### Sequencing for the actual onboarding (step 1 DONE, 2-5 not yet executed)
 
-1. Land + deploy the three fixes (they are the whole reason a sync would return >0 rows).
+1. ~~Land + deploy the three fixes~~ — **DONE**, PR #434 / `f930ea8b`, live 2026-09-10.
 2. `CATALOG_INGEST_LIMIT=30` on the WEB Render dashboard (shadows the file's 10) — **global**,
    so revert right after.
 3. `POST /api/sales-demos/brands` → name `Athleta`, `shopifyUrl https://athleta.gap.com`,
