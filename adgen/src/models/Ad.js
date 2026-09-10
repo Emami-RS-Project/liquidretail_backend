@@ -731,6 +731,15 @@ const adSchema = new mongoose.Schema({
   // scripts/verifyTitlingResume.js (asserts this declaration exists, so the field
   // cannot be used without being declared).
   titlingResumeState: { type: String, enum: ['pending', 'claimed', null], default: null },
+  // Clock for titlingResumeService's missing-brand give-up. Set ONCE the first
+  // time a claimed resume pass cannot resolve a brand, and never reset by a
+  // later claim/release in that function — those writes bump `updatedAt`, which
+  // is what made the give-up window unreachable (measured live: ads looped
+  // claim→release for 5 days). MUST STAY DECLARED: Mongoose strict drops
+  // undeclared paths (see titlingResumeState note above). Backend's copy of
+  // this model must declare it too so a backend save() cannot strip the stamp.
+  // Pinned by scripts/verifyTitlingRecoverability.js section E.
+  titlingResumeBrandMissingSince: { type: Date, default: null },
   // Handoff marker for out-of-process titling (adgen-titler role).
   // Stamped `true` by the adgen renderer atomic with (veoVideoUrl set +
   // claim release) when ADGEN_TITLER_ENABLED=true; the titler service polls

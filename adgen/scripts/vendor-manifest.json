@@ -1,15 +1,15 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "c235b681dc023ee32172054c66089e1a56a40ae2",
-  "generatedAt": "2026-09-10T18:09:15.016Z",
+  "backendHead": "27437447e0596c78cded97f224ef428623b17897",
+  "generatedAt": "2026-09-10T19:33:23.290Z",
   "files": {
     "models/Ad.js": {
-      "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
-      "adgenHash": "799149c941124b3a45fb945bcacca004f43d0137a47b6ce9850ab29653620abe",
-      "backendSha": "6cee8eac343fe07493fa83c049d8c468343a0ffd",
+      "backendHash": "27ad9c5345ed09228c9bb003a3c6708d024718d22968e24ad6cf66d45e2ca4c9",
+      "adgenHash": "969efb14f959c3653a8c0948fb7622581399e219ba0111d3549ad3038841d529",
+      "backendSha": "27437447e0596c78cded97f224ef428623b17897",
       "status": "fork",
-      "reason": "Lane B: both copies declare Ad.clampTelemetry Mixed so Mongoose strict cannot drop fit-before-write backstop events. Remaining fork: adgen-only render/titling fields (videoQcRetry etc.)."
+      "reason": "Look at 6cee8eac..27437447: the only backend change is #438's titlingResumeBrandMissingSince (Date), which adgen ALREADY declares (adgen/src/models/Ad.js:742, backend models/Ad.js:718) — so #438's unported/portTo:backend debt was a pre-merge artifact of comparing adgen against a backend origin/main that did not yet carry #438's own backend half, and its premise expired when #438 merged as 27437447. Debt satisfied in CONTENT, verified by reading both files, not by bumping a hash. This PR (#436) separately adds clampTelemetry (Mixed) to BOTH copies in the same commit so Mongoose strict cannot drop fit-before-write backstop events — a simultaneous both-trees addition, never an adgen-only field. Verified by enumerating real Mongoose schema.paths top-level keys on both models: adgen declares ZERO paths this branch's backend lacks, i.e. the adgen-subset-of-backend rule holds exactly. Remaining divergence is adgen-owned render/titling content (videoQcRetry etc.), deliberately held. Nothing owed either way. Re-open as unported if adgen ever declares an Ad path backend does not."
     },
     "models/Advertiser.js": {
       "backendHash": "0a7e1bb9ca5e0fbbfc6972f9c96d87f839b0a86175831b5446ae27095137ba3f",

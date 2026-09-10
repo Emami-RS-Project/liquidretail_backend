@@ -708,6 +708,16 @@ const adSchema = new mongoose.Schema({
   titlingResumeState: { type: String, enum: ['pending', 'claimed', null], default: null },
   // Declared here for the SAME reason as titlingResumeState above, and it is the
   // backend copy that has to carry it even though nothing in this repo reads or
+  // writes it. adgen's titlingResumeService stamps this ONCE the first time a
+  // recovered master cannot resolve a brand, and computes
+  // TITLING_RESUME_BRAND_GIVEUP_MIN from it — not from updatedAt, which that
+  // sweeper's own claim/release resets every pass. A backend save() that
+  // dropped the path would restart that clock and reopen the infinite
+  // claim→release loop (measured live: two ads, 5 days).
+  // scripts/verifyModelParity.js: adgen's schema paths ⊆ backend's.
+  titlingResumeBrandMissingSince: { type: Date, default: null },
+  // Declared here for the SAME reason as titlingResumeState above, and it is the
+  // backend copy that has to carry it even though nothing in this repo reads or
   // writes it.
   //
   // liquidretail_adgen's Phase 3 titler handoff stamps `titlingNeeded: true` on

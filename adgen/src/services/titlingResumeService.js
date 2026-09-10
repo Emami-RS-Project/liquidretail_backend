@@ -147,8 +147,13 @@ function buildResumeFilter(staleCutoff) {
 /**
  * Claim and title recovered masters. NEVER throws — one bad ad must not kill
  * the pass or the interval. Returns { titled, failed, skipped }.
+ *
+ * `nowMs` is a test seam for the missing-brand give-up clock only. Production
+ * callers omit it (Date.now()). It does not feed buildResumeFilter / claim
+ * staleness — those stay on wall-clock so a harness cannot accidentally
+ * reclaim a live claim by injecting time.
  */
-async function resumeUntitledMasters({ limit = TITLING_RESUME_MAX } = {}) {
+async function resumeUntitledMasters({ limit = TITLING_RESUME_MAX, nowMs } = {}) {
   const out = { titled: 0, failed: 0, skipped: 0 };
   if (!enabled()) return out;
 
@@ -260,8 +265,59 @@ async function resumeUntitledMasters({ limit = TITLING_RESUME_MAX } = {}) {
         // signal. So it releases only while the ad is younger than the give-up
         // window; past that it goes terminal with an honest reason. The paid
         // master is already on renderUrl either way, so nothing is lost.
-        const tooOld = (Date.now() - new Date(adFresh.updatedAt || 0).getTime())
-          > BRAND_GIVEUP_MIN * 60 * 1000;
+        //
+        // WHY NOT adFresh.updatedAt / the pre-claim ad.updatedAt. This function's
+        // own CLAIM writes `updatedAt: new Date()` a few lines above, so
+        // adFresh.updatedAt is always ~now at this check — the give-up clock
+        // reset itself on every sweep pass and could NEVER exceed
+        // BRAND_GIVEUP_MIN (measured live: two production ads looped
+        // claim→release for 5 days, re-touched every ~10 minutes). Releasing
+        // back to pending ALSO bumps updatedAt, so even the PRE-claim
+        // `ad.updatedAt` only reflects the previous tick's release (~sweep
+        // cadence), never accumulating toward real elapsed time since the ad
+        // FIRST became stuck. The clock is Ad.titlingResumeBrandMissingSince,
+        // set ONCE on first observation of an unresolvable brand and never
+        // overwritten by a later claim/release in this function.
+        const now = nowMs != null ? Number(nowMs) : Date.now();
+        const existingSince = adFresh.titlingResumeBrandMissingSince
+          ? new Date(adFresh.titlingResumeBrandMissingSince)
+          : null;
+        const alreadyStamped = !!(existingSince && !Number.isNaN(existingSince.getTime()));
+        let missingSince = alreadyStamped ? existingSince : null;
+        if (!alreadyStamped) {
+          const firstSeenAt = new Date(now);
+          // First-writer CAS. Several web instances run this sweep concurrently
+          // with no lease — the claim above is exclusive for THIS pass, but a
+          // sibling that already stamped (or a reclaim of a stale claim whose
+          // first-seen write landed before the process died) must not overwrite
+          // the original first-seen time. `{ field: null }` also matches a
+          // missing path (Mongo; this repo's miniMongoStub matches the same),
+          // so a pre-field production row still stamps. Whoever succeeds writes
+          // `now` within the same claim window — either is fine.
+          const stamped = await Ad.updateOne(
+            {
+              _id: ad._id,
+              titlingResumeState: STATE_CLAIMED,
+              titlingResumeBrandMissingSince: null
+            },
+            { $set: { titlingResumeBrandMissingSince: firstSeenAt } }
+          ).catch(() => null);
+          if (stamped && stamped.modifiedCount > 0) {
+            missingSince = firstSeenAt;
+          } else {
+            const reread = await Ad.findById(ad._id).lean();
+            const fromDb = reread && reread.titlingResumeBrandMissingSince
+              ? new Date(reread.titlingResumeBrandMissingSince)
+              : null;
+            missingSince = (fromDb && !Number.isNaN(fromDb.getTime())) ? fromDb : firstSeenAt;
+          }
+        }
+        // First observation THIS pass: we just started the clock. Do not give
+        // up on the same pass we stamped — even if a concurrent loser re-read
+        // a sibling's stamp, that stamp is ~now in the same claim window.
+        const tooOld = alreadyStamped
+          && missingSince
+          && (now - missingSince.getTime()) > BRAND_GIVEUP_MIN * 60 * 1000;
         if (tooOld) {
           // Past the window the brand is treated as genuinely absent, and then we
           // promote the ad to draft and count it a SUCCESS rather than invent a
@@ -314,6 +370,9 @@ async function resumeUntitledMasters({ limit = TITLING_RESUME_MAX } = {}) {
           );
           continue;
         }
+        // $set does NOT mention titlingResumeBrandMissingSince: a later pass
+        // must not wipe or refresh the first-seen stamp. Mongo leaves unset
+        // fields alone on $set; this is an updateOne, not a document replace.
         await Ad.updateOne(
           { _id: ad._id, titlingResumeState: STATE_CLAIMED },
           {
