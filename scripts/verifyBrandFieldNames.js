@@ -597,7 +597,10 @@ check(
 // needs its own verified follow-up. Anything NOT on this list still fails, which
 // is the point — the list is closed, and adding to it should feel expensive.
 const CATALOG_SELECT_ALLOWLIST = new Map([
-  ['canonicalUrl', 'catalogProductReviewRefreshService: dead second arm of `productUrl || canonicalUrl`; productUrl (:118) is real and covers it'],
+  // canonicalUrl REMOVED 2026-09-07 — declared on the schema now
+  // (models/CatalogProduct.js), closing the exact dead-fallback bug this
+  // allowlist comment used to describe. See
+  // session.d/2026-09-07_catalog-product-info-scrape.md.
   ['createdAt',    'routes/catalog.js: schema sets no `timestamps`, so this is only present on rows some other writer stamped'],
   ['productImages', 'catalogProductLifestyleImageService: no writer anywhere in the repo — almost certainly fully dead'],
   ['size',         'routes/catalog.js: not declared; likely a legacy variant field'],

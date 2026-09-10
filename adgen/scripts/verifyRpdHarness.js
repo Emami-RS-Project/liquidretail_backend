@@ -1167,6 +1167,117 @@ const codeOnly = (src) => src
     assert(notes[1].model, 'the auto-note must record which model judged');
     fs.rmSync(tmp, { recursive: true, force: true });
   });
+  check('V6 video eval calls the production judgeVideoRender, not a private rubric', () => {
+    // VIDEO_RUBRIC was a second, drifted scoring scheme (seed_fidelity /
+    // hallucinated_parts / …) that made RPD verdicts incomparable with
+    // production QC. The constant, the raw chatCompletion content builder,
+    // and the export must all be gone — replaced by a call into the same
+    // judgeVideoRender production uses.
+    const src = codeOnly(evalSrc);
+    assert(!/VIDEO_RUBRIC/.test(src), 'VIDEO_RUBRIC must be deleted, not left beside the new call');
+    assert(!/seed_fidelity|hallucinated_parts|transition_quality|text_legibility/.test(src),
+      'RPD must not re-declare production-divergent video category names');
+    assert(/judgeVideoRender/.test(src), 'eval must call adVisionQcService.judgeVideoRender');
+    assert(/originalProductUrls/.test(src), 'eval must pass the production multi-ref field, not a hand-rolled content array');
+    const { VIDEO_RUBRIC } = require(path.join(RPD, 'lib', 'autoEval'));
+    assert.strictEqual(VIDEO_RUBRIC, undefined, 'VIDEO_RUBRIC must not stay exported');
+  });
+  await checkAsync('V6b video eval forwards seed+refs as originalProductUrls and real frame timestamps', async () => {
+    const { evalRun } = require(path.join(RPD, 'lib', 'autoEval'));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rpd-v6b-'));
+    const cellDir = path.join(tmp, 'cells', 'c1');
+    fs.mkdirSync(cellDir, { recursive: true });
+    const framePng = path.join(tmp, 'f.png');
+    fs.writeFileSync(framePng, Buffer.from('89504e470d0a1a0a', 'hex'));
+    fs.writeFileSync(path.join(cellDir, 'master.mp4'), Buffer.from('not-a-real-mp4'));
+    const seed = 'https://example.test/front.jpg';
+    const back = 'https://example.test/back.jpg';
+    fs.writeFileSync(path.join(tmp, 'manifest.json'), JSON.stringify({
+      name: 'v6b',
+      spec: { seed: { url: seed, refs: [back], productId: 'prod_v6b' } },
+      cells: [{
+        id: 'c1', kind: 'video', status: 'done', durationSec: 10,
+        localPath: path.join('cells', 'c1', 'master.mp4'), notes: []
+      }],
+      observations: []
+    }));
+    let seen = null;
+    const frameDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rpd-v6b-frames-'));
+    fs.copyFileSync(framePng, path.join(frameDir, 'f01.png'));
+    try {
+      await evalRun(tmp, {
+        maxUsd: 1,
+        deps: {
+          extractFrames: () => ({
+            dir: frameDir,
+            frames: [{ path: path.join(frameDir, 'f01.png'), timestampSec: 1.25 }]
+          }),
+          judgeVideoRender: async (args, judgeDeps) => {
+            seen = { args, judgeDeps };
+            return {
+              pass: true,
+              categories: {
+                product_fidelity: { score: 8, pass: true, findings: [] },
+                competitor_marks: { score: 9, pass: true, findings: [] }
+              },
+              summary: 'matches refs',
+              findings: []
+            };
+          }
+        },
+        log: { log: () => {}, warn: () => {}, error: () => {} }
+      });
+      assert(seen, 'judgeVideoRender must be invoked');
+      assert.deepStrictEqual(seen.args.originalProductUrls, [seed, back],
+        'originalProductUrls must be primary seed then spec.seed.refs');
+      assert.strictEqual(seen.args.productId, 'prod_v6b');
+      assert(Array.isArray(seen.args.frames) && seen.args.frames.length === 1);
+      assert.strictEqual(seen.args.frames[0].timestampSec, 1.25,
+        'timestampSec must be the extracted frame\'s real position, not an 8s-window guess');
+      assert(/^data:image\//.test(seen.args.frames[0].url), 'frames stay local data URIs — no Cloudinary upload');
+      assert(seen.judgeDeps && typeof seen.judgeDeps.chatCompletion === 'function',
+        'judgeVideoRender must receive { chatCompletion, model } as its own deps');
+      const after = JSON.parse(fs.readFileSync(path.join(tmp, 'manifest.json'), 'utf8'));
+      const note = after.cells[0].notes.find((n) => n.auto);
+      assert(note, 'auto-note must land');
+      assert(/PASS/.test(note.text), 'nested verdict.pass must print PASS');
+      assert(/product_fidelity 8\/10/.test(note.text), 'nested category.score must appear in the note');
+      assert(!/overall /.test(note.text), 'must not fabricate a top-level overall the real judge does not return');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+  check('V7 frame timestamps span the real duration, not a hardcoded 8s window', () => {
+    const { planFrameTimestamps } = require(path.join(RPD, 'lib', 'autoEval'));
+    assert.deepStrictEqual(planFrameTimestamps(10, 4), [1.25, 3.75, 6.25, 8.75]);
+    assert.deepStrictEqual(planFrameTimestamps(8, 4), [1, 3, 5, 7]);
+    const src = codeOnly(evalSrc);
+    assert(!/fps=\$\{count\}\/8/.test(src), 'the fps=count/8 assumed-window filter must be gone');
+  });
+  check('V8 summarizeVerdict reads nested {score} and does not invent overall', () => {
+    const { summarizeVerdict } = require(path.join(RPD, 'lib', 'autoEval'));
+    const nested = summarizeVerdict({
+      pass: false,
+      categories: {
+        product_fidelity: { score: 4, pass: false, findings: ['colour drift'] },
+        competitor_marks: { score: 9, pass: true, findings: [] }
+      },
+      summary: 'fails fidelity',
+      findings: ['[product_fidelity] colour drift']
+    });
+    assert(/FAIL/.test(nested));
+    assert(/product_fidelity 4\/10/.test(nested));
+    assert(/competitor_marks 9\/10/.test(nested));
+    assert(!/overall /.test(nested), 'the real judge has no overall field — do not fabricate one');
+    // Flat-number fallback: older stubs / historical autoEval blobs.
+    const flat = summarizeVerdict({
+      pass: true,
+      categories: { product_fidelity: 9 },
+      summary: 'clean'
+    });
+    assert(/PASS/.test(flat));
+    assert(/product_fidelity 9\/10/.test(flat));
+  });
 
   // ── H. hosted (ephemeral-disk) safety ──────────────────────────────────
   console.log('\nH. hosted / ephemeral-disk safety');

@@ -1,0 +1,16 @@
+{
+  "name": "studio-vocab-regression-pelagic-harbor",
+  "notes": "Regression check — real environment seed (Pelagic 'Lunker Jacket', product 6a9d337f08b6f63100dc5964, sceneType 'Fishing Harbor') must stay lifestyle_scene and be PRESERVED, not rebuilt. A genuinely brand-appropriate real environment for a fishing-gear brand — exactly the case the whole scene-preserve mechanism exists to protect.",
+  "seed": { "productId": "6a9d337f08b6f63100dc5964" },
+  "static": {
+    "surface": "meta_feed_1_1",
+    "intent": "product_first_lifestyle",
+    "productDesc": "a technical fishing jacket worn by a cropped model on a white sport-fishing boat, choppy harbor water and a blurred marina in the background",
+    "seedStyle": "lifestyle",
+    "seedClass": "lifestyle_scene",
+    "variantKind": "product_image",
+    "copy": { "headline": "Built to Weather It", "rating": 4.8, "reviewCount": 10, "cta": "SHOP NOW" },
+    "models": ["openai/gpt-image-2/edit"],
+    "variants": [ { "id": "preserved-1" } ]
+  }
+}

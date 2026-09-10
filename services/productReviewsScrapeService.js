@@ -48,7 +48,7 @@
 'use strict';
 
 const http = require('./httpScrapeClient');
-const { cleanScrapedText } = require('../utils/htmlEntities');
+const { cleanScrapedText, stripHtml } = require('../utils/htmlEntities');
 
 const LOG = '⭐';
 
@@ -362,6 +362,138 @@ function mapReviewNode(node, source = null) {
   };
 }
 
+// ── non-review Product-node fields ─────────────────────────────────
+//
+// The SAME JSON-LD Product node this engine already fetches and parses
+// for aggregateRating/review also typically carries description, brand,
+// sku/gtin/mpn, image and a spec table (additionalProperty). This is
+// zero extra cost (no second fetch, no second parse) — the fields were
+// simply being discarded. Short fields are cleaned with cleanScrapedText,
+// same as reviews, so a malformed or wrong-typed JSON-LD value (an object
+// where a string was expected) can never leak through as "[object
+// Object]". `description` uses stripHtml instead — unlike a review body
+// or a brand name, a store's on-page description routinely IS real markup
+// (a merchant's own `<div class="rte">…</div>`), and this field reaches
+// paid Director prompts (aiCreativeDirectorService.js), so it gets the
+// same tag-stripping treatment shopifyPublicIngestService.js already
+// applies to the feed's own description — never the raw markup verbatim.
+
+const MAX_DESCRIPTION_CHARS = 2000;
+
+/** brand: string | {name} | [Brand, ...] → cleaned name string | null */
+function coerceBrandName(brand) {
+  if (brand == null) return null;
+  if (Array.isArray(brand)) return coerceBrandName(brand[0]);
+  if (typeof brand === 'object') return cleanScrapedText(brand.name, MAX_TITLE_CHARS);
+  return cleanScrapedText(brand, MAX_TITLE_CHARS);
+}
+
+/** image: string | {url|contentUrl} | [string|object, ...] → url string | null */
+function coerceImageUrl(image) {
+  if (image == null) return null;
+  if (Array.isArray(image)) return coerceImageUrl(image[0]);
+  if (typeof image === 'object') return cleanScrapedText(image.url || image.contentUrl, 2000);
+  return cleanScrapedText(image, 2000);
+}
+
+/** First Offer in a node's `offers` — object or array (AggregateOffer/Offer). */
+function firstOffer(node) {
+  const offers = node && node.offers;
+  if (!offers) return null;
+  if (Array.isArray(offers)) return offers[0] || null;
+  if (typeof offers === 'object') return offers;
+  return null;
+}
+
+/**
+ * Identifier lookup that checks the Product node first, then its first
+ * Offer — real-world stores put sku/gtin/mpn on either, inconsistently.
+ * Never overwrites a Product-level value that IS present with an
+ * Offer-level one.
+ */
+function identifierFromNode(node, keys) {
+  for (const key of keys) {
+    const v = node && node[key];
+    if (v != null && String(v).trim()) return cleanScrapedText(v, 128);
+  }
+  const offer = firstOffer(node);
+  if (offer) {
+    for (const key of keys) {
+      const v = offer[key];
+      if (v != null && String(v).trim()) return cleanScrapedText(v, 128);
+    }
+  }
+  return null;
+}
+
+const GTIN_KEYS = ['gtin13', 'gtin12', 'gtin8', 'gtin14', 'gtin'];
+
+/**
+ * additionalProperty: [{name, value}, ...] (schema.org's spec-table
+ * convention) → { [name]: value } | null. Same shape productDetailsService
+ * already persists onto CatalogProduct.specs from SerpAPI Immersive
+ * (`ip.specifications`), so both sources land in one consistent format.
+ */
+function specsFromAdditionalProperty(node) {
+  const props = node && node.additionalProperty;
+  const arr = Array.isArray(props) ? props : props ? [props] : [];
+  const out = {};
+  for (const p of arr) {
+    if (!p || typeof p !== 'object') continue;
+    const name = cleanScrapedText(p.name, 120);
+    const value = typeof p.value === 'string' || typeof p.value === 'number'
+      ? cleanScrapedText(p.value, 300)
+      : null;
+    if (name && value) out[name] = value;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+const MAX_SLOGAN_CHARS = 200;
+
+/**
+ * productInfoFromNode(node) → { description, brandName, sku, gtin, mpn,
+ *   image, specs, slogan } — all null/absent when not present. Pure, same
+ * "clean but never throw" contract as mapReviewNode.
+ */
+function productInfoFromNode(node) {
+  if (!node || typeof node !== 'object') return {};
+  const out = {};
+  // stripHtml, unlike cleanScrapedText, has no type guard of its own — it
+  // will happily String()-coerce a malformed non-string value and produce
+  // "[object Object]". Guard the type here so a wrong-shaped JSON-LD
+  // description can never leak through as that literal string.
+  const rawDescription = node.description;
+  const description = (typeof rawDescription === 'string' || typeof rawDescription === 'number')
+    ? stripHtml(rawDescription, MAX_DESCRIPTION_CHARS)
+    : null;
+  if (description) out.description = description;
+  // slogan: schema.org's real, defined Thing.slogan property — "A slogan
+  // or motto associated with the item." Most sites do not populate it, so
+  // coverage is best-effort/partial by design (owner-confirmed scope,
+  // 2026-09-07) — never LLM-generated, and distinct from Brand.tagline
+  // (brand-level). Same type guard as description; short like a title,
+  // not a body, so it gets MAX_SLOGAN_CHARS, not MAX_DESCRIPTION_CHARS.
+  const rawSlogan = node.slogan;
+  const slogan = (typeof rawSlogan === 'string' || typeof rawSlogan === 'number')
+    ? stripHtml(rawSlogan, MAX_SLOGAN_CHARS)
+    : null;
+  if (slogan) out.slogan = slogan;
+  const brandName = coerceBrandName(node.brand);
+  if (brandName) out.brandName = brandName;
+  const sku = identifierFromNode(node, ['sku']);
+  if (sku) out.sku = sku;
+  const gtin = identifierFromNode(node, GTIN_KEYS);
+  if (gtin) out.gtin = gtin;
+  const mpn = identifierFromNode(node, ['mpn']);
+  if (mpn) out.mpn = mpn;
+  const image = coerceImageUrl(node.image);
+  if (image) out.image = image;
+  const specs = specsFromAdditionalProperty(node);
+  if (specs) out.specs = specs;
+  return out;
+}
+
 /**
  * rankQuotes(quotes) → quotes ordered best-first
  *
@@ -477,15 +609,69 @@ function reviewsFromProductNode(node, { source = null, maxQuotes = MAX_QUOTES } 
 }
 
 /**
+ * pickPrimaryProductNode(productNodes, pageUrl?) → node | null
+ *
+ * SAFETY-CRITICAL: non-review fields (description/brand/sku/gtin/mpn/
+ * image/specs) identify a specific SKU, so they must come from exactly
+ * ONE node — never merged first-non-null-wins across several, unlike
+ * rating/reviewCount (an aggregate, safe to blend). A real PDP can carry
+ * MULTIPLE Product-typed nodes on one page: a "customers also bought"
+ * carousel (ItemList → itemListElement → Product), a ProductGroup with
+ * per-variant Product children, or several unrelated blocks — and
+ * flattenLdNodes walks @graph/mainEntity/itemListElement/item to surface
+ * all of them. Blending across them can attribute one product's
+ * description/sku/image to a completely different product's row.
+ *
+ * Chosen in order:
+ *   1. A node whose own url/@id matches the page we actually fetched —
+ *      the one unambiguous identity signal available.
+ *   2. If there is exactly ONE candidate node, it's unambiguous by
+ *      construction — use it even with no url to compare.
+ *   3. Otherwise: null. No data is far safer than a guess that could be
+ *      wrong, and rating/reviewCount/quotes are untouched by this — only
+ *      the non-review fields go without.
+ */
+function pickPrimaryProductNode(productNodes, pageUrl) {
+  if (!Array.isArray(productNodes) || !productNodes.length) return null;
+  if (pageUrl) {
+    const normalize = (u) => {
+      if (!u || typeof u !== 'string') return null;
+      try {
+        const parsed = new URL(u, pageUrl);
+        return parsed.href.replace(/\/$/, '').toLowerCase();
+      } catch (_) {
+        return null;
+      }
+    };
+    const target = normalize(pageUrl);
+    if (target) {
+      const matched = productNodes.find((n) => {
+        const candidate = normalize(n && (n.url || n['@id']));
+        return candidate && candidate === target;
+      });
+      if (matched) return matched;
+    }
+  }
+  return productNodes.length === 1 ? productNodes[0] : null;
+}
+
+/**
  * extractOnPageReviews(html, opts?) → {
- *   rating, reviewCount, quotes[], platform, quotesFound, source
+ *   rating, reviewCount, quotes[], platform, quotesFound, source,
+ *   description, brandName, sku, gtin, mpn, image, specs, slogan
  * }
  * The engine. JSON-LD Product first (any review app's rich snippets),
  * standalone Review nodes second, itemprop microdata for the aggregate
  * last. `quotesFound` is the pre-cap count so callers can log how much
  * a page actually had.
+ *
+ * `opts.pageUrl` — the URL this HTML was fetched from. Used ONLY to pick
+ * the single Product node non-review fields come from (see
+ * pickPrimaryProductNode) when a page carries more than one; omit it and
+ * those fields are still populated whenever there is exactly one
+ * unambiguous Product node.
  */
-function extractOnPageReviews(html, { platform = undefined, maxQuotes = MAX_QUOTES } = {}) {
+function extractOnPageReviews(html, { platform = undefined, maxQuotes = MAX_QUOTES, pageUrl = null } = {}) {
   const plat = platform === undefined ? detectReviewPlatform(html) : platform;
   const out = {
     rating: null,
@@ -493,7 +679,21 @@ function extractOnPageReviews(html, { platform = undefined, maxQuotes = MAX_QUOT
     quotes: [],
     platform: plat,
     quotesFound: 0,
-    source: null
+    source: null,
+    // Non-review Product-node fields — see productInfoFromNode AND
+    // pickPrimaryProductNode. Unlike rating/reviewCount (safe to blend
+    // across multiple Product nodes as an aggregate), these identify a
+    // specific SKU and come from exactly ONE node, chosen below — never
+    // a first-non-null merge across several, which could attribute a
+    // completely different product's identity fields to this one.
+    description: null,
+    brandName: null,
+    sku: null,
+    gtin: null,
+    mpn: null,
+    image: null,
+    specs: null,
+    slogan: null
   };
   if (!html || typeof html !== 'string') return out;
 
@@ -503,14 +703,23 @@ function extractOnPageReviews(html, { platform = undefined, maxQuotes = MAX_QUOT
   // 1. Product nodes — the aggregate lives here, and so do review[]
   //    entries on every app that publishes rich snippets.
   const collected = [];
+  const productNodes = [];
   for (const node of nodes) {
     if (!isType(node, /product/i)) continue;
+    productNodes.push(node);
     const r = reviewsFromProductNode(node, { source: label, maxQuotes: Infinity });
     if (out.rating == null && r.rating != null) out.rating = r.rating;
     if (out.reviewCount == null && r.reviewCount != null) out.reviewCount = r.reviewCount;
     collected.push(...r.quotes);
     if (r.rating != null || r.quotes.length) out.source = 'json-ld';
   }
+
+  // Non-review fields: ONE node only (see pickPrimaryProductNode). A page
+  // with several ambiguous Product nodes and no URL match yields nulls
+  // here rather than a guess — rating/reviewCount/quotes above are
+  // unaffected either way.
+  const primary = pickPrimaryProductNode(productNodes, pageUrl);
+  if (primary) Object.assign(out, productInfoFromNode(primary));
 
   // 2. Standalone Review nodes — several apps emit reviews as siblings of
   //    the Product rather than nested inside it.
@@ -655,7 +864,11 @@ async function fetchProductReviews(productUrl, {
   // at the end, after all tiers have contributed to the ranking pool.
   const merged = Object.assign(
     { ok: true, reason: null, tiers: [], pagesFetched: 0, truncated: false, vendorDistribution: null },
-    extractOnPageReviews(html, { maxQuotes: Infinity })
+    // pageUrl = the URL we requested (no redirect-target tracking in
+    // httpScrapeClient today) — good enough for the identity match
+    // pickPrimaryProductNode does: a mismatch after a real redirect just
+    // falls back to "single unambiguous node or null", never wrong data.
+    extractOnPageReviews(html, { maxQuotes: Infinity, pageUrl: productUrl })
   );
   if (merged.source) merged.tiers.push('json-ld');
 
@@ -1028,6 +1241,11 @@ module.exports = {
   mapReviewNode,
   rankQuotes,
   quoteStrength,
+  productInfoFromNode,
+  pickPrimaryProductNode,
+  coerceBrandName,
+  coerceImageUrl,
+  specsFromAdditionalProperty,
   MAX_QUOTES,
   MIN_POSITIVE_STARS,
   TTL_DAYS

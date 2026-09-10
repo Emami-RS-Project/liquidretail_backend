@@ -37,7 +37,7 @@
 
 const CatalogProduct = require('../models/CatalogProduct');
 const Media          = require('../models/Media');
-const { cleanScrapedText, decodeHtmlEntities, tidyText } = require('../utils/htmlEntities');
+const { cleanScrapedText, stripHtml } = require('../utils/htmlEntities');
 // Shared on-page review/rating engine. Owns platform detection + review
 // extraction for every ingest path; this service keeps its own polite
 // fetch loop and hands the HTML over.
@@ -86,15 +86,11 @@ function normalizeGtin(raw) {
 // which left `&#x2B;` / `&#34;` / `&#8221;` (all common in furniture
 // catalogs) sitting raw in descriptions.
 //
-// Two tag-strip passes around ONE decode pass: sites that escape their
-// JSON-LD ship the description as encoded markup ("&lt;div&gt;Introducing
-// the Austen Black 74&quot; …"), which is only strippable after decoding.
-// Decoding twice is what we must avoid, not stripping twice.
-function stripHtml(html, maxLen = 2000) {
-  if (!html) return null;
-  const decoded = decodeHtmlEntities(String(html).replace(/<[^>]*>/g, ' '));
-  return tidyText(decoded.replace(/<[^>]*>/g, ' '), maxLen);
-}
+// stripHtml moved to utils/htmlEntities.js (2026-09-07) so
+// productReviewsScrapeService.js can share it without requiring this file
+// (which already requires productReviewsScrapeService.js — the reverse
+// require would be a cycle). Re-exported below for existing callers of
+// this module's own stripHtml.
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
@@ -1014,6 +1010,12 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted, uncapped } =
   const cancelled = await abortCheck(brand._id, run);
   const backgroundWork = [];
   if (!cancelled) {
+    // First-pass on-site review scrape — STARTS before detect enqueue so
+    // first-party quotes are in flight prior to YOLO. Not awaited (the
+    // scraper is seconds-per-SKU; detect enqueue is a cheap Mongo write).
+    // Collected onto backgroundWork below. Pure scraper — no Gemini.
+    const reviewIntakeP = require('./catalogReviewIntakeService')
+      .startCatalogReviewIntake({ brandId: brand._id });
     try {
       const { enqueueBrandProductDetects } = require('./catalogProductDetectService');
       await enqueueBrandProductDetects(brand._id);
@@ -1021,6 +1023,7 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted, uncapped } =
       console.warn(`   ⚠️  🛍  product-path detect enqueue failed: ${err.message}`);
       errors.push(`detect enqueue: ${err.message}`);
     }
+    backgroundWork.push(reviewIntakeP);
 
     // enqueueBrandProductDetects (above) is a deliberate no-op under
     // CATALOG_DETECT_PRECOMPUTE deferral — it returns `deferred` before

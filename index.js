@@ -34,6 +34,7 @@ const brandRoutes  = require('./routes/brand');
 const meRoutes     = require('./routes/me');
 const onboardingRoutes = require('./routes/onboarding');
 const invitationRoutes = require('./routes/invitations');
+const adShowcaseRoutes = require('./routes/adShowcases');
 const memberRoutes     = require('./routes/members');
 const integrationRoutes = require('./routes/integrations');
 const aiLayoutRoutes = require('./routes/aiLayouts');
@@ -167,6 +168,13 @@ app.use('/api/invitations', (req, res, next) => {
   if (req.path.startsWith('/by-token/') || req.path === '/by-token') return next();
   return requireAuth(req, res, next);
 }, invitationRoutes);
+// Ad showcases: create/list need requireAuth, but GET /by-token/:token is
+// the public client-review link — token IS the auth. Skip requireAuth on
+// that path so a real client can open the frozen snapshot with no login.
+app.use('/api/ad-showcases', (req, res, next) => {
+  if (req.path.startsWith('/by-token/')) return next();
+  return requireAuth(req, res, next);
+}, adShowcaseRoutes);
 app.use('/api/members',     requireAuth, memberRoutes);
 // Platform-wide admin (vision-QC gates, etc.). Own auth chain lives on
 // the router (requireUserOnly + requireSuperAdmin) — do NOT wrap this

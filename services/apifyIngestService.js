@@ -773,12 +773,19 @@ async function syncBrandShopify(brand, run = null, { uncapped } = {}) {
   // always an array (empty on an aborted run).
   const backgroundWork = [];
   if (!summary.aborted && !(await isBrandAborted(brand._id, run))) {
+    // First-pass on-site review scrape — STARTS before detect enqueue so
+    // first-party quotes are in flight prior to YOLO. Not awaited (the
+    // scraper is seconds-per-SKU; detect enqueue is a cheap Mongo write).
+    // Collected onto backgroundWork below. Pure scraper — no Gemini.
+    const reviewIntakeP = require('./catalogReviewIntakeService')
+      .startCatalogReviewIntake({ brandId: brand._id });
     try {
       const { enqueueBrandProductDetects } = require('./catalogProductDetectService');
       await enqueueBrandProductDetects(brand._id);
     } catch (err) {
       console.warn(`   ⚠️  product-path detect enqueue failed: ${err.message}`);
     }
+    backgroundWork.push(reviewIntakeP);
 
     // See shopifyPublicIngestService.js's copy of this comment —
     // enqueueBrandProductDetects is a deliberate no-op under the detect

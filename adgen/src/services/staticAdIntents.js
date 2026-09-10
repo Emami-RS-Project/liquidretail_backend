@@ -344,14 +344,15 @@ function geometryBlock(s) {
   // (resolveDrawCta always returns false), so it is dropped from this list
   // entirely rather than named as a maybe-present element.
   //
-  // Scrim/panel dropped from this list 2026-09-07 too: it used to be named
-  // here (2026-08-19) because the LATITUDE clause elsewhere permitted "a soft
-  // scrim or panel behind type" as chrome and a stray one had bled off the
-  // frame edge. That permission is now revoked outright (buildScenePreserveBlock
-  // / decideBlock explicitly forbid a scrim/panel), so there is nothing left
-  // for this geometry line to bound — naming an always-forbidden element here
-  // would recreate the same "asserts it exists" defect the CTA fix above
-  // guards against.
+  // Scrim/panel is NOT named here. Scene-build (PRODUCT_FIDELITY) still
+  // forbids a scrim, so listing one would assert an element that path may
+  // not draw (same empty-slot defect the CTA drop above guards against).
+  // SCENE_PRESERVE re-permits a *minimal text-sized* legibility scrim; that
+  // permission carries its own safe-box / no-bleed bound in
+  // buildScenePreserveBlock + the preserve decideBlock, because a previous
+  // unnamed scrim bled off the frame edge (root geometryBlock still names
+  // it — root permits scrim on both arms). Do not add it back to this
+  // shared line without making the line preserve-aware.
   lines.push(`EVERY element you render other than the photograph itself — text and the logo's reserved corner — must sit inside the box from ${s.box.left}% to ${s.box.right}% of width and ${s.box.top}% to ${s.box.bottom}% of height, with its OWN edges fully inside that box. The photograph should still fill the whole frame edge to edge.`);
   return lines.join(' ');
 }
@@ -1194,8 +1195,23 @@ const RATING_FURNITURE = ratingFurnitureEnabled();
  * above the verbatim list has previously cost text fidelity (CLAUDE.md).
  * A prose headline cannot satisfy "star glyphs + numeral + count"; that is
  * the whole demand.
+ *
+ * COUNT-INVENTION FIX (RPD live-testing, this session). The note used to say
+ * "then the numeral, then the parenthetical count as a small qualifier on
+ * that number" UNCONDITIONALLY — regardless of whether the `rating -> …`
+ * string actually carries a parenthetical count (it only does when
+ * `d.reviewsText` / `d.reviewCount` is supplied; see `text()` below, which
+ * renders a bare `${d.rating} ★` with no parenthetical when neither exists).
+ * Live-tested against real Pelagic Gear `gpt-image-2/edit` generations with a
+ * rating but no reviewCount: 3 of 4 renders fabricated a plausible-looking
+ * count in parentheses ("4.9 ★ (2,847)") that was never in the data —
+ * directly contradicting the "no other numerals anywhere" rule stated
+ * elsewhere in this same prompt (and the `!d.reviewCount` absence line just
+ * below, in `absences()`). The note now conditions the parenthetical
+ * instruction on the string actually containing one, and explicitly forbids
+ * inventing/estimating a count when it does not.
  */
-const RATING_FURNITURE_NOTE = 'The rating line is a review widget, not copy. Draw star glyphs whose fill matches the numeral (do not snap 4.8 to a half-star), then the numeral, then the parenthetical count as a small qualifier on that number. The glyph row is how that rating line is drawn — it is required, not extra copy, and not a violation of SET EXACTLY THESE STRINGS. Do not rewrite it as a headline or claim sentence — "Rated 5 stars by everyone" and "5-star brand-wide rating" are failures. Words in parentheses (including "brand reviews") qualify the count; they are not a headline.';
+const RATING_FURNITURE_NOTE = 'The rating line is a review widget, not copy. Draw star glyphs whose fill matches the numeral (do not snap 4.8 to a half-star), then the numeral — that is the whole widget unless the exact string above already carries a parenthetical count. When it does, draw that same parenthetical as a small qualifier on the numeral — do not paraphrase it, round it, or substitute a different number. When it does NOT — the string above is only the numeral and the star mark, nothing in parentheses — stop there: never invent, estimate or add a review count, a number of ratings, a number of customers, or any other parenthetical next to the rating. The glyph row is how that rating line is drawn — it is required, not extra copy, and not a violation of SET EXACTLY THESE STRINGS. Do not rewrite it as a headline or claim sentence — "Rated 5 stars by everyone" and "5-star brand-wide rating" are failures. When a parenthetical count is present, the words inside it (including "brand reviews") qualify the count; they are not a headline.';
 
 const RATING_FURNITURE_ABSENCE = 'no rating written as a sentence or headline — never "Rated X stars", "X-star rating", "by everyone", "everyone who\'s tried them", "universally", "all customers"; the rating exists only as the star-glyph widget named above';
 
@@ -1373,6 +1389,7 @@ const LEGACY_PRODUCT_FIDELITY = `The supplied photograph is a PRODUCT REFERENCE 
  * because the catalog spans apparel, footwear, bottles, devices and jewellery.
  */
 const PRODUCT_FIDELITY = `PRODUCT FIDELITY — HIGHEST PRIORITY. Wherever product accuracy conflicts with a creative or styling instruction below, product accuracy wins. This does not relax the text instructions below, which are absolute in their own right, and it does not override the reserved-corner rule or the FORMAT block below.
+PERSON IN FRAME — MANDATORY. A person must appear in this advertisement wearing, holding or using the product. If the reference photograph shows no person, adding one is required — compose a campaign shot of someone actually wearing or using this exact item, not a still-life of the item alone with a new backdrop. An unpeopled product still-life is not a finished advertisement. The only exception is the narrow case in WHO WEARS OR HOLDS IT below.
 The supplied reference photograph is the single source of truth for the product; where several are supplied, the first is the primary product reference and the rest are further views of the same item. It is a PRODUCT REFERENCE ONLY — not a composition to copy. Treat every visible characteristic of the item as immutable. This advertisement must feature the exact same physical item that reference shows, as though that same item had been carried into a new professional photoshoot and photographed again — not recreated from memory. Do not redesign, reinterpret, simplify, modernise, improve, repair, stylise, approximate or substitute any part of it.
 Do not infer the product from its category, and do not infer it from anything you know about the brand. If the reference disagrees with what products of this type usually look like, or with your prior knowledge of this brand, the reference is correct and your prior is wrong. This holds for every category — apparel, footwear, jewellery, bags, accessories, cosmetics, skincare, electronics, furniture, sporting goods, home goods, toys, tools, and packaged or food goods alike.
 
@@ -1391,13 +1408,13 @@ If part of the item is not visible in the reference, do not invent or redesign t
 
 PRODUCT SCALE AND FRAMING. The reference photograph also defines how the product is framed, and that carries over. Give the item approximately the same visual prominence and approximately the same share of the frame as the reference does — within about a tenth either way — from approximately the same camera distance and a similar perspective. Do not zoom in dramatically, zoom out dramatically, or crop substantially tighter or wider than the reference. Compose the advertisement around the item at that size: fit the environment to the product, never the product to the environment, and never rescale the item just to make a layout easier. This governs how large the item sits inside the frame; it does not govern the frame itself — the output's dimensions and aspect are fixed by the FORMAT block at the end, and the safe box and reserved corner still apply.
 
-WHO WEARS OR HOLDS IT. If the reference photograph shows the item worn, held or carried by a person, then a person wears or holds it in your image too, the same way, on the same part of the body. Keep the same person — do not replace them with someone else. Their pose, their hands and how they are framed are yours to direct, but you may NOT remove them and show the item lying on its own, and you may not move a worn garment onto a hanger, a mannequin, a surface or a flat lay. If the reference shows the item by itself, you may introduce a person or leave it unpeopled, whichever makes the better advertisement.
+WHO WEARS OR HOLDS IT. Every advertisement should feature a person wearing, holding or using the product — a person in the frame is the default, not an option to weigh. If the reference photograph shows the item worn, held or carried by a person, then a person wears or holds it in your image too, the same way, on the same part of the body. Keep the same person — do not replace them with someone else. Their pose, their hands and how they are framed are yours to direct, but you may NOT remove them and show the item lying on its own, and you may not move a worn garment onto a hanger, a mannequin, a surface or a flat lay. If the reference shows the item by itself, introduce a person wearing, holding or using it in a natural way appropriate to the product — do this by default. Do not satisfy this by swapping the backdrop around an unpeopled still-life: a new environment without a person is not enough. Compose a photograph of a person in the act of wearing, holding or using this exact item, in a real setting. When you must add a person to an unpeopled reference, PRODUCT SCALE AND FRAMING yields: pull the camera back, change perspective and reframe as needed so a person can wear, hold or use the item naturally, with at least part of their face visible as required below, while the product stays clearly recognizable and prominent. That pull-back is required to fit the person — it is not "rescaling the item just to make a layout easier", and it is the one exception to holding the reference's camera distance and share of frame. Leave it unpeopled only when the product genuinely is not something a person plausibly wears, holds, carries or uses (for example a spare part, a small hardware fastener, or bulk packaging with nothing for a person to do). Whenever a person appears, at least part of their face must be visible — eyes, or eyes and part of the nose or cheek, are enough. Even when the garment itself includes a hood, mask, gaiter, sunglasses, or other face-covering design, pose, angle or partial adjustment of it so some part of the face still reads on camera; never let the styling turn the person into a fully anonymous, faceless figure.
 
-WHAT MAY CHANGE — everything that is not the item itself, and you should change it: who the model is, their pose and hands, environment, background, set, props, styling, lighting, shadows, mood, atmosphere, camera angle, focal length, depth of field, the colour grading of the scene, and the typographic treatment of the copy specified below. Build an entirely new scene around the item; do not reuse the reference's background or lighting. Note what is deliberately NOT on that list: the product's size in frame and the camera's distance from it, which the paragraph above holds close to the reference — and whether the item is worn, which the paragraph above ties to the reference.
+WHAT MAY CHANGE — everything that is not the item itself, and you should change it: who the model is, their pose and hands, environment, background, set, props, styling, lighting, shadows, mood, atmosphere, camera angle, focal length, depth of field, the colour grading of the scene, and the typographic treatment of the copy specified below. Build an entirely new scene around the item — a new environment AND, unless the unpeopled exception above applies, a person wearing, holding or using it; a new backdrop around a still-life of the item is not a new scene. Do not reuse the reference's background or lighting. Note what is deliberately NOT on that list: the product's size in frame and the camera's distance from it, which the paragraph above holds close to the reference — except when that paragraph directs you to introduce a person into an unpeopled reference, in which case the camera may pull back as that paragraph permits. Do not take a worn or held item off the body, and do not remove a person the reference already shows. Putting an unworn item onto a person, when the paragraph above directs you to by default, is required — it is not a violation of this list.
 
 ADVERTISING QUALITY. This has to read as work a premium creative agency shipped, not a stock photograph and not a template that was filled in. Make the lighting feel intentional and the typography feel art-directed. Use whitespace deliberately. Keep the product the primary focal point and give it the greatest visual emphasis in the frame. Aim for premium, modern and editorial — and put the inventiveness in the photography, the light and the typography, never in the product and never in the claims.
 
-BEFORE YOU FINISH, check three things. The product: a customer would recognise it as the identical physical item; nothing has been redesigned, added, removed, recoloured or reshaped; and colour, branding, materials and construction all match the reference. The framing: the item occupies roughly the same share of the frame as it does in the reference, and the whole image could pass as another photograph of that same item taken in a new commercial shoot. The copy: every string you were given below appears exactly once, spelled exactly as given, and no other text appears anywhere. If any check fails, correct it before finishing the advertisement.`;
+BEFORE YOU FINISH, check four things. The product: a customer would recognise it as the identical physical item; nothing has been redesigned, added, removed, recoloured or reshaped; and colour, branding, materials and construction all match the reference. The framing: the item occupies roughly the same share of the frame as it does in the reference — or, when a person had to be introduced into an unpeopled reference, a smaller share as that pull-back requires, with the product still clearly recognizable and prominent — and the whole image could pass as another photograph of that same item taken in a new commercial shoot. The person: unless the unpeopled exception above applies, a person is in the frame wearing, holding or using the product — a new environment around an unpeopled still-life does not pass. The copy: every string you were given below appears exactly once, spelled exactly as given, and no other text appears anywhere. If any check fails, correct it before finishing the advertisement.`;
 
 /**
  * SCENE PRESERVE — lifestyle / UGC static modifier (flag-gated).
@@ -1457,9 +1474,9 @@ PRESERVE EXACTLY, as the reference shows the product:
   — Details, including but not limited to: pockets, collars, sleeves, cuffs, necklines, hems, soles, heels, eyelets, handles, bezels, displays, screens, lenses, caps, applicators, chains, gemstones, watch faces, grips, blades, wheels, buttons, ports, vents and sensors. Every feature visible in the reference must appear unchanged; no feature absent from the reference may be added.
   — Condition: wrinkles, folds, creases, wear, polish, finish, surface imperfections, and the shadows the item casts on itself. Do not "improve" the item.
 
-COMPOSITING ONLY. Your job is to typeset the exact strings listed below into the safe box as advertisement chrome — type only. Do NOT add a scrim, panel, box, backing, gradient, vignette or any darkened/lightened region behind the text, even over a busy photograph or where a person is in frame — choose ink colour, weight and placement that read clearly against the photograph exactly as supplied instead. Inventiveness lives in typography and chrome treatment only, never in inventing a new scene. Do not invent a new photoshoot of a similar scene.
+COMPOSITING. Your job is to typeset the exact strings listed below into the safe box as advertisement chrome, on top of the same scene the reference shows. The scene, subject and setting stay as the reference shows them — you are not inventing a new photoshoot or a different place. Where needed for legibility, you may add a minimal, localised scrim, gradient or darkened region strictly behind the text itself, sized to the text and no larger; keep any such scrim fully inside the safe box named in the FORMAT block, inset from the canvas edge so it never bleeds to or past the frame boundary, even where it fades; do not darken, blur or otherwise alter the rest of the frame, and do not use this to soften, crop out, or obscure the wider scene. Inventiveness lives in typography and chrome treatment, and in this narrow legibility accommodation — never in changing the scene itself.
 
-WHAT MAY CHANGE: letterforms only.${mayChangeExtra} Nothing else about the photograph's pixels may change — no scrim, panel or backing of any kind.
+WHAT MAY CHANGE: letterforms and any non-photo chrome required to set those strings (including a soft legibility scrim/panel, sized strictly to the text).${mayChangeExtra} Nothing else about the photograph's pixels may change.
 
 BEFORE YOU FINISH: a side-by-side with the reference should read as the same photograph with copy overlaid — not a new photoshoot of a similar scene.${finishExtra} Product identity, subject, pose, light and crop of the subject all match the reference; every supplied string appears exactly once; no other text appears.`;
 }
@@ -1583,26 +1600,71 @@ function resolveAspectTreatment({ surfaceKey = null, seedStyle = null, variantKi
  *
  * Surface treatment is a SEPARATE gate (resolveAspectTreatment) — this only
  * answers "is this the kind of seed preserve can talk about?".
+ *
+ * seedClass — OPTIONAL, from imageShotHeuristicService.resolveSeedClass(media).
+ * `seedStyle === 'lifestyle'` is a COARSE bucket that conflates two very
+ * different seeds: a real environment (a real lifestyle_scene) and a model
+ * shot against a plain studio backdrop (on_figure_plain) — both carry the
+ * LLM shotType 'lifestyle' or 'on_model'. Preserving a studio backdrop is
+ * wrong: it locks the model into "the photograph is the finished plate,
+ * do not rebuild the background", so a person stays on a blank void instead
+ * of getting a real scene built around them (measured live, 2026-09-08 —
+ * see session.d/2026-09-08_scene-preserve-onfigureplain.md). Veto ONLY on a
+ * CONFIDENT on_figure_plain verdict; a genuine lifestyle_scene keeps today's
+ * behaviour, and so does an explicitly null/'unknown' seedClass or the flag
+ * being off — THIS GATE fails OPEN on ambiguity, never closed, so it can
+ * only narrow an existing false-positive, never introduce a new
+ * false-negative on a real lifestyle photo.
+ *
+ * CORRECTION (adversarial review, 2026-09-08): that "fail open on absent
+ * background" framing describes this gate only, not resolveSeedClass
+ * itself. For shotType 'on_model' with no usable background.sceneType/
+ * setting, resolveSeedClass's OWN fallback resolves to 'on_figure_plain'
+ * (not 'unknown') — "survey: studio dominates on_model" — which DOES veto.
+ * That is deliberate pre-existing classifier policy, not a gap: it is what
+ * lets this fix still catch a studio shot even when the LLM's background
+ * write was thin, and it must not be "fixed" to return 'unknown' instead —
+ * doing so would silently reopen the exact bug this veto exists to close
+ * for any on_model row missing a populated background object.
  */
-function shouldPreserveScene({ seedStyle = null, variantKind = null } = {}) {
+function shouldPreserveScene({ seedStyle = null, variantKind = null, seedClass = null } = {}) {
   if (!LIFESTYLE_PRESERVE) return false;
   if (variantKind === 'ugc') return true;
-  if (seedStyle === 'lifestyle') return true;
+  if (seedStyle === 'lifestyle') {
+    // Lazy require — same reason as apparelCategory/segmentPromptOverrides
+    // elsewhere in this file: avoid a top-level load-order dependency.
+    const { isSeedClassSceneBased } = require('./imageShotHeuristicService');
+    if (isSeedClassSceneBased() && seedClass === 'on_figure_plain') {
+      // Same observability motive as buildPrompt's own SCENE_PRESERVE
+      // applied/skipped traces below: a paid render that took THIS branch
+      // instead of preserving would otherwise leave no evidence why.
+      console.log(
+        `🖼️  SCENE_PRESERVE vetoed: seedStyle=${seedStyle} seedClass=on_figure_plain ` +
+        `(studio-backdrop on-figure shot — building a new scene instead of preserving a blank backdrop)`
+      );
+      return false;
+    }
+    return true;
+  }
   return false;
 }
 
-function buildPrompt({ intentKey, data, product, surface, seedStyle = null, variantKind = null, preserveScene = null, seedAspect = null, segment = null }) {
+function buildPrompt({ intentKey, data, product, surface, seedStyle = null, variantKind = null, preserveScene = null, seedAspect = null, segment = null, seedClass = null }) {
   // Explicit preserveScene=true is harness/test only and STILL requires a
   // lifestyle-or-ugc subject — a packshot must never land on SCENE_PRESERVE
   // even when a caller forces the override. preserveScene=false always wins
-  // (explicit opt-out). Otherwise derive from seedStyle + variantKind.
-  // Surface treatment may still veto (16:9 / PMax landscape → not-supported).
+  // (explicit opt-out). Otherwise derive from seedStyle + variantKind + the
+  // optional finer seedClass (see shouldPreserveScene's own header for why
+  // that split exists). Surface treatment may still veto (16:9 / PMax
+  // landscape → not-supported). The explicit-override arm deliberately does
+  // NOT consult seedClass — it exists for harnesses that need to force the
+  // branch regardless of scene quality, and stays exactly as it was.
   const subjectOk = seedStyle === 'lifestyle' || variantKind === 'ugc';
   let preserve = preserveScene === true
     ? (LIFESTYLE_PRESERVE && subjectOk)
     : preserveScene === false
       ? false
-      : shouldPreserveScene({ seedStyle, variantKind });
+      : shouldPreserveScene({ seedStyle, variantKind, seedClass });
 
   // Per-(surface × seed kind) treatment. 'not-supported' falls through to
   // today's exact scene-build behaviour (byte-identical to preserve-OFF).
@@ -1636,7 +1698,7 @@ function buildPrompt({ intentKey, data, product, surface, seedStyle = null, vari
       console.log(
         `🖼️  SCENE_PRESERVE applied: surface=${surface} treatment=${aspectTreatment} ` +
         `trigger=${variantKind === 'ugc' ? 'ugc-variant' : 'lifestyle-seed'} ` +
-        `seedStyle=${seedStyle || 'null'} seedAspect=${seedAspect || 'null (→extend)'}`
+        `seedStyle=${seedStyle || 'null'} seedClass=${seedClass || 'null'} seedAspect=${seedAspect || 'null (→extend)'}`
       );
     }
   }
@@ -1786,13 +1848,21 @@ Set no other words, numerals or letterforms anywhere in the image — including 
    * it discards the fit and drape information PRODUCT_FIDELITY spends a whole
    * paragraph protecting. It also fights PRODUCT SCALE AND FRAMING, which asks
    * for the same share of frame as the reference — a person competes for that
-   * area, so dropping them is the cheapest way to comply.
+   * area, so dropping them is the cheapest way to comply. WHO WEARS names
+   * that fight as an exception (SCALE yields on the add-person branch). The
+   * on-model (already-peopled) scale rule is unchanged. Live 2026-09-08: that
+   * carve-out did not move gpt-image-2 (3/3 still unpeopled on the same
+   * Leaderman seed); PERSON IN FRAME — MANDATORY now opens the block, and
+   * "build a new scene" is restated as including the person, because the
+   * model was following the environment half of that sentence and skipping
+   * the person.
    *
-   * The replacement rule is ASYMMETRIC and lives in PRODUCT_FIDELITY: if the
-   * reference shows the item worn or held, a person must stay; if it does not,
-   * adding one is discretionary. No new plumbing is needed for that conditional —
-   * `buildPrompt` never learns whether the seed contains a person, but the MODEL
-   * can see the reference and evaluates the condition itself.
+   * The replacement rule lives in PRODUCT_FIDELITY WHO WEARS OR HOLDS IT: if
+   * the reference shows the item worn or held, a person must stay; if it does
+   * not, introducing a person is the DEFAULT (leave unpeopled only when the
+   * product is not something a person plausibly uses). No new plumbing is
+   * needed for that conditional — `buildPrompt` never learns whether the seed
+   * contains a person, but the MODEL can see the reference and evaluates it.
    *
    * Gated so the flag-off arm stays byte-identical to the measured baseline.
    */
@@ -1825,7 +1895,7 @@ Set no other words, numerals or letterforms anywhere in the image — including 
   // (byte-identical when preserve is false).
   const decideBlock = preserve
     ? (kept.length
-      ? `COMPOSITING ONLY — you decide typeface and weight, the scale and colour of every text element, and where each element goes inside the safe box. Set every text element directly against the photograph — no scrim, panel or backing behind it, for legibility or otherwise. The photograph is finished: inventiveness belongs only in typography and chrome, never in the pixels of the scene.`
+      ? `COMPOSITING — you decide typeface and weight, the scale and colour of every text element, and where each element goes inside the safe box. Set text directly against the photograph where it already reads clearly; where it does not, a minimal scrim or gradient sized strictly to the text is permitted for legibility — never a full-frame treatment, never bleeding to or past the canvas edge, and never used to change the scene itself. The photograph's scene is finished: inventiveness belongs in typography, chrome, and this narrow legibility accommodation, never in the pixels of the wider scene.`
       : `COMPOSITING ONLY — the photograph is finished and this ad carries no text. Inventiveness is not invited; leave the plate as the reference shows it.`)
     : `YOU DECIDE EVERYTHING ELSE: composition and crop, camera angle and distance, ${personClause}lighting and mood${kept.length ? ', typeface and weight, the scale and colour of every text element, and where each element goes — set directly against the photograph, never on a scrim, panel or backing' : ''}. ${product.look ? `The brand's world is: ${product.look}. Work within it, and beyond that use your own judgement — ` : 'Use your own judgement — '}make it look like a campaign a good agency shipped, not a template that was filled in. Inventiveness belongs in the photography, the light and the typography — never in the claims.`;
 

@@ -1,0 +1,23 @@
+{
+  "name": "rating-furniture-count-fix",
+  "notes": "Validates the RATING_FURNITURE_NOTE fix in src/services/staticAdIntents.js. Root cause: the note used to unconditionally instruct the model to draw 'the parenthetical count as a small qualifier on that number' even when no reviewCount was supplied, so the rating -> string was a bare '4.9 ★' with no parenthetical yet the model invented one anyway (measured 3 of 4 real gpt-image-2/edit renders on this exact spec pre-fix: '4.9 ★ (2,847)', '(287)', '(1,738)'). Fix conditions the parenthetical instruction on the string actually carrying one. Four identical baseline cells (no lever) so this is 4 independent live draws of the SAME patched prompt, not a variant comparison -- checking for a fabricated count is inherently stochastic and one lucky render proves nothing.",
+  "seed": {
+    "url": "https://res.cloudinary.com/reach-social-prod/image/upload/v1788358909/catalog-product/6a982d6bce057530d979e611/product-1788358909787-312-0004jxya.jpg",
+    "productTitle": "Pelagic Exo-Tech",
+    "refs": [],
+    "brandHex": "#f5f4f0"
+  },
+  "static": {
+    "surface": "meta_feed_1_1",
+    "intent": "social_proof_led",
+    "productDesc": "an olive-green long-sleeve performance sun hoodie for fishing, with an attached mesh face gaiter built into the hood, mesh underarm ventilation panels, a zippered chest-height side pocket, and a small white fish-silhouette logo patch on the lower left sleeve",
+    "copy": { "rating": 4.9, "cta": "SHOP NOW" },
+    "models": ["openai/gpt-image-2/edit"],
+    "variants": [
+      { "id": "live-1" },
+      { "id": "live-2" },
+      { "id": "live-3" },
+      { "id": "live-4" }
+    ]
+  }
+}

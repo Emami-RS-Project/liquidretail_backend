@@ -19,7 +19,7 @@ import { slotEnvelope, slotProgress, specTimeScale } from '../lib/timing.js';
 import { stackContainerStyle, panelColumnStyle, resolveSafeZone, resolveSafeZoneKey } from '../lib/safeZones.js';
 import { contrastToken, containerStrokeBleedGuard } from '../lib/tokens.js';
 import { resolveSlotContent } from '../lib/slotContent.js';
-import { decideInkOnLight, worstCaseInkForBand, usesWorstCaseInk } from '../lib/plateHints.js';
+import { decideInkOnLight, worstCaseInkForBand, usesWorstCaseInk, groupWindowSec } from '../lib/plateHints.js';
 import { estimateSlotHeightPx, planGroupFit } from '../lib/stackFit.js';
 // Re-export pure resolver for offline harnesses (same decision as render).
 export {
@@ -29,7 +29,7 @@ export {
   deriveCharCap,
   TEXT_CHAR_CAP,
 } from '../lib/slotContent.js';
-export { decideInkOnLight, worstCaseInkForBand, usesWorstCaseInk } from '../lib/plateHints.js';
+export { decideInkOnLight, worstCaseInkForBand, usesWorstCaseInk, groupWindowSec } from '../lib/plateHints.js';
 export { estimateSlotHeightPx, planGroupFit } from '../lib/stackFit.js';
 
 const BAND_FOR_ANCHOR = { top: 'top', upperThird: 'top', center: 'middle', lowerThird: 'bottom', bottom: 'bottom' };
@@ -48,7 +48,14 @@ const KEEP_OUT_CANDIDATES = {
 // Look up the plate-intelligence band under a slot group at the time its
 // content is on screen: bright band → dark type; avoid band → shift group
 // to a clear band (see resolveGroupAnchor).
-function bandStateFor(plateHints, anchor, atSec) {
+//
+// `windowSec` (see plateHints.js groupWindowSec) scopes the "across time"
+// avoid/busy union below to the group's OWN visible window instead of the
+// whole clip — omit it for the old whole-clip behaviour (kept for any caller
+// not yet passing one). The NEAREST-sample pick for `isLight`/`lum` is
+// unaffected either way; `atSec` already targets a moment inside the group's
+// visible window at every real call site, so it lands in-window on its own.
+function bandStateFor(plateHints, anchor, atSec, windowSec = null) {
   if (!plateHints?.samples?.length) return { isLight: false, avoid: false, busy: 0, lum: null };
   let best = plateHints.samples[0];
   for (const s of plateHints.samples) {
@@ -69,12 +76,32 @@ function bandStateFor(plateHints, anchor, atSec) {
   // off the face, while Vuori 1:1 read an unflagged one and walked onto it. The
   // probe confirms the flags themselves are right (top=true for both).
   //
-  // A face that occupies a band at ANY point in the clip disqualifies that band
-  // for text that is on screen across that clip, and the worst-case texture is
-  // what legibility depends on — so take the union of avoid and the max of busy.
-  let avoidAny = !!band.avoid;
-  let busyMax = Number.isFinite(band.busy) ? band.busy : 0;
+  // A face that occupies a band at ANY point WHILE THE GROUP IS VISIBLE
+  // disqualifies that band, and the worst-case texture in that same window is
+  // what legibility depends on — so take the union of avoid and the max of busy
+  // over `windowSec` (the whole clip when the group never exits, or windowSec
+  // is omitted). ⚠️ Until 2026-09-08 this unioned over the WHOLE CLIP
+  // unconditionally, so a group visible for only the first second of a 10s
+  // clip could be flagged `avoid`/high-`busy` by a face or texture that only
+  // ever appeared long after the group was gone — see the header comment on
+  // worstCaseInkForBand (plateHints.js) for the measured repro.
+  //
+  // The seed below MUST also respect windowSec. `best` is the sample nearest
+  // `atSec`, not the nearest sample INSIDE the window — for a short group, a
+  // window that falls in a gap between plate samples, or an `atSec` computed
+  // from something other than this group's own earliest slot, `best` can sit
+  // outside windowSec. Seeding straight from `band.avoid`/`band.busy` in that
+  // case would leak exactly the out-of-window reading this function exists to
+  // exclude (adversarial review, 2026-09-08 — this did not reproduce the
+  // original t=5.5s incident on canonical's own default timing, but is a real
+  // gap in the general case: e.g. atSec = items[0].enterAtSec + 0.5 uses spec
+  // array order, not the group's earliest enter, so a later-authored item
+  // first in the array can point atSec outside a window that starts earlier).
+  const seedInWindow = !windowSec || (best.atSec >= windowSec.enterSec && best.atSec <= windowSec.exitSec);
+  let avoidAny = seedInWindow && !!band.avoid;
+  let busyMax = seedInWindow && Number.isFinite(band.busy) ? band.busy : 0;
   for (const s of plateHints.samples) {
+    if (windowSec && (s.atSec < windowSec.enterSec || s.atSec > windowSec.exitSec)) continue;
     const b = s.bands?.[bandKey];
     if (!b) continue;
     if (b.avoid) avoidAny = true;
@@ -215,10 +242,13 @@ const CONTRAST_WEIGHT = 1.0;
  * 0 when the band clears AA (contrast is not a differentiator), ramping to 1 as
  * the BETTER of the two inks falls toward 1:1 (invisible). Null hints / no
  * samples → 0, so a missing scan can never move a stack.
+ *
+ * `windowSec` scopes the worst-case read to the group's own visible window
+ * (see worstCaseInkForBand) — omit only for the old whole-clip behaviour.
  */
-function contrastPenaltyFor(plateHints, anchor) {
+function contrastPenaltyFor(plateHints, anchor, windowSec = null) {
   const bandKey = BAND_FOR_ANCHOR[anchor] || 'middle';
-  const wc = worstCaseInkForBand(plateHints, bandKey, INK_DARK_LUM, INK_LIGHT_LUM);
+  const wc = worstCaseInkForBand(plateHints, bandKey, INK_DARK_LUM, INK_LIGHT_LUM, windowSec);
   const best = wc && Number.isFinite(wc.best) ? wc.best : null;
   if (best == null || best >= CONTRAST_AA) return 0;
   return Math.min(1, Math.max(0, (CONTRAST_AA - best) / (CONTRAST_AA - 1)));
@@ -239,9 +269,17 @@ function contrastPenaltyFor(plateHints, anchor) {
 //     the reverse case (authored upper third sitting ON the face while the bottom
 //     was the clean band) only resolved if the face flag happened to be set.
 // Scoring every candidate on face + texture handles both directions with one rule.
-function resolveGroupAnchor(plateHints, authoredAnchor, atSec, { logShift = false } = {}) {
+//
+// `windowSec` (plateHints.js groupWindowSec) scopes every band's avoid/busy/
+// contrast read to the group's own visible window. Omitting it falls back to
+// the old whole-clip read for any caller not yet updated. ⚠️ Until
+// 2026-09-08 there was no window at all — see bandStateFor's header comment
+// for the measured repro (a group visible for the first second of a 10s clip
+// got relocated by a texture/contrast reading from a shot 5 seconds later
+// that the group was never on screen for).
+function resolveGroupAnchor(plateHints, authoredAnchor, atSec, { logShift = false, windowSec = null } = {}) {
   const candidates = KEEP_OUT_CANDIDATES[authoredAnchor] || [authoredAnchor];
-  const scored = candidates.map((cand) => ({ cand, ...bandStateFor(plateHints, cand, atSec) }));
+  const scored = candidates.map((cand) => ({ cand, ...bandStateFor(plateHints, cand, atSec, windowSec) }));
 
   // Faces are excluded outright while ANY face-free band is available, so no
   // amount of texture can ever buy a face.
@@ -261,7 +299,7 @@ function resolveGroupAnchor(plateHints, authoredAnchor, atSec, { logShift = fals
     // negligible texture win never overrides the template's composition.
     // `contrast` is 0 for any band that clears AA, so this reduces exactly to
     // the previous `busy`-only ranking on a normal plate — see CONTRAST_AA.
-    const contrast = contrastPenaltyFor(plateHints, s.cand);
+    const contrast = contrastPenaltyFor(plateHints, s.cand, windowSec);
     const score = s.busy + CONTRAST_WEIGHT * contrast
       - (s.cand === authoredAnchor ? BAND_SWITCH_MARGIN : 0);
     if (!best || score < best.score) best = { ...s, score, contrast };
@@ -273,7 +311,7 @@ function resolveGroupAnchor(plateHints, authoredAnchor, atSec, { logShift = fals
     // band we landed on — an earlier version read `best.avoid` and so reported
     // "busier band" on every face escape.
     const authored = scored.find((s) => s.cand === authoredAnchor);
-    const authoredContrast = contrastPenaltyFor(plateHints, authoredAnchor);
+    const authoredContrast = contrastPenaltyFor(plateHints, authoredAnchor, windowSec);
     // Attribute honestly across all three reasons a group can move now.
     const why = authored?.avoid
       ? 'face band'
@@ -327,9 +365,10 @@ function plateIsLightGlobal(plateHints, groups, timeScale, meta, groupAnchors, a
     const rendered = group.items.filter((s) => resolveSlotContent(s, meta, allSlots) != null).length;
     if (!rendered) continue;
     const atSec = first.timing.enterAtSec * timeScale + 0.5;
+    const windowSec = groupWindowSec(group.items, timeScale);
     const key = `${group.phase}|${group.anchor}`;
     const effectiveAnchor = (groupAnchors && groupAnchors.get(key)) || group.anchor;
-    const { isLight } = bandStateFor(plateHints, effectiveAnchor, atSec);
+    const { isLight } = bandStateFor(plateHints, effectiveAnchor, atSec, windowSec);
     if (isLight) lightWeight += rendered;
     else darkWeight += rendered;
   }
@@ -397,15 +436,19 @@ export const Canonical = ({ format = 'feed', safeZoneKey = null, platformFormat 
   const groups = useMemo(() => (spec?.slots ? groupSlots(spec.slots) : []), [spec]);
   // Compress spec-authored times onto shorter real plates (see timing.js).
   const timeScale = useMemo(() => specTimeScale(spec, durationInFrames, fps), [spec, durationInFrames, fps]);
-  // Keep-out anchors resolved once per group (stable for the whole clip).
+  // Keep-out anchors resolved once per group (stable for the whole clip),
+  // scored against that group's OWN visible window (groupWindowSec) so a
+  // group that has already exited can never be relocated by a band reading
+  // from a shot it was never on screen for.
   const groupAnchors = useMemo(() => {
     const map = new Map();
     for (const group of groups) {
       const first = group.items[0];
       const atSec = first.timing.enterAtSec * timeScale + 0.5;
+      const windowSec = groupWindowSec(group.items, timeScale);
       map.set(
         `${group.phase}|${group.anchor}`,
-        resolveGroupAnchor(plateHints, group.anchor, atSec, { logShift: true })
+        resolveGroupAnchor(plateHints, group.anchor, atSec, { logShift: true, windowSec })
       );
     }
     return map;
@@ -433,16 +476,17 @@ export const Canonical = ({ format = 'feed', safeZoneKey = null, platformFormat 
         const effectiveAnchor = groupAnchors.get(`${group.phase}|${group.anchor}`) || group.anchor;
         // Ink for THIS group, from the band it actually occupies after keep-out.
         const groupAtSec = first.timing.enterAtSec * timeScale + 0.5;
-        const groupBandState = bandStateFor(plateHints, effectiveAnchor, groupAtSec);
+        const groupWindow = groupWindowSec(group.items, timeScale);
+        const groupBandState = bandStateFor(plateHints, effectiveAnchor, groupAtSec, groupWindow);
         const bandLum = groupBandState.lum;
-        // PMax: score the ink against every sample of this band, not just the
-        // one nearest the group's enter time. A 10s clip whose shot changes
-        // under a title otherwise picks ink for the instant the text arrives
-        // and keeps it while the plate turns dark — measured as dark-on-black
-        // on a delivered ad that had logged 9.77:1. Meta keeps the instant
-        // reading, so its output is byte-identical.
+        // PMax: score the ink against every sample of this band WHILE THE GROUP
+        // IS VISIBLE (groupWindow), not just the one nearest the group's enter
+        // time. A 10s clip whose shot changes under a title otherwise picks ink
+        // for the instant the text arrives and keeps it while the plate turns
+        // dark — measured as dark-on-black on a delivered ad that had logged
+        // 9.77:1. Meta keeps the instant reading, so its output is byte-identical.
         const worstBandInk = worstCaseInkForBand(
-          plateHints, BAND_FOR_ANCHOR[effectiveAnchor] || 'middle', INK_DARK_LUM, INK_LIGHT_LUM
+          plateHints, BAND_FOR_ANCHOR[effectiveAnchor] || 'middle', INK_DARK_LUM, INK_LIGHT_LUM, groupWindow
         );
         const bandInk = (isPmaxSurface ? worstBandInk : null) || inkForBand(bandLum);
         const inkOnLight = bandInk ? bandInk.onLight : inkOnLightGlobal;
@@ -456,15 +500,21 @@ export const Canonical = ({ format = 'feed', safeZoneKey = null, platformFormat 
         //     byte-identical to what shipped. That promise is kept.
         //
         //   IS THIS TEXT IN TROUBLE at any point while it is on screen?
-        //     -> WORST CASE across the whole clip, on EVERY surface.
+        //     -> WORST CASE across the group's own visible window (groupWindow,
+        //        computed above), on EVERY surface. Was "the whole clip" until
+        //        2026-09-08 — see groupWindow's own comment and
+        //        worstCaseInkForBand's header in plateHints.js for why that was
+        //        a real bug (a group could be scored against a shot it had
+        //        already exited before), not a narrowing of this reasoning.
         //
         // The inconsistency this closes: placement (contrastPenaltyFor) already
-        // reasons in whole-clip worst-case terms on every surface, but the
+        // reasons in whole-window worst-case terms on every surface, but the
         // escalation gate read a single instant on Meta. So a Meta group could
-        // be MOVED because a band fails later in the clip and then be denied the
-        // shadow/contour for that same failure, because the instant the text
-        // happened to arrive looked fine. A group's anchor is one decision for
-        // the whole clip; so is its treatment. Both should ask the same question.
+        // be MOVED because a band fails later in its own window and then be
+        // denied the shadow/contour for that same failure, because the instant
+        // the text happened to arrive looked fine. A group's anchor is one
+        // decision for its whole visible window; so is its treatment. Both
+        // should ask the same question.
         //
         // BLAST RADIUS, MEASURED — and materially smaller than first reported.
         // Across 5 real delivered plates x 3 bands (plateIntelService.analyzePlate,

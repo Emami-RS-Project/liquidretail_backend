@@ -244,6 +244,57 @@ check('I3 classification modern→Playfair is allowed even when name lacks serif
   assert.strictEqual(fallbackFor(pick.family), 'serif'); // chosen face is serif
 });
 
+// ── V. resolveLibraryMatch's `fallback` field: LIBRARY_SERIF_FACES, not the
+// naive name regex (2026-09-08) ────────────────────────────────────────────
+// WHY THIS EXISTS
+// resolveLibraryMatch used to compute its CSS `fallback` field via
+// fallbackFor(font.family) — the same naive name-only regex `pickLibraryFamily`
+// uses on an unresolved REQUESTED name. That is the wrong tool once a name has
+// already been resolved to one of the 48 curated library faces: this module's
+// own LIBRARY_SERIF_FACES is the authoritative serif/sans answer for that
+// closed set, and it deliberately disagrees with the naive regex for exactly 4
+// faces — Great Vibes, Dancing Script, Pacifico, Caveat (the script/
+// handwritten cluster, "the Great Vibes convention": treated as serif-intent
+// even though none of their names contain a recognised serif token). Measured
+// directly: fallbackFor('Great Vibes') === 'sans-serif' while
+// LIBRARY_SERIF_FACES.has('Great Vibes') === true. Harmless while the real TTF
+// loads; if that file ever fails to load at render time the browser would
+// substitute a grotesk sans for a cursive script.
+// REVERT MAP: reverting resolveLibraryMatch's `fallback` field back to
+// fallbackFor(font.family) fails V1-V4 below (family resolves correctly but
+// the field's own `fallback` claims 'sans-serif') and V5 (the direct
+// behavioural check against the real async function).
+const SCRIPT_FALLBACK_CASES = [
+  ['Brush Script', 'Great Vibes'],
+  ['Snell Roundhand', 'Dancing Script'],
+  ['Lobster', 'Pacifico'],
+  ['Comic Sans', 'Caveat'],
+];
+for (const [req, expectFamily] of SCRIPT_FALLBACK_CASES) {
+  check(`V '${req}' → ${expectFamily} is in LIBRARY_SERIF_FACES (so its fallback must be 'serif')`, () => {
+    const pick = pickLibraryFamily(req, { role: 'heading' });
+    assert.strictEqual(pick.family, expectFamily);
+    assert.ok(
+      LIBRARY_SERIF_FACES.has(pick.family),
+      `${pick.family} must be in LIBRARY_SERIF_FACES (the Great Vibes convention)`
+    );
+    // Sanity control, not the regression itself: proves this case actually
+    // exercises the disagreement. If fallbackFor's regex is ever widened to
+    // also match this face, this assertion (not V5) is what should change.
+    assert.strictEqual(
+      fallbackFor(pick.family),
+      'sans-serif',
+      `sanity: fallbackFor's naive regex is EXPECTED to miss '${pick.family}' — ` +
+      `if this now says 'serif' the regex changed; re-read this section before editing it`
+    );
+  });
+}
+// V5: the actual regression pin — call the real async function and assert its
+// real return value, not a proxy for it. Runs after the synchronous checks
+// above (which already process.exit(1) on failure), appended at the end of
+// this file so the flat top-level script does not need restructuring into one
+// big async wrapper for a single check.
+
 // ── B. Body never gets display/script ─────────────────────────────────────
 // Fails if (2) is reverted.
 const DISPLAY_REQUESTS = [
@@ -519,6 +570,86 @@ check('L6 default (unset) assume-licensed is true', () => {
     assert.strictEqual(brandFontAssumeLicensed(), true);
     assert.ok(matchCustomFont(brandWithCommercial, 'Söhne'));
   });
+});
+
+// ── V5. resolveLibraryMatch's real IMPLEMENTATION, not a proxy for it ──────
+// Everything above (V1-V4) proves the INPUTS to the bug are real (a plain
+// request resolves to a script face; the naive regex disagrees with
+// LIBRARY_SERIF_FACES for it) — but only by exercising pickLibraryFamily, a
+// different, unaffected function. Actually calling resolveLibraryMatch itself
+// would need real font files on disk (ensureFontsLoaded downloads over the
+// network on a cache miss) — backend's own services/brandScripts/assets/fonts/
+// carries no committed .ttf files at all (unlike adgen's), so that call would
+// be a live network fetch on every CI run, breaking this file's own
+// documented "No DB, no network, no API key. Safe in CI." contract. Reading
+// the FUNCTION'S SOURCE for the one expression that decides its `fallback`
+// field is the offline equivalent: it is what actually ships, not what the
+// synchronous checks above merely imply.
+check('V5 resolveLibraryMatch computes `fallback` via LIBRARY_SERIF_FACES.has(font.family), not fallbackFor(font.family)', () => {
+  const src = require('fs').readFileSync(
+    path.join(ROOT, 'services', 'fontResolverService.js'),
+    'utf8'
+  );
+  // Strip comments before searching for the FORBIDDEN pattern — this file's
+  // own explanatory prose above the fix intentionally quotes
+  // `fallbackFor(font.family)` as the thing NOT to do, and a raw scan would
+  // trip over its own documentation. The REQUIRED pattern is real code
+  // either way, so it is checked against the raw source (a false negative
+  // from an unstripped comment containing it would still be a comment, not
+  // the fix).
+  const withoutBlockComments = src.replace(/\/\*[\s\S]*?\*\//g, '');
+  const withoutComments = withoutBlockComments.replace(/\/\/.*$/gm, '');
+
+  const fnStart = src.indexOf('async function resolveLibraryMatch');
+  assert.ok(fnStart >= 0, 'resolveLibraryMatch not found in services/fontResolverService.js');
+  // Bound the search to this ONE function, params-then-body: the parameter
+  // list is `(requestedFamily, weight = 400, { brand = null, role = null } = {})`,
+  // which itself contains a destructuring `{...}` — a naive "first `{` after
+  // the function name" scan matches THAT brace pair and returns after ~1
+  // line, silently checking almost nothing (caught by testing this check
+  // against the reverted bug, which it wrongly still passed until this was
+  // fixed — the check ran AFTER this file's own summary/exit gate at the
+  // time, so read that failure carefully before trusting a green run of any
+  // check appended near the end of this file). Scan the parameter list
+  // tracking PAREN depth only, ignoring braces, until it closes; the body's
+  // real opening `{` is the next character after that.
+  const parenOpen = src.indexOf('(', fnStart);
+  assert.ok(parenOpen >= 0, 'resolveLibraryMatch has no parameter list');
+  let parenDepth = 0, paramsEnd = -1;
+  for (let i = parenOpen; i < src.length; i++) {
+    if (src[i] === '(') parenDepth++;
+    else if (src[i] === ')') { parenDepth--; if (parenDepth === 0) { paramsEnd = i + 1; break; } }
+  }
+  assert.ok(paramsEnd > parenOpen, 'could not find the end of resolveLibraryMatch\'s parameter list');
+  const openBrace = src.indexOf('{', paramsEnd);
+  assert.ok(openBrace >= 0, 'resolveLibraryMatch has no body opening brace');
+  // Now brace-depth counting for the body itself. Safe here because
+  // resolveLibraryMatch's real body (verified by hand) contains no regex
+  // literals, string literals, or template literals with braces that would
+  // desync a plain counter.
+  let depth = 0, fnEnd = -1;
+  for (let i = openBrace; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) { fnEnd = i + 1; break; } }
+  }
+  assert.ok(fnEnd > openBrace, 'could not find resolveLibraryMatch\'s closing brace');
+
+  const rawBody = src.slice(fnStart, fnEnd);
+  const cleanStart = withoutComments.indexOf('async function resolveLibraryMatch');
+  assert.ok(cleanStart >= 0, 'resolveLibraryMatch not found after stripping comments (name itself in a comment?)');
+  // Re-bound in the comment-stripped text using the same fixed-length slice
+  // (stripping comments never lengthens the string) so both views stay
+  // aligned to the same function.
+  const cleanBody = withoutComments.slice(cleanStart, cleanStart + rawBody.length + 400);
+
+  assert.ok(
+    /fallback:\s*LIBRARY_SERIF_FACES\.has\(font\.family\)\s*\?\s*'serif'\s*:\s*'sans-serif'/.test(rawBody),
+    'resolveLibraryMatch must compute `fallback` via LIBRARY_SERIF_FACES.has(font.family) — got:\n' + rawBody
+  );
+  assert.ok(
+    !/fallback:\s*fallbackFor\(font\.family\)/.test(cleanBody),
+    'resolveLibraryMatch must NOT recompute `fallback` via the naive fallbackFor(font.family) — see this file\'s V-section header'
+  );
 });
 
 // ── summary ───────────────────────────────────────────────────────────────

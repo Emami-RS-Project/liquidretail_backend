@@ -1,0 +1,34 @@
+{
+  "name": "laydown-person-inclusion-retest-after-fix",
+  "notes": "Direct live confirmation of the person-inclusion fix on a genuine lay-down seed (Pelagic Leaderman Boardshorts, product 6a9d341408b6f63100dc5cfc, shotType product_only \u2014 the exact product family from the original bug repro, now tested unpeopled-to-peopled instead of studio-to-scene). Owner explicitly asked to confirm this before merging.",
+  "seed": {
+    "productId": "6a9d341408b6f63100dc5cfc"
+  },
+  "static": {
+    "surface": "meta_feed_1_1",
+    "intent": "product_first_lifestyle",
+    "productDesc": "men's board shorts, laid flat on a plain surface, no model, product-only shot",
+    "seedStyle": "packshot",
+    "variantKind": "product_image",
+    "copy": {
+      "headline": "Built for the Water",
+      "rating": 4.7,
+      "reviewCount": 88,
+      "cta": "SHOP NOW"
+    },
+    "models": [
+      "openai/gpt-image-2/edit"
+    ],
+    "variants": [
+      {
+        "id": "retest-1"
+      },
+      {
+        "id": "retest-2"
+      },
+      {
+        "id": "retest-3"
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "scene-preserve-onfigureplain-studio",
+  "notes": "Reproduces + tests the fix for the 2026-09-08 live finding: a real Pelagic 'Leaderman' Ad (mediaId 6a9d36e8c329c79c84e5a68e) generated a person correctly wearing the shorts but stuck on a blank studio backdrop. Root cause: resolveSeedStyle maps BOTH the LLM shotType 'lifestyle' and 'on_model' to the coarse seedStyle 'lifestyle', with no check on whether the seed's actual background is a real environment or a studio backdrop. This exact seed is classified shotType:on_model (0.98 conf), background reason 'A cropped male model is wearing the shorts against a plain studio backdrop.' SCENE_PRESERVE then fired ('the photograph is the finished plate, do not rebuild the background'), which is correct for a real lifestyle scene but wrong here. Fix: shouldPreserveScene now accepts an optional seedClass (imageShotHeuristicService.resolveSeedClass) and vetoes preserve when seedClass === 'on_figure_plain', gated on SEED_CLASS_SCENE_BASED. 'before' variants omit seedClass (reproduces today's shipped bug-for-bug). 'after' variants set seedClass:'on_figure_plain' (the fix). Run with SEED_CLASS_SCENE_BASED=true in the environment — STATIC_LIFESTYLE_PRESERVE is already true via config/defaults.env.",
+  "seed": {
+    "url": "https://res.cloudinary.com/reach-social-prod/image/upload/v1788688103/catalog-product/6a982d6bce057530d979e611/product-1788688103462-12532-gmgabehc.jpg",
+    "productTitle": "Pelagic Leaderman",
+    "refs": [],
+    "brandHex": "#0b2540"
+  },
+  "static": {
+    "surface": "meta_feed_4_5",
+    "intent": "product_first_lifestyle",
+    "productDesc": "light blue-and-white camouflage-print board shorts with a black zippered side pocket and a drawstring waist, worn by a cropped male model",
+    "seedStyle": "lifestyle",
+    "variantKind": "product_image",
+    "copy": { "headline": "PFAS-Free Water & Stain Repellency", "rating": 4.8, "reviewCount": 10, "cta": "SHOP NOW" },
+    "models": ["openai/gpt-image-2/edit"],
+    "variants": [
+      { "id": "before-1" },
+      { "id": "after-1", "seedClass": "on_figure_plain" },
+      { "id": "after-2", "seedClass": "on_figure_plain" },
+      { "id": "after-3", "seedClass": "on_figure_plain" }
+    ]
+  }
+}

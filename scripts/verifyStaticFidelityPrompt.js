@@ -61,6 +61,7 @@ const LEGACY_PRODUCT_FIDELITY = `The supplied photograph is a PRODUCT REFERENCE 
 
 const HARDENING_FINGERPRINTS = [
   'PRODUCT FIDELITY — HIGHEST PRIORITY',
+  'PERSON IN FRAME — MANDATORY',
   'PRESERVE EXACTLY',
   'already visible on the product itself in the reference photograph',
   'wording already printed on the product itself is not an addition',
@@ -190,6 +191,7 @@ function collectPrompts(mod, data) {
     ['precedence: product accuracy wins', 'product accuracy wins'],
     ['precedence exempts text contract', 'does not relax the text instructions'],
     ['precedence defers to reserved corner', 'does not override the reserved-corner rule'],
+    ['person-in-frame mandate', 'PERSON IN FRAME — MANDATORY'],
     ['category/brand prior', 'Do not infer the product from its category'],
     ['colour lock', 'Do not shift hue, recolour'],
     ['lighting-vs-colour scope', 'New lighting may fall across those colours'],
@@ -419,13 +421,82 @@ function collectPrompts(mod, data) {
     ['pose/hands/framing still free', 'Their pose, their hands and how they are framed are yours to direct'],
     ['cannot strip the wearer', 'you may NOT remove them and show the item lying on its own'],
     ['no hanger/mannequin/flat-lay substitute', 'a hanger, a mannequin, a surface or a flat lay'],
-    ['adding a person stays discretionary', 'you may introduce a person or leave it unpeopled'],
-    ['worn-ness excluded from the free list', 'whether the item is worn, which the paragraph above ties to the reference'],
+    // UPDATED 2026-09-08 (session.d/2026-09-08_scene-preserve-onfigureplain.md
+    // and the same day's static-ad person-inclusion fix): "discretionary"
+    // person-adding was too weak — the reported bug was ads shipping product
+    // shots with nobody in frame. Adding a person to an unpeopled reference is
+    // now the DEFAULT, not an option to weigh; unpeopled is the exception
+    // (spare parts, fasteners, bulk packaging). Pinned positively (the new
+    // default) so a regression back to "discretionary" wording fails loudly.
+    ['adding a person is now the default, not discretionary', 'introduce a person wearing, holding or using it in a natural way appropriate to the product — do this by default'],
+    ['unpeopled only for genuinely person-less products', 'Leave it unpeopled only when the product genuinely is not something a person plausibly wears, holds, carries or uses'],
+    ['worn-ness stays tied to the reference — cannot strip the wearer via the free list either', 'Do not take a worn or held item off the body, and do not remove a person the reference already shows'],
+    // UPDATED 2026-09-08 (same session, live 3/3 gpt-image-2 miss on a tight
+    // Pelagic Leaderman flat-lay): adding a person was the default, but
+    // PRODUCT SCALE AND FRAMING + WHAT MAY CHANGE + BEFORE YOU FINISH all
+    // still locked camera distance and ~same frame-share. For a close-up
+    // unpeopled seed that lock is geometrically incompatible with fitting a
+    // person (and a visible face) in frame, so the model dropped the person.
+    // The scale rule now YIELDS on the add-person branch only; on-model
+    // framing is unchanged. Pin the carve-out AND its two restatements —
+    // leaving it only in WHO WEARS lets the later sentences re-lock scale.
+    ['add-person branch yields scale/framing', 'When you must add a person to an unpeopled reference, PRODUCT SCALE AND FRAMING yields'],
+    ['pull-back permitted to fit the added person', 'pull the camera back, change perspective and reframe as needed'],
+    ['pull-back is the one scale exception', 'it is the one exception to holding the reference\'s camera distance and share of frame'],
+    ['WHAT MAY CHANGE restates the add-person pull-back exception', 'except when that paragraph directs you to introduce a person into an unpeopled reference'],
+    ['final check does not undo the add-person pull-back', 'when a person had to be introduced into an unpeopled reference, a smaller share as that pull-back requires'],
+    // UPDATED 2026-09-08 round 2: the scale carve-out was live-falsified
+    // (3 more independent gpt-image-2 misses on the same Leaderman seed;
+    // 6/6 total). The model WAS following WHAT MAY CHANGE's "new scene"
+    // instruction (new docks/rocks/ocean) while ignoring the add-person
+    // default in WHO WEARS. Round 2 therefore (a) opens the block with
+    // PERSON IN FRAME — MANDATORY, matching PRODUCT FIDELITY's own
+    // opening-line force, (b) names the observed failure (new backdrop,
+    // still-life, no person) as insufficient, and (c) hitchs the person
+    // to the "build a new scene" sentence the model already obeys. On-
+    // model keep-person language is untouched.
+    ['early PERSON IN FRAME mandate', 'PERSON IN FRAME — MANDATORY'],
+    ['early mandate requires adding a person when the reference has none', 'If the reference photograph shows no person, adding one is required'],
+    ['early mandate forbids still-life-plus-new-backdrop', 'not a still-life of the item alone with a new backdrop'],
+    ['add-person branch names still-life-plus-backdrop as insufficient', 'Do not satisfy this by swapping the backdrop around an unpeopled still-life'],
+    ['add-person branch asks for a person in the act', 'Compose a photograph of a person in the act of wearing, holding or using this exact item'],
+    ['new-scene sentence includes the person, not just a backdrop', 'a new backdrop around a still-life of the item is not a new scene'],
+    ['final check fails an unpeopled still-life', 'a new environment around an unpeopled still-life does not pass'],
   ];
   for (const [name, needle] of clauses) {
     for (const { intentKey, surface, prompt } of rows) {
       check(`F7 ${intentKey}/${surface}: ${name}`, prompt.includes(needle));
     }
+  }
+
+  // On-model framing must stay locked in its OWN paragraph. The pull-back
+  // carve-out lives in WHO WEARS / WHAT MAY CHANGE / BEFORE YOU FINISH; if
+  // it leaks into PRODUCT SCALE AND FRAMING itself, the 15-run on-model
+  // scale guarantee is no longer the default the model reads first.
+  {
+    const scaleStart = F.indexOf('PRODUCT SCALE AND FRAMING.');
+    const wearsStart = F.indexOf('WHO WEARS OR HOLDS IT.');
+    const scalePara = (scaleStart >= 0 && wearsStart > scaleStart)
+      ? F.slice(scaleStart, wearsStart)
+      : '';
+    check('F7 PRODUCT SCALE AND FRAMING paragraph is present and precedes WHO WEARS',
+      scalePara.length > 0);
+    check('F7 SCALE paragraph still forbids dramatic zoom-out (on-model lock intact)',
+      scalePara.includes('Do not zoom in dramatically, zoom out dramatically'));
+    check('F7 SCALE paragraph does not itself yield or permit pull-back',
+      !/yields|pull the camera back/i.test(scalePara),
+      'carve-out leaked into the general scale rule; on-model framing would regress');
+    check('F7 on-model wearer sentences still precede the add-person carve-out',
+      F.indexOf('Keep the same person — do not replace them with someone else')
+        < F.indexOf('When you must add a person to an unpeopled reference, PRODUCT SCALE AND FRAMING yields'));
+    check('F7 PERSON IN FRAME mandate sits in the opening cluster, before PRESERVE EXACTLY',
+      F.indexOf('PERSON IN FRAME — MANDATORY') >= 0
+        && F.indexOf('PERSON IN FRAME — MANDATORY') < F.indexOf('PRESERVE EXACTLY'));
+    check('F7 PERSON IN FRAME mandate precedes WHO WEARS (early reinforcement, not a replacement)',
+      F.indexOf('PERSON IN FRAME — MANDATORY') < F.indexOf('WHO WEARS OR HOLDS IT.'));
+    check('F7 on-model keep-person language still present after the early mandate',
+      F.indexOf('PERSON IN FRAME — MANDATORY')
+        < F.indexOf('Keep the same person — do not replace them with someone else'));
   }
 
   // Negative pins — the resolved contradictions must STAY resolved.
@@ -466,6 +537,8 @@ function collectPrompts(mod, data) {
       !prompt.includes('if a word, numeral or mark is not in the text above'));
     check(`F7 flag off ${intentKey}/${surface}: no WHO WEARS OR HOLDS IT rule`,
       !prompt.includes('WHO WEARS OR HOLDS IT'));
+    check(`F7 flag off ${intentKey}/${surface}: no PERSON IN FRAME mandate`,
+      !prompt.includes('PERSON IN FRAME — MANDATORY'));
     // And the baseline KEEPS the permissive clause — that is what byte-identity means.
     check(`F7 flag off ${intentKey}/${surface}: "whether a person appears" RETAINED`,
       prompt.includes('whether a person appears'),

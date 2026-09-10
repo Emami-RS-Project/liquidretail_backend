@@ -154,15 +154,15 @@ check('B4: apifyIngestService.js forwards both rate-limit flags onto out.shopify
 // All three are now converted to the same shape and pinned here:
 //
 //   C. catalogSyncService.js#syncCatalogForCred — the Meta / IG-Commerce
-//      OAuth path. THREE triggers (enrichment + materialize/YOLO-detect
-//      chain + category inference).
+//      OAuth path. FOUR triggers (review intake + enrichment +
+//      materialize/YOLO-detect chain + category inference).
 //   D. genericCatalogIngestService.js#syncBrandGenericCatalog — the
-//      XML-sitemap + JSON-LD path for non-Shopify stores. THREE triggers
-//      (same three as C).
+//      XML-sitemap + JSON-LD path for non-Shopify stores. FOUR triggers
+//      (same four as C).
 //   E. apifyIngestService.js#syncBrandShopify — the LEGACY `apify` method
 //      path (distinct from the shopify-direct and IG paths already fixed).
-//      TWO triggers (enrichment + materialize/YOLO-detect chain — this
-//      legacy path has no category-inference trigger).
+//      THREE triggers (review intake + enrichment + materialize/YOLO-detect
+//      chain — this legacy path has no category-inference trigger).
 //
 //   The materialize/YOLO-detect chain (catalogMediaMaterializeService +
 //   catalogYoloDetectionService, both idempotent — see their own headers)
@@ -178,8 +178,8 @@ check('B4: apifyIngestService.js forwards both rate-limit flags onto out.shopify
 //   enrichment push in each path, per that commit's own message.
 //   shopifyPublicIngestService.js (Groups A/F) was never pinned to an
 //   EXACT trigger count, so it did not go red when the new chain landed;
-//   C/D/E were pinned to exact counts and did. The counts below (3/3/2)
-//   are corrected to match the current, intentional shape.
+//   C/D/E were pinned to exact counts and did. The counts below (4/4/3)
+//   include the 2026-09-07 first-pass review-intake push.
 //
 // "No setImmediate" is asserted against COMMENT-STRIPPED source, because
 // every one of these call sites now carries a ROBUSTNESS comment that
@@ -238,7 +238,7 @@ const integrationsSrc = fs.readFileSync(path.join(__dirname, '../routes/integrat
 check('C1: syncCatalogForCred\'s end-of-run triggers contain no setImmediate CODE', () => {
   const r = region(
     catalogSyncSrc,
-    '  const backgroundWork = [];\n\n  // Eager review + commerce enrichment',
+    '  const backgroundWork = [];\n\n  // First-pass on-site review scrape',
     '  return {\n    ok: true,',
     'C1'
   );
@@ -246,24 +246,23 @@ check('C1: syncCatalogForCred\'s end-of-run triggers contain no setImmediate COD
   assert.ok(r.includes('backgroundWork.push('), 'the triggers must collect their promises for the caller to await');
 });
 
-check('C2: ALL THREE catalogSyncService triggers are collected (enrichment, materialize+YOLO-detect chain, category inference)', () => {
+check('C2: ALL FOUR catalogSyncService triggers are collected (review intake, enrichment, materialize+YOLO-detect chain, category inference)', () => {
   const r = region(
     catalogSyncSrc,
-    '  const backgroundWork = [];\n\n  // Eager review + commerce enrichment',
+    '  const backgroundWork = [];\n\n  // First-pass on-site review scrape',
     '  return {\n    ok: true,',
     'C2'
   );
+  assert.ok(r.includes('reviewIntakeP'), 'first-pass review intake missing from the collected region');
   assert.ok(r.includes("require('./catalogProductEnrichmentService')"), 'enrichment trigger missing from the collected region');
   assert.ok(
     hasMaterializeYoloChain(r),
     'materialize+YOLO-detect chain missing from the collected region — expected either the inline catalogMediaMaterializeService + catalogYoloDetectionService requires (bb91303c) or catalogPostSyncOrchestrator.runPostSyncChain (31469b82)'
   );
   assert.ok(r.includes("require('./productCategoryInferenceService')"), 'category-inference trigger missing from the collected region');
-  // Exactly three pushes: enrichment, the materialize+YOLO-detect chain
-  // (one push wrapping two chained awaits), and category inference. A
-  // fourth would mean an uncollected trigger crept in or one was
-  // duplicated.
-  assert.equal((r.match(/backgroundWork\.push\(/g) || []).length, 3, 'expected exactly 3 collected triggers in syncCatalogForCred');
+  // Exactly four pushes: review intake, enrichment, the materialize+YOLO
+  // chain, and category inference.
+  assert.equal((r.match(/backgroundWork\.push\(/g) || []).length, 4, 'expected exactly 4 collected triggers in syncCatalogForCred');
 });
 
 check('C3: syncCatalogForCred returns backgroundWork on its result object', () => {
@@ -310,9 +309,10 @@ check('D1: syncBrandGenericCatalog\'s end-of-run triggers contain no setImmediat
   );
   assert.ok(!stripComments(r).includes('setImmediate('), 'the end-of-run triggers must not defer via setImmediate — see the ROBUSTNESS comment');
   assert.equal(
-    (r.match(/backgroundWork\.push\(/g) || []).length, 3,
-    'expected exactly 3 collected triggers (enrichment + materialize/YOLO-detect chain + category inference)'
+    (r.match(/backgroundWork\.push\(/g) || []).length, 4,
+    'expected exactly 4 collected triggers (review intake + enrichment + materialize/YOLO-detect chain + category inference)'
   );
+  assert.ok(r.includes('reviewIntakeP'), 'first-pass review intake missing from the collected region');
   assert.ok(r.includes("require('./catalogProductEnrichmentService')"), 'enrichment trigger missing from the collected region');
   assert.ok(
     hasMaterializeYoloChain(r),
@@ -351,9 +351,10 @@ check('E1: legacy syncBrandShopify\'s background triggers contain no setImmediat
   );
   assert.ok(!stripComments(r).includes('setImmediate('), 'the legacy path\'s background triggers must not defer via setImmediate — see the ROBUSTNESS comment');
   assert.equal(
-    (r.match(/backgroundWork\.push\(/g) || []).length, 2,
-    'expected exactly 2 collected triggers (catalog enrichment + materialize/YOLO-detect chain)'
+    (r.match(/backgroundWork\.push\(/g) || []).length, 3,
+    'expected exactly 3 collected triggers (review intake + catalog enrichment + materialize/YOLO-detect chain)'
   );
+  assert.ok(r.includes('reviewIntakeP'), 'first-pass review intake missing from the collected region');
   assert.ok(r.includes("require('./catalogProductEnrichmentService')"), 'enrichment trigger missing from the collected region');
   assert.ok(
     hasMaterializeYoloChain(r),
@@ -386,7 +387,7 @@ check('F1: none of the five fixed ingest entry points retain setImmediate in COD
     ['shopifyPublicIngestService end-of-run trio', region(shopifySrc, '  const cancelled = await abortCheck(brand._id, run);\n  const backgroundWork = [];', '  const durationMs = Date.now() - t0;', 'F1a')],
     ['apifyIngestService syncBrandInstagram', region(apifySrc, 'async function syncBrandInstagram', 'async function ingestIgPost', 'F1b')],
     ['apifyIngestService syncBrandShopify', region(apifySrc, '  const backgroundWork = [];\n  if (!summary.aborted', '  summary.durationMs = Date.now() - t0;', 'F1c')],
-    ['catalogSyncService syncCatalogForCred', region(catalogSyncSrc, '  const backgroundWork = [];\n\n  // Eager review + commerce enrichment', '  return {\n    ok: true,', 'F1d')],
+    ['catalogSyncService syncCatalogForCred', region(catalogSyncSrc, '  const backgroundWork = [];\n\n  // First-pass on-site review scrape', '  return {\n    ok: true,', 'F1d')],
     ['genericCatalogIngestService trio', region(genericSrc, '  const backgroundWork = [];\n  if (!cancelled) {', '  const durationMs = Date.now() - t0;', 'F1e')]
   ];
   for (const [label, r] of regions) {

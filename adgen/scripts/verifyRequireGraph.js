@@ -112,10 +112,12 @@ const { assertBackendRoot } = require('./lib/siblingBackend');
 // require statements), so the merged total equals this branch's own
 // pre-merge count. Re-measured via this harness itself: 543/543 resolved.
 //
-// Lane B (fit-before-write, 2026-09-08): new src/services/copyBudgets.js
-// (+3 top-level requires, +5 lazy) plus 4 caller sites (brandScriptExecutor,
-// staticAdIntents ×2, videoHeadlineService) = +12 edges. 549 → 561.
-const FREEZE_N = 577;
+// MERGE 2026-09-10: both sides had bumped FREEZE_N independently — this
+// branch to 577 (Lane B's copyBudgets edges) and origin/main to 544 (its
+// own rebase). Neither literal is right after the merge, and picking a
+// side would either mask new edges or fail spuriously. The value below is
+
+const FREEZE_N = 578;
 const {
   fileExists,
   dirExists,

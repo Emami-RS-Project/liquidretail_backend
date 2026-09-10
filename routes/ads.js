@@ -121,6 +121,7 @@ const { summarizeVisionQc } = require('../services/adVisionQcService');
 // strings without booting the route.
 const slackVerbosity = require('../services/slackRunVerbosity');
 const { tenantFilter, assertBrandInTenant, assertCampaignInTenant } = require('../middleware/tenantHelpers');
+const { resolveAdsByIds } = require('../services/adShowcaseService');
 const {
   generationGateDecision, normalizeProductIdList, pickSupersedingRun,
   computeRequestFingerprint, renderClaimFingerprint,
@@ -2966,6 +2967,35 @@ router.post('/push-to-meta', express.json(), async (req, res) => {
     // remediation banner ("Connect Instagram first" vs generic).
     res.status(err.code === 'no-page' || err.code === 'no-meta-ads-cred' ? 409 : 500)
        .json({ error: err.message || 'push-to-meta failed', code: err.code || null });
+  }
+});
+
+// POST /api/ads/by-ids
+// Body: { brandId, adIds: string[] }
+// Live preview of specific ads for the Ad Showcase builder. Resolves
+// the ids (brand-scoped, non-archived) into the same {products, ads,
+// skipped} shape the create-showcase route freezes — nothing is
+// persisted here. MUST live above the /:id routes so Express does not
+// swallow `by-ids` as an id param.
+router.post('/by-ids', express.json(), async (req, res) => {
+  try {
+    const brandId = req.body?.brandId || req.query.brandId || req.headers['x-brand-id'];
+    const adIds = req.body?.adIds;
+    if (!brandId) return res.status(400).json({ error: 'brandId required' });
+    if (!Array.isArray(adIds)) {
+      return res.status(400).json({ error: 'adIds (array) required' });
+    }
+    try {
+      await assertBrandInTenant(brandId, req);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ error: e.message });
+      throw e;
+    }
+    const result = await resolveAdsByIds({ brandId, adIds });
+    res.json(result);
+  } catch (err) {
+    console.error('ads by-ids failed:', err);
+    res.status(500).json({ error: err.message || 'ads by-ids failed' });
   }
 });
 

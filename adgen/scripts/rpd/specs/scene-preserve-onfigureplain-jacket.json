@@ -1,0 +1,24 @@
+{
+  "name": "scene-preserve-onfigureplain-jacket",
+  "notes": "Product-diversity round for the same-day on_figure_plain fix (see scene-preserve-onfigureplain-studio.json). Different Pelagic product (a technical black jacket) and a different seed photo (a close-up interior-construction shot, not the Leaderman shorts) — confirms the fix generalizes rather than being tuned to one seed image.",
+  "seed": {
+    "url": "https://res.cloudinary.com/reach-social-prod/image/upload/v1788359641/catalog-product/6a982d6bce057530d979e611/product-1788359641676-210-jl46nht9.jpg",
+    "productTitle": "Pelagic technical jacket",
+    "refs": [],
+    "brandHex": "#0b2540"
+  },
+  "static": {
+    "surface": "meta_feed_4_5",
+    "intent": "product_first_lifestyle",
+    "productDesc": "a black technical fishing jacket with a small fish-logo patch on the chest, worn open by a cropped male model showing the interior fleece-lined pocket and hexagonal thermal lining",
+    "seedStyle": "lifestyle",
+    "variantKind": "product_image",
+    "copy": { "headline": "Built to Weather It", "rating": 4.8, "reviewCount": 10, "cta": "SHOP NOW" },
+    "models": ["openai/gpt-image-2/edit"],
+    "variants": [
+      { "id": "before-1" },
+      { "id": "after-1", "seedClass": "on_figure_plain" },
+      { "id": "after-2", "seedClass": "on_figure_plain" }
+    ]
+  }
+}
