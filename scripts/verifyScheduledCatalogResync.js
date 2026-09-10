@@ -424,7 +424,7 @@ function runUncappedOverride() {
     /syncBrandGenericCatalog\([\s\S]{0,220}?uncapped:\s*true/.test(svcSrc)
       && /syncBrandShopifyDirect\([\s\S]{0,220}?uncapped:\s*true/.test(svcSrc));
   check('I11 apify forwards uncapped onto nested generic/shopify-direct/apify-shopify',
-    /syncBrandGenericCatalog\(brand,\s*run,\s*\{\s*isBrandAborted,\s*uncapped:\s*uncapped\s*===\s*true\s*\}\)/.test(apifySrc)
+    /syncBrandGenericCatalog\(brand,\s*run,\s*\{\s*isBrandAborted,\s*uncapped:\s*uncapped\s*===\s*true,\s*seedProductUrls\s*\}\)/.test(apifySrc)
       && /syncBrandShopifyDirect\(brand,\s*run,\s*\{\s*isBrandAborted,\s*uncapped:\s*uncapped\s*===\s*true\s*\}\)/.test(apifySrc)
       && /syncBrandShopify\(brand,\s*run,\s*\{\s*uncapped:\s*uncapped\s*===\s*true\s*\}\)/.test(apifySrc));
 }

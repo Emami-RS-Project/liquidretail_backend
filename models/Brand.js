@@ -338,6 +338,28 @@ const brandSchema = new mongoose.Schema({
   // brand lists. Ingest limits live in server .env (APIFY_IG_LIMIT,
   // APIFY_SHOPIFY_LIMIT); Apify token is server-wide (APIFY_TOKEN).
   isDemo:    { type: Boolean, default: false, index: true },
+  // Catalog update cadence for this client.
+  //
+  //   'demo'       — catalog is FROZEN after the initial ingest. The nightly
+  //                  scheduled re-sync skips this brand entirely; the only way
+  //                  to refresh it is an explicit operator sync (POST
+  //                  /api/sales-demos/brands/:id/sync). This is what a sales
+  //                  demo wants: a curated, stable catalog that does not churn
+  //                  under the demo, and does not silently accrue nightly
+  //                  derivation cost.
+  //   'production' — normal daily updates via runDueCatalogResyncs.
+  //
+  // null means "not explicitly set" and resolves via resolveCatalogSyncMode()
+  // to 'demo' for isDemo brands and 'production' otherwise, so demo brands get
+  // the frozen behaviour without a backfill. Set it explicitly to override —
+  // a demo brand CAN be put on 'production', and vice versa.
+  //
+  // WHY THIS MATTERS (money): dispatchCatalogResync passes uncapped:true for
+  // demo brands, so the nightly job ignores CATALOG_INGEST_LIMIT — before this
+  // gate, a curated 30-product demo would be re-walked to the retailer's full
+  // catalog on the next nightly window.
+  catalogSyncMode: { type: String, enum: ['demo', 'production', null], default: null },
+
   apifyDemo: {
     igHandle:      { type: String, default: null },  // '@' stripped, lowercase
     // Catalog/store URL for ingestion. Named 'shopifyUrl' for historical
@@ -369,7 +391,19 @@ const brandSchema = new mongoose.Schema({
     // Set via a conditional findOneAndUpdate so two concurrent POST
     // /brands/:id/enrich can't both start a run + double-spend; cleared
     // when the enrichment finishes.
-    enrichInFlight: { type: Boolean, default: false }
+    enrichInFlight: { type: Boolean, default: false },
+    // Operator-curated list of absolute PDP URLs. When non-empty the
+    // generic-sitemap ingest scans EXACTLY these instead of discovering
+    // + walking sitemaps. MUST be declared: apifyDemo is a typed subdoc
+    // and Mongoose strict silently drops undeclared paths.
+    //
+    // WHY PERSISTED, NOT PER-RUN: scheduledSyncService.dispatchCatalogResync
+    // calls syncBrandApify(brand._id, { skipInstagram: true, uncapped: true })
+    // for demo brands — the nightly resync is PERSIST-UNCAPPED, so it
+    // ignores CATALOG_INGEST_LIMIT. If this list were per-run only, the
+    // nightly job would re-walk the whole sitemap and blow a curated
+    // 30-product demo out to the retailer's entire catalog.
+    seedProductUrls: { type: [String], default: undefined }
   },
 
   // Per-brand video-chrome style overrides. Mirrors the shape of the

@@ -336,7 +336,16 @@ check('D3: syncBrandGenericCatalog returns backgroundWork on `out`', () => {
 check('D4: apifyIngestService forwards genericCatalogIngestService\'s backgroundWork onto out.shopify', () => {
   const genBlockStart = apifySrc.indexOf("if (method === 'generic-sitemap') {");
   assert.ok(genBlockStart > -1, 'generic-sitemap branch not found — file changed shape?');
-  const genBlock = apifySrc.slice(genBlockStart, genBlockStart + 1800);
+  // Bound the window at the NEXT `if (method === ` branch rather than a
+  // fixed byte count. A fixed count is fragile in both directions: the old
+  // 1800 truncated the asserted string mid-match once seedProductUrls was
+  // threaded through syncBrandGenericCatalog (it starts at ~1784 and is 31
+  // chars long), while simply enlarging it to 2800 runs PAST the next
+  // branch — so the check would stop being scoped to the generic-sitemap
+  // branch and could be satisfied by a sibling branch's identical forward.
+  const nextBranch = apifySrc.indexOf('if (method === ', genBlockStart + 10);
+  const genBlockEnd = nextBranch > genBlockStart ? nextBranch : genBlockStart + 2800;
+  const genBlock = apifySrc.slice(genBlockStart, genBlockEnd);
   assert.ok(genBlock.includes('backgroundWork: r.backgroundWork'), 'out.shopify must forward r.backgroundWork on the generic-sitemap branch');
 });
 

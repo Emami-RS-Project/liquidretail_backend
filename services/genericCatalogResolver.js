@@ -43,6 +43,13 @@ const reviewsEngine = require('./productReviewsScrapeService');
 // PDP's BreadcrumbList from the SAME HTML the scan already fetched —
 // avoids a second full per-product crawl by the post-sync inference pass.
 const { extractBreadcrumb, extractJsonLdFromFlightData } = require('./breadcrumbParser');
+// SSRF denylist for operator-supplied seed PDP URLs — reuse, do not
+// re-implement RFC1918 / loopback / link-local / IPv6 unique-local /
+// IPv4-mapped. We do NOT run seeds through safeWebsiteOrigin's
+// CDN/myshopify suffix denylist: that helper exists to keep those hosts
+// off Brand.websiteUrl; a same-origin PDP on the configured catalog
+// origin is a legitimate generic-sitemap seed.
+const { isPrivateOrLoopbackHost } = require('./brandWebsiteBackfill');
 
 // Honest self-identifying crawler UA. Gap Inc. (Next.js + Akamai) serves
 // the fully server-rendered sitemap/PDP to crawlers and a deferred SPA
@@ -151,6 +158,10 @@ const RAW_DATA_CAP_BYTES = 8000;
 // literal here is indistinguishable from the bug that guard exists to catch.
 const MAX_LOGGED_CATEGORY_KEYS = 8;
 const FALLBACK_SITEMAP_PATHS = ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml'];
+// Hard cap on an operator-curated seed list so one PATCH cannot queue
+// an unbounded crawl. Distinct from GENERIC_CATALOG_LIMIT (scan cap)
+// and CATALOG_INGEST_LIMIT (persist cap).
+const SEED_PRODUCT_URLS_CAP = 500;
 // Category options from sitemap URLs (no PDP fetches). Flag-off restores a
 // byte-identical resolver result (no new keys). Defaults match owner request
 // for selective import of large catalogs (fanatics-scale ~800k products).
@@ -1880,14 +1891,119 @@ async function tryBrowserSessionRungInner({
   return attachCategoryFields(out);
 }
 
+// ── seed-URL sanitizer (pure, never throws) ────────────────────────
+
+function originHostname(originUrl) {
+  if (originUrl == null) return null;
+  let s = String(originUrl).trim();
+  if (!s) return null;
+  if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+  try {
+    const host = new URL(s).hostname;
+    return host ? host.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * sanitizeSeedProductUrls(rawList, originUrl) → { urls, rejected }
+ *
+ * Operator-supplied PDP URLs become a server-side fetch, so a foreign
+ * host here is an SSRF vector. Accept only http(s) absolute URLs whose
+ * host equals the brand's catalog origin (case-insensitive). Reuse
+ * isPrivateOrLoopbackHost for the private/loopback/link-local denylist
+ * rather than re-implementing it. Never throw — drop a bad entry and
+ * report it in `rejected`.
+ */
+function sanitizeSeedProductUrls(rawList, originUrl) {
+  const urls = [];
+  const rejected = [];
+  try {
+    if (rawList == null) return { urls, rejected };
+    if (!Array.isArray(rawList)) {
+      rejected.push({ url: rawList, reason: 'not-an-array' });
+      return { urls, rejected };
+    }
+    const expectedHost = originHostname(originUrl);
+    const seen = new Set();
+    for (const raw of rawList) {
+      try {
+        if (raw == null) {
+          rejected.push({ url: raw, reason: 'blank' });
+          continue;
+        }
+        if (typeof raw !== 'string') {
+          rejected.push({ url: raw, reason: 'not-a-string' });
+          continue;
+        }
+        const trimmed = raw.trim();
+        if (!trimmed) {
+          rejected.push({ url: raw, reason: 'blank' });
+          continue;
+        }
+        // Absolute http(s) only — do not prepend a scheme. A bare host
+        // becoming a server-side fetch is exactly the SSRF we refuse.
+        if (!/^https?:\/\//i.test(trimmed)) {
+          rejected.push({ url: trimmed, reason: 'not-absolute-http(s)' });
+          continue;
+        }
+        let parsed;
+        try {
+          parsed = new URL(trimmed);
+        } catch {
+          rejected.push({ url: trimmed, reason: 'unparseable' });
+          continue;
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          rejected.push({ url: trimmed, reason: 'not-absolute-http(s)' });
+          continue;
+        }
+        if (isPrivateOrLoopbackHost(parsed.hostname)) {
+          rejected.push({ url: trimmed, reason: 'private-or-loopback' });
+          continue;
+        }
+        if (!expectedHost) {
+          rejected.push({ url: trimmed, reason: 'no-catalog-origin' });
+          continue;
+        }
+        if (parsed.hostname.toLowerCase() !== expectedHost) {
+          rejected.push({ url: trimmed, reason: 'foreign-host' });
+          continue;
+        }
+        const dedupeKey = `${parsed.origin.toLowerCase()}${parsed.pathname}${parsed.search}`;
+        if (seen.has(dedupeKey)) {
+          rejected.push({ url: trimmed, reason: 'duplicate' });
+          continue;
+        }
+        if (urls.length >= SEED_PRODUCT_URLS_CAP) {
+          rejected.push({ url: trimmed, reason: 'cap' });
+          continue;
+        }
+        seen.add(dedupeKey);
+        urls.push(trimmed);
+      } catch (err) {
+        rejected.push({ url: raw, reason: 'invalid', detail: err && err.message });
+      }
+    }
+    return { urls, rejected };
+  } catch (err) {
+    return {
+      urls: [],
+      rejected: [{ url: null, reason: 'sanitizer-error', detail: err && err.message }]
+    };
+  }
+}
+
 // ── main resolve ───────────────────────────────────────────────────
 
 /**
- * resolveGenericCatalog(brand, { run, abortCheck, cap, discoverOnly, categories })
+ * resolveGenericCatalog(brand, { run, abortCheck, cap, discoverOnly, categories, seedProductUrls })
  * → { ok, mode, source?, origin, products:[flat], stats, rateLimited?, reason?, warnings?,
  *     categoryOptions?, categoryPromptSuggested?, discoverOnly?, totalCandidates? }
  *
- * mode: 'sitemap-jsonld' | shopify ladder mode ('products-json'|'storefront-graphql'|'sitemap')
+ * mode: 'sitemap-jsonld' | 'seeded-jsonld' | shopify ladder mode
+ *   ('products-json'|'storefront-graphql'|'sitemap')
  * source: CatalogProduct.source enum value when AUTODETECT ran
  *   ('shopify-direct' | 'sitemap-jsonld'). Flag-off omits it (byte-identical).
  *
@@ -1917,7 +2033,8 @@ async function resolveGenericCatalog(brand, {
   abortCheck = async () => false,
   cap = DEFAULT_CAP,
   discoverOnly = false,
-  categories = null
+  categories = null,
+  seedProductUrls = null
 } = {}) {
   const stats = {
     sitemapsDiscovered: 0,
@@ -2034,6 +2151,48 @@ async function resolveGenericCatalog(brand, {
 
   const effectiveCap = Math.max(1, parseInt(cap, 10) || DEFAULT_CAP);
   console.log(`${LOG}  resolveGenericCatalog: origin=${origin} cap=${effectiveCap}`);
+
+  // Seeded URL list: operator-curated PDPs. When the sanitizer returns a
+  // NON-EMPTY list we skip robots/sitemap discovery and walk entirely and
+  // scan those URLs with the same per-PDP path. When it returns empty
+  // (absent, explicit [], or every entry rejected) we fall through to
+  // today's sitemap discovery — NEVER an empty crawl. A typo'd PATCH
+  // that persisted nothing usable must not silently produce a
+  // zero-product sync; the operator still gets the old first-N walk.
+  // Do NOT truthiness-check the array (`if ([])` is true in JS).
+  const sanitizedSeeds = sanitizeSeedProductUrls(seedProductUrls, origin);
+  const useSeeded = sanitizedSeeds.urls.length > 0;
+  const resultMode = useSeeded ? 'seeded-jsonld' : 'sitemap-jsonld';
+
+  let disc = {
+    sitemaps: [],
+    crawlDelayMs: 0,
+    cfChallenges: 0,
+    rateLimited: false,
+    robotsText: null,
+    robotsReachable: false
+  };
+  let crawlDelayMs = 0;
+  let pdpGapMs = 0;
+  let pageEntries = [];
+  let shopifyEligibleForBrowser = false;
+  let categoryOptions = null;
+  let categoryPromptSuggested = false;
+
+  if (useSeeded) {
+    stats.seeded = sanitizedSeeds.urls.length;
+    if (sanitizedSeeds.rejected.length) {
+      stats.seedRejected = sanitizedSeeds.rejected.length;
+      warnings.push(`dropped ${sanitizedSeeds.rejected.length} seed URL(s)`);
+    }
+    pageEntries = sanitizedSeeds.urls.map((loc) => ({ loc, lastmod: null }));
+    console.log(
+      `${LOG}  resolveGenericCatalog SEEDED: n=${pageEntries.length} origin=${origin}` +
+      ' (sitemap discovery skipped)'
+    );
+    run?.stage?.('scanning seeded product pages');
+    run?.note?.(`seeded catalog @ ${origin} (${pageEntries.length} URLs)`);
+  } else {
   run?.stage?.('discovering sitemaps');
   run?.note?.(`generic catalog discovery @ ${origin}`);
 
@@ -2041,12 +2200,12 @@ async function resolveGenericCatalog(brand, {
   // Counts against the TOTAL budget (sitemap rung opens after discovery
   // so a slow robots.txt cannot starve the walk allotment entirely —
   // discovery is a handful of requests; the walk is the expensive part).
-  const disc = await discoverSitemapUrls(origin, abortCheck, { stats });
+  disc = await discoverSitemapUrls(origin, abortCheck, { stats });
   stats.sitemapsDiscovered = disc.sitemaps.length;
   stats.cfChallenges += disc.cfChallenges || 0;
   if (disc.rateLimited) rateLimited = true;
-  const crawlDelayMs = disc.crawlDelayMs || 0;
-  const pdpGapMs = Math.max(crawlDelayMs - 250, 0);
+  crawlDelayMs = disc.crawlDelayMs || 0;
+  pdpGapMs = Math.max(crawlDelayMs - 250, 0);
 
   // ── Platform auto-detect (Shopify → access ladder) ───────────────
   // One homepage fetch + pure fingerprint on already-fetched robots.
@@ -2223,7 +2382,7 @@ async function resolveGenericCatalog(brand, {
   }
 
   // Track Shopify eligibility for the browser rung (products.json in-page).
-  let shopifyEligibleForBrowser = stats.platform === 'shopify' &&
+  shopifyEligibleForBrowser = stats.platform === 'shopify' &&
     (stats.confidence === 'high' || stats.confidence === 'medium');
 
   if (!disc.sitemaps.length) {
@@ -2339,7 +2498,7 @@ async function resolveGenericCatalog(brand, {
   }
 
   // let — may be reassigned by the category filter below (selective import).
-  let pageEntries = walked.pageEntries || [];
+  pageEntries = walked.pageEntries || [];
   if (!pageEntries.length) {
     // Prefer a budget reason over the generic "no product URLs" message
     // when the walk was cut short before any locs landed.
@@ -2406,8 +2565,8 @@ async function resolveGenericCatalog(brand, {
   // Zero extra network. Gated so flag-off is byte-identical (no new keys).
   // Cheap on MAX_SITEMAP_URLS (default 20k); still skip if the total budget
   // already expired so derivation cannot become a hang after a slow walk.
-  let categoryOptions = null;
-  let categoryPromptSuggested = false;
+  categoryOptions = null;
+  categoryPromptSuggested = false;
   const categoryKeys = CATEGORY_OPTIONS_ENABLED && Array.isArray(categories)
     ? categories.map(k => String(k || '').trim()).filter(Boolean)
     : [];
@@ -2505,8 +2664,26 @@ async function resolveGenericCatalog(brand, {
     categoryPromptSuggested = true;
   }
 
+  } // unseeded discovery/walk — seeded jumps here with pageEntries already set
+
+  if (useSeeded && discoverOnly) {
+    const discOut = {
+      ok: true,
+      mode: resultMode,
+      origin,
+      discoverOnly: true,
+      totalCandidates: pageEntries.length,
+      products: [],
+      stats,
+      rateLimited: false
+    };
+    if (AUTODETECT_ENABLED) discOut.source = 'sitemap-jsonld';
+    if (warnings.length) discOut.warnings = warnings;
+    return discOut;
+  }
+
   console.log(`   · ${LOG}  ${pageEntries.length} candidate URLs (scanning up to cap=${effectiveCap})`);
-  run?.stage?.('scanning product pages');
+  if (!useSeeded) run?.stage?.('scanning product pages');
 
   // ── PDP scan (bounded-parallel; parallel-fetch → serial-reduce) ──
   // Fetch+parse up to pdpConcurrency pages at once, then FOLD the outcomes
@@ -2681,7 +2858,7 @@ async function resolveGenericCatalog(brand, {
   if (aborted) {
     return attachCategoryFields({
       ok: products.length > 0,
-      mode: 'sitemap-jsonld',
+      mode: resultMode,
       origin,
       products,
       stats,
@@ -2701,7 +2878,7 @@ async function resolveGenericCatalog(brand, {
       console.warn(`   ⚠️  ${LOG}  ${reason}`);
       return attachCategoryFields({
         ok: false,
-        mode: 'sitemap-jsonld',
+        mode: resultMode,
         origin,
         products: [],
         stats,
@@ -2722,7 +2899,7 @@ async function resolveGenericCatalog(brand, {
     console.log(`${LOG}  resolveGenericCatalog partial (budget): n=${products.length} ${reason}`);
     const out = {
       ok: true,
-      mode: 'sitemap-jsonld',
+      mode: resultMode,
       origin,
       products,
       stats,
@@ -2739,6 +2916,9 @@ async function resolveGenericCatalog(brand, {
   // ── Decisive unscrapeable / partial outcomes ─────────────────────
   if (!products.length) {
     // Last rung: cheap path scanned (or blocked) to zero products.
+    // Seeded runs skip Chrome recovery — the operator named exact PDPs;
+    // launching a browser to climb products.json would ignore the list.
+    if (!useSeeded) {
     const browserFinal = await tryBrowserSessionRung({
       brand,
       origin,
@@ -2762,6 +2942,7 @@ async function resolveGenericCatalog(brand, {
       mapOpts
     });
     if (browserFinal) return browserFinal;
+    }
 
     let reason;
     if (stats.cfChallenges > 0 && stats.jsonLdProductsFound === 0 && stats.ogFallbackUsed === 0) {
@@ -2791,7 +2972,7 @@ async function resolveGenericCatalog(brand, {
     console.warn(`   ⚠️  ${LOG}  ${reason}`);
     return attachCategoryFields({
       ok: false,
-      mode: 'sitemap-jsonld',
+      mode: resultMode,
       origin,
       products: [],
       stats,
@@ -2815,7 +2996,7 @@ async function resolveGenericCatalog(brand, {
 
   const out = {
     ok: true,
-    mode: 'sitemap-jsonld',
+    mode: resultMode,
     origin,
     products,
     stats,
@@ -2827,6 +3008,8 @@ async function resolveGenericCatalog(brand, {
 
 module.exports = {
   resolveGenericCatalog,
+  sanitizeSeedProductUrls,
+  SEED_PRODUCT_URLS_CAP,
   parseRobotsForSitemaps,
   parseSitemapXml,
   extractJsonLdProducts,
