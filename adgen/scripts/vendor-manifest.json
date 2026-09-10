@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "c235b681dc023ee32172054c66089e1a56a40ae2",
-  "generatedAt": "2026-09-10T18:09:15.016Z",
+  "backendHead": "64ef4e94965c7b06e34e44f1b07bd90ef12d53ea",
+  "generatedAt": "2026-09-10T19:26:00.845Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
@@ -68,11 +68,11 @@
       "owedSince": null
     },
     "models/Brand.js": {
-      "backendHash": "741f39d1bb1f87a1f999a5dd85b4025e184f1f029d3d46588f25a2d45308143d",
+      "backendHash": "88d4a3c911555494e68dbdef2690e5953562a603d2ce8d15dbc3a99d17ba6f29",
       "adgenHash": "867bc01e144a7d8d77ee6bc822abf61e5b7a9ebb46ebda913162fc4de7683104",
-      "backendSha": "b6d175c3c4241fe917839e7884f8617e672ed4fd",
+      "backendSha": "64ef4e94965c7b06e34e44f1b07bd90ef12d53ea",
       "status": "fork",
-      "reason": "2026-09-06 backend #391/#392 added lastCatalogResyncAt (Date, default null) for scheduled Shopify-direct/generic/Apify catalog re-sync (scheduledSyncService.runDueCatalogResyncs) -- carries forward from the prior look. Since then, two more backend commits added three NEW backend-only fields: catalogYoloBackoffUntil (Date), catalogYoloBackoffFailures (Number), catalogYoloBackoffReason (String) -- per-brand catalog-YOLO backoff state that survives worker crash-loops; and catalogPostSyncHeartbeatAt (Date) -- a cross-process 'chain is alive' heartbeat for runPostSyncChain, independent of progressService's 4h MAX_RUN_MS, goes stale after POST_SYNC_CHAIN_HEARTBEAT_STALE_MIN. Confirmed via grep: zero references to any of these 4 fields anywhere in adgen/src. Adgen has zero Brand.create/update/save call sites (same precedent as lastCatalogResyncAt) -- writer is backend-only catalog ingest. verifyModelParity only requires adgen-fields SUBSET backend-fields, so backend-only fields are fine (same pattern as CampaignRun.automation). Not porting any of the 4 fields: adgen does not run catalog re-sync, catalog-YOLO backoff, or the post-sync chain, and would never read or stamp them."
+      "reason": "2026-09-10 backend #439 (64ef4e94) added TWO new backend-only fields to brandSchema; carries the prior look's four forward. NEW: catalogSyncMode (String, enum ['demo','production',null], top-level) — per-client catalog update cadence; 'demo' makes scheduledSyncService.selectDueCatalogResyncCandidates skip the brand entirely so a curated demo catalog is never re-walked by the nightly persist-uncapped resync, 'production' keeps daily updates, null resolves via resolveCatalogSyncMode() to 'demo' for isDemo brands and 'production' otherwise. And apifyDemo.seedProductUrls ([String]) — an operator-curated list of absolute same-origin PDP URLs; when non-empty the generic-sitemap ingest scans exactly those instead of discovering and walking sitemaps. NOTE enrichInFlight is NOT a new field in this diff: it appears in the +lines only because a trailing comma was added when seedProductUrls was inserted after it, and adgen already declares it at adgen/src/models/Brand.js:349. Confirmed via grep: ZERO references to catalogSyncMode or seedProductUrls anywhere in adgen (not adgen/src, not adgen/scripts, not adgen/config, not this manifest). Adgen still has zero Brand.create/update/save call sites — writer is backend-only catalog ingest, same precedent as lastCatalogResyncAt and the catalogYoloBackoff*/catalogPostSyncHeartbeatAt group in the prior look. verifyModelParity requires only adgen-fields SUBSET backend-fields, so backend-only fields are fine. Not porting either: adgen does not run catalog ingest, does not run the nightly resync, and would never read or stamp either field. KEEPING THE FORK. Process note for whoever looks next: this check compares against backend origin/main, so it CANNOT flag your own models/Brand.js drift before your PR merges — a pre-merge '15/15 passed' says nothing about your own change, and trunk goes red the moment you land. Same root cause as verifyModelParity's origin/main comparison ref but the opposite failure mode: parity self-heals on merge, drift only APPEARS on merge. This is how #426 left trunk red for 5+ commits. Reconcile in the SAME PR as any models/Brand.js change."
     },
     "models/Campaign.js": {
       "backendHash": "079065a6d9dff95e04f8136469d847cb6f3703452e6553492ea35e26291df6ae",
