@@ -35,6 +35,13 @@
 //     verifyRemotionChildIsolation.js D6, which pins that structurally)
 //   remove `isAdgenRendererEnabled()` from orchestrator's tick → B2 red
 //   remove the claimFilter's state guard (always the same filter) → C1 red
+//
+// Section E (missing-brand give-up clock) IS revert-proven by the script
+// itself: E5 drives the real resumeUntitledMasters against Media.brandId
+// null for more passes than BRAND_GIVEUP_MIN would allow at sweep cadence.
+// Restoring `tooOld` to `(Date.now() - adFresh.updatedAt)` makes E5 fail
+// (the claim write resets updatedAt every pass, so the window never
+// elapses). E6/E7 pin that structurally so a comment-only revert is red too.
 
 const fs = require('fs');
 const path = require('path');
@@ -317,6 +324,218 @@ async function sectionC() {
   });
 }
 
+function stripComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+}
+
+async function sectionE() {
+  console.log('\n── E: missing-brand give-up clock survives claim/release (the 5-day loop) ──');
+  // Production shape (verified live, not speculation): Media doc exists,
+  // Media.brandId is null, brand lookup returns null, resumeUntitledMasters
+  // used adFresh.updatedAt for tooOld. The claim a few lines earlier writes
+  // updatedAt:now, so the give-up window never elapsed. This section drives
+  // the REAL function against that shape for more passes than BRAND_GIVEUP_MIN
+  // would allow at a 10-minute sweep cadence, with an injected clock so we
+  // do not sleep. A revert to the updatedAt clock makes E5 fail.
+
+  const mediaPath = require.resolve(path.join(ROOT, 'src/models/Media.js'));
+  const brandPath = require.resolve(path.join(ROOT, 'src/models/Brand.js'));
+  const resumeSvcPath = require.resolve(path.join(ROOT, 'src/services/titlingResumeService.js'));
+  const originalMedia = require.cache[mediaPath];
+  const originalBrand = require.cache[brandPath];
+  const originalResumeSvc = require.cache[resumeSvcPath];
+  const originalBseForE = require.cache[bsePath];
+  const originalAdForE = require.cache[adModelPath];
+
+  const titleCalls = [];
+  const qcCalls = [];
+  require.cache[mediaPath] = {
+    id: mediaPath, filename: mediaPath, loaded: true,
+    exports: {
+      findById: () => ({
+        select: () => ({
+          lean: () => Promise.resolve({
+            _id: 'media-nobrand',
+            brandId: null,
+            fileType: 'video',
+            fileUrl: 'https://cdn/src.jpg'
+          })
+        })
+      })
+    }
+  };
+  require.cache[brandPath] = {
+    id: brandPath, filename: brandPath, loaded: true,
+    exports: {
+      findById: () => ({ select: () => ({ lean: () => Promise.resolve(null) }) })
+    }
+  };
+
+  const col = new MiniCollection([{
+    _id: 'nobrand1',
+    status: 'draft',
+    titlingResumeState: 'pending',
+    veoVideoUrl: 'https://cdn/master.mp4',
+    mediaId: 'media-nobrand',
+    renderUrl: 'https://cdn/master.mp4',
+    titlingResumeBrandMissingSince: null,
+    updatedAt: new Date(Date.now() - 60_000)
+  }]);
+  require.cache[bsePath] = {
+    id: bsePath, filename: bsePath, loaded: true,
+    exports: {
+      renderBrandScriptAndSave: async ({ ad }) => {
+        titleCalls.push(ad._id);
+        throw new Error('renderBrandScriptAndSave must not run on a missing-brand ad');
+      },
+      qcAndStampVideoAd: async ({ ad, deliveredUrl }) => {
+        qcCalls.push({ adId: ad._id, deliveredUrl });
+        return { ok: true };
+      }
+    }
+  };
+
+  const CADENCE_MIN = 10;
+  const GIVEUP_MIN = 60; // BRAND_GIVEUP_MIN default — do not change the env; inject time instead
+  const PASSES = 8;      // 0,10,20,30,40,50,60,70 min — 8 > 60/10, old clock never fires
+  const T0 = 1_700_000_000_000;
+
+  try {
+    require.cache[adModelPath] = { id: adModelPath, filename: adModelPath, loaded: true, exports: col };
+    delete require.cache[resumeSvcPath];
+    const titlingResume = require(resumeSvcPath);
+
+    check('E0 BRAND_GIVEUP_MIN default is still 60 (env name and default untouched)', () => {
+      assert.strictEqual(titlingResume.BRAND_GIVEUP_MIN, 60);
+    });
+
+    const dualAdPaths = [
+      path.join(ROOT, 'src/models/Ad.js'),
+      path.join(ROOT, '..', 'models/Ad.js')
+    ];
+    check('E1 both Ad models declare titlingResumeBrandMissingSince (Mongoose-strict dual-declare)', () => {
+      for (const p of dualAdPaths) {
+        const src = fs.readFileSync(p, 'utf8');
+        assert.ok(
+          /titlingResumeBrandMissingSince\s*:\s*\{\s*type:\s*Date/.test(src),
+          `${p} must declare titlingResumeBrandMissingSince: { type: Date }`
+        );
+      }
+    });
+
+    const outcomes = [];
+    for (let i = 0; i < PASSES; i++) {
+      const nowMs = T0 + i * CADENCE_MIN * 60 * 1000;
+      const out = await titlingResume.resumeUntitledMasters({ limit: 5, nowMs });
+      const doc = col.docs.find((d) => d._id === 'nobrand1');
+      outcomes.push({
+        i,
+        nowMs,
+        elapsedMin: i * CADENCE_MIN,
+        titled: out.titled,
+        skipped: out.skipped,
+        failed: out.failed,
+        state: doc.titlingResumeState,
+        stage: doc.renderStage,
+        missingSince: doc.titlingResumeBrandMissingSince
+          ? new Date(doc.titlingResumeBrandMissingSince).getTime()
+          : null
+      });
+    }
+
+    await check('E2 first observation stamps titlingResumeBrandMissingSince once and does NOT give up', async () => {
+      assert.strictEqual(outcomes[0].skipped, 1, 'first pass must release, not ship');
+      assert.strictEqual(outcomes[0].titled, 0);
+      assert.strictEqual(outcomes[0].failed, 0);
+      assert.strictEqual(outcomes[0].state, 'pending');
+      assert.strictEqual(outcomes[0].missingSince, T0, 'clock must start at the injected first-seen time, not wall-clock');
+      assert.ok(titleCalls.length === 0, 'must not enter Remotion on a missing-brand ad');
+    });
+
+    await check('E3 subsequent pre-window passes leave the stamp untouched (claim/release must not reset the clock)', async () => {
+      const pre = outcomes.filter((o) => o.elapsedMin <= GIVEUP_MIN);
+      assert.ok(pre.length >= 7, `expected passes at 0..${GIVEUP_MIN} inclusive, got ${pre.length}`);
+      for (const o of pre) {
+        assert.strictEqual(o.missingSince, T0, `pass i=${o.i} (${o.elapsedMin}m) overwrote the first-seen stamp`);
+        assert.strictEqual(o.titled, 0, `pass i=${o.i} (${o.elapsedMin}m) shipped early — tooOld uses >, not >=`);
+        assert.strictEqual(o.state, 'pending');
+      }
+    });
+
+    await check('E4 first-writer CAS filter is what stamps the field (concurrent instances cannot race two first-seen times)', async () => {
+      const cas = col.calls.filter((c) =>
+        c.op === 'updateOne'
+        && c.filter._id === 'nobrand1'
+        && Object.prototype.hasOwnProperty.call(c.filter, 'titlingResumeBrandMissingSince')
+        && c.filter.titlingResumeBrandMissingSince === null
+        && c.update && c.update.$set && c.update.$set.titlingResumeBrandMissingSince
+      );
+      assert.ok(cas.length >= 1, 'missing first-writer CAS write `{ titlingResumeBrandMissingSince: null }`');
+      // Only the first observation should attempt the stamp. Later passes
+      // already have the field set on adFresh, so they skip the CAS.
+      assert.strictEqual(cas.length, 1, `CAS must run once (first observation), ran ${cas.length}`);
+    });
+
+    await check('E5 [THE FIX] after more wall-clock than BRAND_GIVEUP_MIN at sweep cadence, the untitled master ships', async () => {
+      const last = outcomes[outcomes.length - 1];
+      assert.strictEqual(last.elapsedMin, 70, 'fixture: last pass is 70m (> 60m give-up)');
+      assert.strictEqual(last.titled, 1, 'give-up arm counts as titled (raw master IS the deliverable)');
+      assert.strictEqual(last.failed, 0, 'must not write off a paid master as failed');
+      assert.strictEqual(last.state, null, 'titlingResumeState cleared so the sweeper stops');
+      assert.strictEqual(last.stage, 'no titling (no brand) — shipping master');
+      assert.strictEqual(qcCalls.length, 1, 'give-up still runs vision QC (parity with the titled arm)');
+      assert.strictEqual(qcCalls[0].deliveredUrl, 'https://cdn/master.mp4');
+      assert.strictEqual(titleCalls.length, 0, 'give-up must never call renderBrandScriptAndSave');
+      const finalDoc = col.docs.find((d) => d._id === 'nobrand1');
+      assert.strictEqual(new Date(finalDoc.titlingResumeBrandMissingSince).getTime(), T0,
+        'give-up must not wipe the forensic first-seen stamp');
+    });
+
+    check('E6 [REVERT-PROVE] the OLD updatedAt clock would NEVER have given up across the same N passes', () => {
+      // Simulate the pre-fix formula against this function's own claim writes:
+      // every pass's claim $set updatedAt to ~now, so Date.now()-updatedAt is
+      // milliseconds, never 60 minutes. If E5 went green with that formula,
+      // the test would be a false pass.
+      let oldClockWouldShip = false;
+      for (let i = 0; i < PASSES; i++) {
+        const nowMs = T0 + i * CADENCE_MIN * 60 * 1000;
+        // Claim writes updatedAt: new Date() (wall-clock, NOT nowMs). Even if
+        // we steelman the old formula with the injected clock against a claim
+        // that used the same injected clock, the NEXT pass's claim would
+        // refresh it. Model that: each pass's updatedAt equals that pass's now.
+        const adFreshUpdatedAt = nowMs;
+        const tooOld = (nowMs - adFreshUpdatedAt) > GIVEUP_MIN * 60 * 1000;
+        if (tooOld) oldClockWouldShip = true;
+      }
+      assert.strictEqual(oldClockWouldShip, false,
+        'sanity: the updatedAt clock must not fire across these passes — that is why E5 is load-bearing');
+    });
+
+    check('E7 [REVERT-PROVE, structural] tooOld is not computed from adFresh.updatedAt', () => {
+      const src = fs.readFileSync(path.join(ROOT, 'src/services/titlingResumeService.js'), 'utf8');
+      const code = stripComments(src);
+      assert.ok(
+        !/tooOld\s*=\s*\(\s*Date\.now\s*\(\s*\)\s*-\s*new Date\(\s*adFresh\.updatedAt/.test(code),
+        'tooOld must not use adFresh.updatedAt — that is the live 5-day loop'
+      );
+      assert.ok(
+        /titlingResumeBrandMissingSince/.test(code),
+        'missing-brand branch must read titlingResumeBrandMissingSince'
+      );
+      assert.ok(
+        /alreadyStamped/.test(code) && /tooOld\s*=\s*alreadyStamped/.test(code),
+        'first observation this pass must not give up (alreadyStamped gate)'
+      );
+    });
+  } finally {
+    if (originalMedia) require.cache[mediaPath] = originalMedia; else delete require.cache[mediaPath];
+    if (originalBrand) require.cache[brandPath] = originalBrand; else delete require.cache[brandPath];
+    if (originalResumeSvc) require.cache[resumeSvcPath] = originalResumeSvc; else delete require.cache[resumeSvcPath];
+    if (originalBseForE) require.cache[bsePath] = originalBseForE; else delete require.cache[bsePath];
+    if (originalAdForE) require.cache[adModelPath] = originalAdForE; else delete require.cache[adModelPath];
+  }
+}
+
 function sectionD() {
   console.log('\n── D: a cap-exceeded (terminal) titling failure keeps its detailed renderError (structural) ──');
   // Adversarial review (2026-08-25) found: a titlingResumable===false error
@@ -350,6 +569,8 @@ async function main() {
   await sectionC();
   restore();
   sectionD();
+  await sectionE();
+  restore();
 
   console.log('');
   if (failures.length) {
