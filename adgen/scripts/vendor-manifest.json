@@ -2,14 +2,14 @@
   "version": 2,
   "backendRef": "origin/main",
   "backendHead": "27437447e0596c78cded97f224ef428623b17897",
-  "generatedAt": "2026-09-10T19:32:24.568Z",
+  "generatedAt": "2026-09-10T19:35:02.246Z",
   "files": {
     "models/Ad.js": {
-      "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
+      "backendHash": "27ad9c5345ed09228c9bb003a3c6708d024718d22968e24ad6cf66d45e2ca4c9",
       "adgenHash": "6ea7ceca20f9a77a642b802cca1e6cd5498a2b54b5a7e205426d07c34f800f69",
-      "backendSha": "6cee8eac343fe07493fa83c049d8c468343a0ffd",
+      "backendSha": "27437447e0596c78cded97f224ef428623b17897",
       "status": "unported",
-      "reason": "add titlingResumeBrandMissingSince (Date) — titling-resume brand-giveup clock fix; both Ad copies must declare it (Mongoose-strict), backend never reads/writes it",
+      "reason": "2026-09-10 HASH REFRESH ONLY — the debt is deliberately NOT discharged. Backend #438 (27437447) added titlingResumeBrandMissingSince (Date) to BOTH Ad copies for the titling-resume brand-giveup clock fix; the prior reason text (authored by that change) stands unchanged: both copies must declare it because Mongoose strict would drop the write, and backend never reads or writes it. This re-attestation exists solely because #438 landed without reconciling, leaving trunk red on the 'no backend drift since last look' check (last look 6cee8eac). Re-attested as unported/port-to-backend so owedSince is PRESERVED and no obligation is silently discharged. Reconciled by the Athleta/merge-coordination session, NOT by the change's author: that session archived immediately after merging, so nobody remained to attest it, and leaving trunk red for an absent owner is worse than a conservative hash refresh. Whoever next looks at this entry owns the actual judgment that this re-attestation deliberately declines to make: whether the residual debt is real (keep unported) or whether adgen owning this shape is now settled (--downgrade-to-fork). Do not read this refresh as an endorsement of either.",
       "portTo": "backend",
       "owedSince": "2026-09-10T18:51:23.842Z"
     },

@@ -65,12 +65,18 @@ for `models/Ad.js` (`titlingResumeBrandMissingSince`, added to both trees, last 
 `6cee8eac`). Two independent sessions tripped the same pre-merge blind spot on the same day —
 which is the strongest argument yet that this is a process gap, not carelessness.
 
-**I deliberately did not reconcile theirs.** `models/Ad.js` is `status=unported` with
-`portTo=backend` — an *open debt* whose reason text they authored. A plain `--reconcile` on a
-still-divergent `unported` entry is refused by design, and choosing between re-attesting
-(`--unported --port-to backend`, preserving `owedSince`) and `--downgrade-to-fork` is a
-judgment about their debt, not mine. Same line a peer held when declining to reconcile my
-`Brand.js` entry.
+**I initially declined to reconcile theirs, then did — conservatively.** `models/Ad.js` is
+`status=unported` / `portTo=backend`, an *open debt* whose reason text they authored, and
+choosing between re-attesting and `--downgrade-to-fork` is a judgment about their debt.
+I tried to hand it back and found **their session was already archived** — nobody remained to
+attest it, so "it's their call" protected nothing and only kept trunk red.
+
+Resolved by taking the option that **cannot** launder: re-attested with
+`--reconcile models/Ad.js --unported --port-to backend`, which refreshes the hash while
+**preserving `owedSince`** (verified: `2026-09-10T18:51:23.842Z` before and after; the harness
+itself printed *"carrying owedSince forward from the existing entry"*). Only
+`--downgrade-to-fork` would have discharged anything, and that is the judgment the reason text
+now explicitly defers to whoever looks next. Trunk green, obligation intact.
 
 **Also my own process error, recorded because it nearly cost the fix:** my first merge attempt
 of this PR failed on a manifest conflict (because #438 landed first), and my cleanup command
