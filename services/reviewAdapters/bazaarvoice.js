@@ -65,6 +65,13 @@ const PASSKEY_RES = [
   /apiconfig\s*:\s*\{[^}]*?passkey\s*:\s*["']([A-Za-z0-9]+)["']/i
 ];
 
+// PDP-inline passkey (Next.js-escaped `passkey":"…"`). Gap Inc. ships a
+// 9.6KB bvapi.js loader with no apiconfig; the reviews key is on the PDP
+// instead. Existing hops still win; this is last-resort only.
+const PASSKEY_PDP_RES = [
+  /passkey\\?["']?\s*:\s*\\?["']([A-Za-z0-9]{20,})/i
+];
+
 // The review container is server-rendered even when its contents are not.
 const PRODUCT_ID_RES = [
   /data-bv-show=["']reviews["'][^>]*data-bv-product-id=["']([^"']+)["']/i,
@@ -72,10 +79,53 @@ const PRODUCT_ID_RES = [
   /data-bv-product-id=["']([^"']+)["']/i
 ];
 
+// Next.js-escaped `"productId":"198671"` — Gap's BV ProductId is the
+// style number, not the pid query param. data-bv-product-id still wins.
+const PRODUCT_ID_FALLBACK_RES = [
+  /\\?"productId\\?":\\?"(\d{5,7})/
+];
+
+// Gap Inc. PDPs only: /browse/product.do?pid=<style><3-digit color>.
+// Do NOT take a generic pid= prefix — other BV stores use the full id.
+function gapStyleIdFromPid(pageUrl, html) {
+  const candidates = [];
+  if (pageUrl) candidates.push(String(pageUrl));
+  const canon = html
+    ? firstMatch(html, [
+      /rel=["']canonical["'][^>]*href=["']([^"']+)["']/i,
+      /href=["']([^"']+)["'][^>]*rel=["']canonical["']/i
+    ])
+    : null;
+  if (canon) candidates.push(canon);
+  for (const src of candidates) {
+    let u;
+    try { u = new URL(src, pageUrl || undefined); } catch { continue; }
+    if (!/\/browse\/product\.do$/i.test(u.pathname)) continue;
+    const pid = u.searchParams.get('pid');
+    if (!pid || !/^\d+$/.test(pid)) continue;
+    if (pid.length >= 5 && pid.length <= 7) return pid;
+    // Style + color suffix. Remainder must itself look like a style id
+    // (5–7 digits) so a longer unrelated pid cannot be truncated into
+    // a plausible-looking wrong id.
+    if (pid.length >= 8) {
+      const style = pid.slice(0, -3);
+      if (/^\d{5,7}$/.test(style)) return style;
+    }
+  }
+  return null;
+}
+
 const PRESENCE_RE = /bazaarvoice|data-bv-|bvapi\.js/i;
 
 async function resolvePasskey(client, html) {
-  if (PASSKEY_CACHE.has(client)) return PASSKEY_CACHE.get(client);
+  if (PASSKEY_CACHE.has(client)) {
+    const cached = PASSKEY_CACHE.get(client);
+    // Hop hit: never consult the PDP-inline fallback (existing stores).
+    if (cached) return cached;
+    // Hop miss is cached so we don't re-fetch bv.js per product, but the
+    // next PDP's HTML may still inline the key.
+    return html ? firstMatch(html, PASSKEY_PDP_RES) : null;
+  }
 
   const { fetchText } = require('../httpScrapeClient');
   const opts = { timeoutMs: 10000, maxBytes: 8_000_000 };
@@ -84,32 +134,38 @@ async function resolvePasskey(client, html) {
   // spending a request on bv.js.
   let scoutUrl = firstMatch(html, SCOUT_URL_RES);
 
-  if (!scoutUrl) {
+  if (!scoutUrl && client && client !== '_inline') {
     const loaderUrl = `https://apps.bazaarvoice.com/deployments/${client}` +
                       '/main_site/production/en_US/bv.js';
     const loader = await fetchText(loaderUrl, opts);
-    if (!loader.ok || !loader.text) {
-      PASSKEY_CACHE.set(client, null);   // cache the miss too — don't retry per product
-      return null;
+    if (loader.ok && loader.text) {
+      scoutUrl = firstMatch(loader.text, SCOUT_URL_RES);
     }
-    scoutUrl = firstMatch(loader.text, SCOUT_URL_RES);
-  }
-  if (!scoutUrl) {
-    PASSKEY_CACHE.set(client, null);
-    return null;
   }
 
-  const scout = await fetchText(scoutUrl, opts);
-  const passkey = (scout.ok && scout.text) ? firstMatch(scout.text, PASSKEY_RES) : null;
-  PASSKEY_CACHE.set(client, passkey || null);
-  return passkey || null;
+  let passkey = null;
+  if (scoutUrl) {
+    const scout = await fetchText(scoutUrl, opts);
+    passkey = (scout.ok && scout.text) ? firstMatch(scout.text, PASSKEY_RES) : null;
+  }
+  if (passkey) {
+    PASSKEY_CACHE.set(client, passkey);
+    return passkey;
+  }
+  // Hops missed. Cache the miss so we don't re-walk bv.js, then try the
+  // PDP-inline key (Gap Inc. Next.js). Existing stores without an inline
+  // key still return null.
+  PASSKEY_CACHE.set(client, null);
+  return html ? firstMatch(html, PASSKEY_PDP_RES) : null;
 }
 
-async function discover(html) {
+async function discover(html, pageUrl) {
   try {
     if (!html || typeof html !== 'string' || !PRESENCE_RE.test(html)) return null;
 
-    const productId = firstMatch(html, PRODUCT_ID_RES);
+    const productId = firstMatch(html, PRODUCT_ID_RES)
+      || firstMatch(html, PRODUCT_ID_FALLBACK_RES)
+      || gapStyleIdFromPid(pageUrl, html);
     if (!productId) return null;
 
     const client = firstMatch(html, DEPLOYMENT_RES);

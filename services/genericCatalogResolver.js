@@ -42,7 +42,14 @@ const reviewsEngine = require('./productReviewsScrapeService');
 // Reuse the pure (axios-free) breadcrumb parser so we can capture the
 // PDP's BreadcrumbList from the SAME HTML the scan already fetched —
 // avoids a second full per-product crawl by the post-sync inference pass.
-const { extractBreadcrumb } = require('./breadcrumbParser');
+const { extractBreadcrumb, extractJsonLdFromFlightData } = require('./breadcrumbParser');
+
+// Honest self-identifying crawler UA. Gap Inc. (Next.js + Akamai) serves
+// the fully server-rendered sitemap/PDP to crawlers and a deferred SPA
+// shell to browser UAs. MUST NOT replace UA_POOL globally — Cloudflare-
+// protected Shopify stores challenge generic bot UAs. Used only as a
+// one-shot retry when the first response is unusable.
+const CRAWLER_UA = 'ReachSocialBot/1.0 (+https://reach-social.io)';
 // Zero-dep shared cap — see services/catalogImageLimits.js. Kept here as
 // a local binding so the JSON-LD mapper's slice stays readable; the
 // constant itself is owned (and env-resolved) in that module only.
@@ -365,7 +372,16 @@ function extractJsonLdProducts(html) {
       }
     }
   }
-  return flattenLdNodes(blocks).filter(isProductType);
+  const fromScripts = flattenLdNodes(blocks).filter(isProductType);
+  if (fromScripts.length) return fromScripts;
+  // Next.js flight-data fallback (Gap Inc. etc.). Script-tag Product
+  // still wins; a throw here must not change the empty-script result.
+  try {
+    const flight = extractJsonLdFromFlightData(html);
+    return flattenLdNodes(flight).filter(isProductType);
+  } catch {
+    return [];
+  }
 }
 
 // ── URL / field helpers ────────────────────────────────────────────
@@ -1130,10 +1146,23 @@ function validateProduct(p) {
 
 // ── sitemap fetch helpers ──────────────────────────────────────────
 
-async function fetchXmlText(url, { session = null } = {}) {
+function looksLikeXml(text) {
+  if (!text || typeof text !== 'string') return false;
+  return /<\?xml/i.test(text) || /<urlset/i.test(text) || /<sitemapindex/i.test(text);
+}
+
+function withCrawlerUa(opts = {}) {
+  return {
+    ...opts,
+    headers: { ...(opts.headers || {}), 'User-Agent': CRAWLER_UA }
+  };
+}
+
+async function fetchXmlTextOnce(url, { session = null, headers } = {}) {
   const isGz = /\.gz($|\?)/i.test(url);
+  const headerOpts = headers ? { headers } : {};
   if (isGz) {
-    const res = await http.fetchBuffer(url, { maxBytes: 20_000_000, session });
+    const res = await http.fetchBuffer(url, { maxBytes: 20_000_000, session, ...headerOpts });
     const block = res.block || null;
     if (res.cfChallenged) {
       return { ok: false, cfChallenged: true, rateLimited: false, text: null, block };
@@ -1168,7 +1197,7 @@ async function fetchXmlText(url, { session = null } = {}) {
     }
   }
 
-  const res = await http.fetchText(url, { maxBytes: 8_000_000, session });
+  const res = await http.fetchText(url, { maxBytes: 8_000_000, session, ...headerOpts });
   const block = res.block || null;
   if (res.cfChallenged) {
     return { ok: false, cfChallenged: true, rateLimited: false, text: null, block };
@@ -1187,6 +1216,40 @@ async function fetchXmlText(url, { session = null } = {}) {
     };
   }
   return { ok: true, text: res.text, cfChallenged: false, rateLimited: false, block: null };
+}
+
+async function fetchXmlText(url, { session = null } = {}) {
+  const first = await fetchXmlTextOnce(url, { session });
+  if (!first.ok || !first.text) return first;
+  if (looksLikeXml(first.text)) return first;
+  try {
+    const second = await fetchXmlTextOnce(url, withCrawlerUa({ session }));
+    // Only replace the first body when the crawler UA actually produced XML.
+    if (second && second.ok && second.text && looksLikeXml(second.text)) return second;
+  } catch { /* keep first — fail-closed */ }
+  return first;
+}
+
+async function pdpNeedsCrawlerUaRetry(html, loc) {
+  try {
+    if (extractJsonLdProducts(html).length) return false;
+    const mapped = await mapOgProduct(html, loc, {});
+    if (mapped && validateProduct(mapped).valid) return false;
+  } catch { /* unusable */ }
+  return true;
+}
+
+async function fetchPdpTextWithCrawlerRetry(loc, { session = null } = {}) {
+  const opts = { timeoutMs: 15000, maxBytes: 4_000_000, session };
+  const first = await http.fetchText(loc, opts);
+  if (!first || !first.ok || !first.text) return first;
+  if (first.cfChallenged || first.rateLimited) return first;
+  if (!(await pdpNeedsCrawlerUaRetry(first.text, loc))) return first;
+  try {
+    const second = await http.fetchText(loc, withCrawlerUa(opts));
+    if (second && second.ok && second.text) return second;
+  } catch { /* keep first — fail-closed */ }
+  return first;
 }
 
 async function discoverSitemapUrls(origin, abortCheck = async () => false, { session = null, stats = null } = {}) {
@@ -2473,11 +2536,7 @@ async function resolveGenericCatalog(brand, {
 
     let html = null;
     try {
-      const res = await http.fetchText(loc, {
-        timeoutMs: 15000,
-        maxBytes: 4_000_000,
-        session: activeSession
-      });
+      const res = await fetchPdpTextWithCrawlerRetry(loc, { session: activeSession });
       if (res.block) noteBlock(stats, res.block);
       if (res.cfChallenged) return { cfChallenged: true, block: res.block || null };
       if (res.rateLimited)  return { rateLimited: true, loc };
@@ -2771,6 +2830,11 @@ module.exports = {
   parseRobotsForSitemaps,
   parseSitemapXml,
   extractJsonLdProducts,
+  CRAWLER_UA,
+  looksLikeXml,
+  fetchXmlText,
+  fetchPdpTextWithCrawlerRetry,
+  pdpNeedsCrawlerUaRetry,
   mapJsonLdProduct,
   mapOgProduct,
   validateProduct,
