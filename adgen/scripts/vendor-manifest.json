@@ -1,13 +1,13 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "cd43891f15912412c54a90561c92e9ad35909561",
-  "generatedAt": "2026-09-10T19:46:27.098Z",
+  "backendHead": "24405a03f890cd602d6bd0420fc5935ed12faea1",
+  "generatedAt": "2026-09-10T20:09:52.660Z",
   "files": {
     "models/Ad.js": {
-      "backendHash": "27ad9c5345ed09228c9bb003a3c6708d024718d22968e24ad6cf66d45e2ca4c9",
+      "backendHash": "985917248f3a750387aede4184b0bad540c13215b6f4decf4d15d7476b63016f",
       "adgenHash": "969efb14f959c3653a8c0948fb7622581399e219ba0111d3549ad3038841d529",
-      "backendSha": "27437447e0596c78cded97f224ef428623b17897",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
       "status": "fork",
       "reason": "SUPERSEDES the cd43891f re-attestation (unported/portTo:backend, owedSince 2026-09-10T18:51:23.842Z), which was itself a deliberate conservative hash-refresh that explicitly declined to make this judgment ('whoever next looks at this entry owns the actual judgment... do not read this refresh as an endorsement of either'). That judgment: look at 6cee8eac..27437447 shows the only backend change is #438's titlingResumeBrandMissingSince (Date), which adgen ALREADY declares (both trees, confirmed by enumerating real Mongoose schema.paths top-level keys rather than grepping — adgen declares ZERO paths this backend tree lacks, the adgen-subset-of-backend rule holds exactly). So #438's original unported/portTo:backend debt was a pre-merge artifact of comparing adgen against a backend origin/main that did not yet carry #438's own backend half; its premise expired the moment #438 merged. Independently re-verified against current main (cd43891f) before writing this supersession, not merely carried over from an earlier run. This PR (#436) separately adds clampTelemetry (Mixed) to BOTH copies in the same commit so Mongoose strict cannot drop fit-before-write backstop events -- a simultaneous both-trees addition, never an adgen-only field. Remaining divergence is adgen-owned render/titling content (videoQcRetry etc.), deliberately held. Nothing owed either way. Re-open as unported if adgen ever declares an Ad path backend does not."
     },
@@ -92,9 +92,9 @@
       "owedSince": null
     },
     "models/CatalogProduct.js": {
-      "backendHash": "12dec5e217a1c3eb9ada3eaddced75606de8677cab36d15c789b83bad5d46ee3",
+      "backendHash": "16be53564d68e2b4b6877f99bf7ac7ad39a1e1162d3a491d309ff7232571dba0",
       "adgenHash": "1da3dd293cdb7396b706ded5d0be1bc6a7359f8fd02a5dc3fdb4979a47fd570a",
-      "backendSha": "b7812f4f243842990e3f60bf6ed605f09d03a66a",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
       "status": "fork",
       "reason": "Backend-only ingest fork, re-looked 2026-09-10 after main b7812f4f touched this path. Backend owns the ingest writers (pdpMaterialFacts/pdpSpecFacts/pdpFaqAnswers/marketingLine* + contentIndex + colourway). Adgen DECLARES the read side so Mongoose .select() on the render path returns the T2 evidence tier for the advertiser claim ceiling, and never writes them. lifestyle_image/lifestyleImageAt declared in both trees 2026-09-09 (the write was being silently dropped)."
     },
@@ -113,6 +113,12 @@
       "status": "synced",
       "portTo": null,
       "owedSince": null
+    },
+    "models/ContentAtom.js": {
+      "backendHash": "eec29878dc755796dae12bbe7e82dfa7369dd28389b05337310cc73f7d1aa091",
+      "adgenHash": "eec29878dc755796dae12bbe7e82dfa7369dd28389b05337310cc73f7d1aa091",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
+      "status": "synced"
     },
     "models/CopyCandidatesArtifact.js": {
       "backendHash": "b62dc89fe9ba6ba12d17aef5e6d5b3150fba52b81c19cd6e8041cf98f79063eb",
@@ -171,11 +177,10 @@
       "owedSince": null
     },
     "models/IntegrationCredential.js": {
-      "backendHash": "663ead488c65bee52c544f4264346474b6ce95fd21bb32e4d6d57196affc214e",
+      "backendHash": "9b0197ccdd8d856cfe3fbd6d5335466f980fc9d6218c914d88e69888088e1f96",
       "adgenHash": "9b0197ccdd8d856cfe3fbd6d5335466f980fc9d6218c914d88e69888088e1f96",
-      "backendSha": "5f4f49e19d1ae68b397b4dea367dbb0ddc8b66d0",
-      "status": "fork",
-      "reason": "Kept byte-identical with backend. The backend twin changes in THIS SAME PR (lastCampaignSyncError/ErrorAt/ErrorClass/AlertedAt breadcrumb for the Google Ads v25 fix — declared in BOTH trees because Mongoose strict drops undeclared paths in silence). Shows as drift only because origin/main has not yet received the backend half."
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
+      "status": "synced"
     },
     "models/Job.js": {
       "backendHash": "4e687b33d74a88f50882955786921d1e8027a6a4a2b1a4cb34cf9d0f4497fab4",
@@ -302,9 +307,9 @@
       "owedSince": "2026-08-31T23:19:54.474Z"
     },
     "remotion/compositions/Canonical.jsx": {
-      "backendHash": "557e4564e5878a6298dd13a02e21660dc1d88608c8498325bbe019e855314ef2",
+      "backendHash": "9f4b62cff4ea2e2017e3f1c27fdb24fd38e00316f637cd4342e27db4f0277daf",
       "adgenHash": "c01c62325f6eb9e2fc45cb29a3480fac25f355fdbb5b1b296479fe435dd7aa33",
-      "backendSha": "47be257c468e85c3f1d1c562abd087ea8625e98c",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
       "status": "unported",
       "reason": "Re-looked 2026-09-10 during the main merge. Lane B clamp telemetry (console.warn on clip + stackFit shrink/drop) is applied to BOTH copies. Remaining debt UNCHANGED and deliberately NOT discharged: containerStrokeBleedGuard is still absent from backend. owedSince preserved.",
       "portTo": "backend",
@@ -353,9 +358,9 @@
       "owedSince": null
     },
     "remotion/lib/slotContent.js": {
-      "backendHash": "8cb75a6656409058080570adc64a1fbeb640fc944c6db7fdd03a04c3d9d175a1",
+      "backendHash": "9e0fbb13779c95260a38655a3b9c1bdb8f2d9b3056d1e5b1776ae67ef70ad317",
       "adgenHash": "c0d3cade141dbb07c480132c44cc005cc363257ea9df7f98d9ef728021530eab",
-      "backendSha": "d3a8fe74ae1f6e704efb326c33c76a946e703b88",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
       "status": "fork",
       "reason": "Lane B: both copies emit ctx.onClamp when truncateWordSafe/fitProductNameToCap actually shorten. Backend also gained adgen's brand-tagline fitter gate (entry===productName). Remaining fork: adgen is the live renderer; backend remotion is preview/debug."
     },
@@ -665,10 +670,16 @@
       "portTo": "backend",
       "owedSince": "2026-09-05T00:18:02.460Z"
     },
+    "services/advertiserClaimCorpus.js": {
+      "backendHash": "eac4c4ee794279cec33fdee49d3c68b69c6803412b23698e7696e8efa83b15d9",
+      "adgenHash": "eac4c4ee794279cec33fdee49d3c68b69c6803412b23698e7696e8efa83b15d9",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
+      "status": "synced"
+    },
     "services/aiCreativeDirectorService.js": {
-      "backendHash": "1690dafafcb828b14c7e3bf457c069f92a5746326705d78116cf188a2a81643b",
+      "backendHash": "eb825367916a5ac032c942194dd5773affeb00355ea8d1519d4223fbd94d7d01",
       "adgenHash": "70fd5c70d112381a7691f652746c72d6df174ed823f130e94fe39ab5664fd342",
-      "backendSha": "d994c2433fe047f91d68d5ca48afe3bd411f1307",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
       "status": "fork",
       "reason": "Held fork (backend owns mint-side Director logic adgen does not run) — already divergent before this session. This PR adds the claim-ceiling check in validateDirectorPayload plus the T2 evidence read; backend has the same addition in this PR."
     },
@@ -777,9 +788,9 @@
       "reason": "QC-fail 720p retry: resumeUnsettledQcRetries is peek-and-alert only (no steal/complete) plus qcRetryGenericSweepExclusion so a mid-retry master is invisible to the generic recovery sweep. Backend has no Gemini-provider recovery branch. Remaining fork unchanged."
     },
     "services/brandScriptExecutor.js": {
-      "backendHash": "ec53050310b215d9390567cb27a15173fc84a53354fcd814e9ee744aabddaade",
+      "backendHash": "2f8313007ed30f98335e43cae45f328e5345bebf5a5e33eb21d3d99ebe46e698",
       "adgenHash": "0ab753246a47ced7e4c8f1ee9b8cadbd08f3e796be98fc37e5e139b1dec7be53",
-      "backendSha": "315404ccf0ebaf8a4da28109fd62e2f984b0b7e8",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
       "status": "unported",
       "reason": "Re-looked 2026-09-10 during the main merge. Both copies consume copyBudgets for quote fit-before-write + clamp alarms, and this PR extends the existing claim-substantiation call site in buildMetaForAd to cover headline and benefits (benefits printed raw shortBenefits verbatim three lines below an existing gate). Prior unported debt CARRIES FORWARD, not discharged: titlingOnlyGate / stampTitlingFailureAndThrow / TITLING_ATTEMPTS_MAX / CONTENT_ATOM_READ. owedSince preserved.",
       "portTo": "backend",
@@ -850,11 +861,10 @@
       "owedSince": null
     },
     "services/claimSubstantiationService.js": {
-      "backendHash": "95f94af72f3e32a9a6a3d278204ce5d523e1e8c56e2b884baa7707c2b986e987",
+      "backendHash": "e18683eaaceae1345906e2dc03b95c615297f638a72f5236c5409e8c9db68f9a",
       "adgenHash": "e18683eaaceae1345906e2dc03b95c615297f638a72f5236c5409e8c9db68f9a",
-      "backendSha": "1f1f77931b73f9fc11f218d16a7ac63e50fb5280",
-      "status": "fork",
-      "reason": "Kept byte-identical with backend ON PURPOSE. Its backend twin changes in THIS SAME PR (performance_attribute category: parse the asserted UPF/SPF/waterproof value and require matching pdpMaterialFacts, following review_volume's shape rather than the barred list; badge-path unclassified pass-through preserved). The recorded backend sha predates that commit, so this shows as drift until the PR lands, at which point the twins re-sync."
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
+      "status": "synced"
     },
     "services/cloudinaryService.js": {
       "backendHash": "beae067289d9324a3fee11ad86b7243c30181a6ae1d332fb023d28cf0b11f7f4",
@@ -876,6 +886,18 @@
       "backendSha": "0966924ad0ab7875dc5ca0ff3c9785826435e9bf",
       "status": "fork",
       "reason": "Since the last recorded look (which only knew about CATALOG_YOLO_CONCURRENCY), three more backend commits landed: a doc-only comment rewrite of that key; the addition of CATALOG_YOLO_NIGHT_CONCURRENCY; then a rename/hardening to CATALOG_YOLO_NIGHT_MULTIPLIER (derived base * multiplier instead of an absolute value, fixing an 'operator lowers base, boost silently overrides it back up' bug, tighter clamp [1,4], a resolveKnob float-exception). All backend-only, catalog-ingest-specific, zero adgen analog (confirmed via grep). Separately, commit 0966924a DELETED RENDER_CONCURRENCY and VEO_CONCURRENCY entirely from backend's SPEC (their only consumer -- the dormant in-process render fallback -- was deleted). Adgen's copy still declares and actively uses BOTH as its own live, non-dormant render/video pool knobs (confirmed present and referenced in adgen's file, and documented in this repo's CLAUDE.md as live adgen-tuned knobs). Current full key-level diff: backend-only = CATALOG_YOLO_CONCURRENCY + CATALOG_YOLO_NIGHT_MULTIPLIER (2 keys, catalog-ingest concurrency tuning); adgen-only = RENDER_CONCURRENCY + VEO_CONCURRENCY (backend-absent now that backend deleted its dormant render fallback) + VEO_TITLING_CONCURRENCY (untouched, as before) -- 3 keys total. Deliberate fork, not a debt: adgen's knobs are its own live tuning, not something it forgot to remove; backend's ingest knobs are backend-only ingest concerns adgen will never read."
+    },
+    "services/contentInventory.js": {
+      "backendHash": "8cbfabf78e42456ad6bb395dcd5445d15e33d62974a7df7089ed05cb031fb42e",
+      "adgenHash": "8cbfabf78e42456ad6bb395dcd5445d15e33d62974a7df7089ed05cb031fb42e",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
+      "status": "synced"
+    },
+    "services/copyBudgets.js": {
+      "backendHash": "b072d3105e1b02af18c951e2ecf1e1857ee016c37571aa810bb435f476ff9440",
+      "adgenHash": "b072d3105e1b02af18c951e2ecf1e1857ee016c37571aa810bb435f476ff9440",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
+      "status": "synced"
     },
     "services/copyDerivationService.js": {
       "backendHash": "1636ad6105c90e3439ff8afa4948ebdbbcc90bfe3854848ef3479ebf9b9f20b3",
@@ -970,9 +992,9 @@
       "owedSince": null
     },
     "services/layoutInputService.js": {
-      "backendHash": "06c2670a907b52ef2b01885b0b5e225c238b2f9f1791e761ff634d3e84a7e805",
+      "backendHash": "7a7ce2191c67c83df8c41f899f020e1849527a457d228198304a46cb459a9454",
       "adgenHash": "eb711d0e5f810fbc539a1d6753bb71b3a928f76ebc8d0f4689230640dd4c1dae",
-      "backendSha": "d994c2433fe047f91d68d5ca48afe3bd411f1307",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
       "status": "fork",
       "reason": "Held fork. This PR closes the confirmed escape where this file's own Gemini-derived copy.headline/subheadline had ZERO claim check while its derivation prompt banned sales-rank claims for the badges field only. Backend twin changed identically in this PR."
     },
@@ -1010,18 +1032,16 @@
       "owedSince": null
     },
     "services/metaCascadeConfig.js": {
-      "backendHash": "5605fea3914ab15d6b5783cd8d1db29b51d9ab870de098133a5d5bf5a228b9e5",
+      "backendHash": "6bebd30e1095e702e16f2757c36aa05e3fe83fc3a500cc8684b9533a8b31d257",
       "adgenHash": "6bebd30e1095e702e16f2757c36aa05e3fe83fc3a500cc8684b9533a8b31d257",
-      "backendSha": "fba815887c3240d617c9c3a1bbfd6daecd791215",
-      "status": "fork",
-      "reason": "Phase 0b CONTENT_ATOM_READ dual-read: flag-gated atoms source prepended onto the benefits cascade via a getter (flag-off returns the pre-change array with no atoms entry). Working-tree backend and adgen copies are byte-identical; origin/main does not have this yet so the entry is fork until this backend file lands on trunk."
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
+      "status": "synced"
     },
     "services/metaCascadeResolver.js": {
-      "backendHash": "5eb1c61fd3c9d19b79c832f93a31153b4597f7fedc0d4a06c800a7186573063c",
+      "backendHash": "1434ea5a89feb95171c9a54d586fe9fef61cafe4bc4952ab595d74179ccfd672",
       "adgenHash": "1434ea5a89feb95171c9a54d586fe9fef61cafe4bc4952ab595d74179ccfd672",
-      "backendSha": "21da82d711a808e4067e548ea24f70415bffb4d6",
-      "status": "fork",
-      "reason": "Phase 0b CONTENT_ATOM_READ dual-read: extractSource handles type:'atoms' (benefit texts from context.contentAtoms); buildContext accepts contentAtoms. Working-tree backend and adgen copies are byte-identical; origin/main does not have this yet so the entry is fork until this backend file lands on trunk."
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
+      "status": "synced"
     },
     "services/moderationSeedFallback.js": {
       "backendHash": "a84aaa641292abeaa3a553c85f0aaa0f856a0ccd7d279d6999432d5a31a8005e",
@@ -1263,9 +1283,9 @@
       "owedSince": null
     },
     "services/staticAdIntents.js": {
-      "backendHash": "e0b11a523e6ac53f24635d39e6c53934d5e55fe8a18e2087eef106b22482caa3",
+      "backendHash": "c7f8e9f4e6966cab3d624c1c3ac73c997c38dcb8e92e9c84c7459f548bbe6b43",
       "adgenHash": "14f717bd983a1bc536d365663d80a18318981f6e6405f4e1ae4e824932f4cc5c",
-      "backendSha": "b7812f4f243842990e3f60bf6ed605f09d03a66a",
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
       "status": "fork",
       "reason": "Held fork. This PR wires copyBudgets so per-surface caps are INPUTS to selection rather than paint-time scissors. Backend twin changed identically in this PR."
     },
@@ -1365,11 +1385,10 @@
       "owedSince": "2026-08-28T19:53:10.614Z"
     },
     "services/videoHeadlineService.js": {
-      "backendHash": "568b6409d5c81f8290aea4f9566294ab3b65e55fa5e1f5df2fad903b704eaa46",
+      "backendHash": "577b1d1b85db8490d807367447c0abafcc1634344fa8cc5eeb4e629d7a478654",
       "adgenHash": "577b1d1b85db8490d807367447c0abafcc1634344fa8cc5eeb4e629d7a478654",
-      "backendSha": "11c58bd01b8c34d8f8de1a1e365bec1d37aabccc",
-      "status": "fork",
-      "reason": "Lane B: budgetForFormat consults copyBudgets.videoBudgets when platformFormat is set; format-only callers stay on the historical 32/46 table. Worktree twins are cmp-identical; origin/main does not yet have this change."
+      "backendSha": "24405a03f890cd602d6bd0420fc5935ed12faea1",
+      "status": "synced"
     },
     "services/videoProductAnchor.js": {
       "backendHash": "a4624bd2eb4fa3641e356a5e9276faf27e2987889c186080b6332e5926308e3e",
