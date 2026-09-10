@@ -544,12 +544,21 @@ async function buildAdStatsByProduct(brandObjectId) {
   return byProduct;
 }
 
-// GET /api/catalog/categories?brandId=X
-// → [{ categoryId, name, breadcrumb, depth, productCount }]
+// GET /api/catalog/categories?brandId=X[&parentId=<id|root>][&includeEmpty=true]
+// → [{ categoryId, name, breadcrumb, depth, productCount, hasChildren }]
 //
-// Returns every Category row for the brand with a denormalized product
-// count. Powers the Product Ads page category filter. Includes categories
-// with 0 products so newly-created ones don't disappear from the dropdown.
+// Cascading category picker source. One level per request:
+//   parentId omitted or 'root' → top-level (depth 0) rows
+//   parentId=<Category _id>    → direct children of that node
+//
+// productCount is TRANSITIVE (sum over the whole subtree rooted at the
+// row), because products only ever attach to LEAF categories via
+// CatalogProduct.categoryRef — a naive per-node count would show 0 on
+// every non-leaf and the whole picker collapses.
+//
+// Default filters out productCount:0 rows across every level so the
+// dropdown only surfaces categories the operator can actually reach
+// products through. Opt back in with ?includeEmpty=true (admin/debug).
 router.get('/categories', async (req, res) => {
   try {
     const brandId = req.query.brandId || req.headers['x-brand-id'];
@@ -559,52 +568,90 @@ router.get('/categories', async (req, res) => {
       : null;
     if (!brandObjectId) return res.status(400).json({ error: 'brandId is not a valid ObjectId' });
 
-    const Category = require('../models/Category');
-    // Soft-delete guard — hide tombstoned categories from picker
-    // surfaces. Direct-id fetches at :442 and product-detail hydration
-    // at :910 stay unguarded so historical rows can still resolve.
-    const categories = await Category.find(tenantFilter(req, { brandId: brandObjectId, deletedAt: null }))
-      .select('_id name breadcrumb depth url')
-      .sort({ breadcrumb: 1 })
+    const includeEmpty = req.query.includeEmpty === 'true';
+    const parentRaw    = req.query.parentId;
+
+    // Soft-delete guard — hide tombstoned categories from picker surfaces.
+    const allCategories = await Category.find(tenantFilter(req, { brandId: brandObjectId, deletedAt: null }))
+      .select('_id name breadcrumb depth url parentId')
       .lean();
 
-    // Product count per category (single aggregation; cheap).
+    // Per-leaf product counts (single aggregation; cheap).
     //
     // Mongoose .find() auto-casts string advertiserId → ObjectId based
     // on the schema; aggregate() does NOT. tenantFilter writes
     // req.advertiserId as a String, so passing its result straight into
     // $match compares '<string>' to ObjectId docs and matches nothing —
     // every category then shows productCount:0. Same class of bug
-    // CLAUDE.md §4 flags. Cast explicitly here — this route still needs
-    // it because it calls CatalogProduct.aggregate() directly; the main
-    // GET / list handler no longer does (2026-08-19 scale fix moved it
-    // to find(), which auto-casts, for everything except this
-    // siblings/variantCount side-query, which casts brandId the same
-    // way for the same reason).
+    // CLAUDE.md §4 flags. Cast explicitly here.
     const aggAdvertiserId = mongoose.isValidObjectId(req.advertiserId)
       ? new mongoose.Types.ObjectId(String(req.advertiserId))
       : req.advertiserId;
-    const counts = await CatalogProduct.aggregate([
+    const leafCounts = await CatalogProduct.aggregate([
       { $match: {
           advertiserId: aggAdvertiserId,
           brandId:      brandObjectId,
           categoryRef:  { $ne: null },
-          // Soft-delete guard — tombstoned products don't contribute
-          // to the "N products" label per category in the picker.
+          draft:        { $ne: true },
           deletedAt:    null
       } },
       { $group: { _id: '$categoryRef', count: { $sum: 1 } } }
     ]);
-    const countMap = new Map(counts.map(c => [String(c._id), c.count]));
+    const leafCountMap = new Map(leafCounts.map(c => [String(c._id), c.count]));
 
-    const rows = categories.map(c => ({
-      categoryId:   String(c._id),
-      name:         c.name,
-      breadcrumb:   c.breadcrumb,
-      depth:        c.depth,
-      url:          c.url || null,
-      productCount: countMap.get(String(c._id)) || 0
-    }));
+    // Bubble leaf counts up the parent chain to get subtree totals per node.
+    const byId       = new Map(allCategories.map(c => [String(c._id), c]));
+    const childrenOf = new Map();
+    for (const c of allCategories) {
+      const pid = c.parentId ? String(c.parentId) : 'root';
+      if (!childrenOf.has(pid)) childrenOf.set(pid, []);
+      childrenOf.get(pid).push(c);
+    }
+    const subtreeCount = new Map();
+    function computeCount(nodeId) {
+      const cached = subtreeCount.get(nodeId);
+      if (cached !== undefined) return cached;
+      const kids = childrenOf.get(nodeId) || [];
+      let total = leafCountMap.get(nodeId) || 0;
+      for (const k of kids) total += computeCount(String(k._id));
+      subtreeCount.set(nodeId, total);
+      return total;
+    }
+    for (const c of allCategories) computeCount(String(c._id));
+
+    // Pick the level requested by parentId.
+    let levelKey;
+    if (!parentRaw || parentRaw === 'root') {
+      levelKey = 'root';
+    } else if (mongoose.isValidObjectId(parentRaw)) {
+      // Reject a parentId that belongs to another brand — the tenant-
+      // scoped find() above already excluded it, so byId.has is a
+      // sufficient authorization check.
+      if (!byId.has(String(parentRaw))) return res.json([]);
+      levelKey = String(parentRaw);
+    } else {
+      return res.status(400).json({ error: 'parentId is not a valid ObjectId' });
+    }
+
+    const levelRows = (childrenOf.get(levelKey) || []).slice().sort(
+      (a, b) => a.name.localeCompare(b.name)
+    );
+
+    const rows = levelRows
+      .map(c => {
+        const id    = String(c._id);
+        const count = subtreeCount.get(id) || 0;
+        return {
+          categoryId:   id,
+          name:         c.name,
+          breadcrumb:   c.breadcrumb,
+          depth:        c.depth,
+          url:          c.url || null,
+          productCount: count,
+          hasChildren:  (childrenOf.get(id) || []).length > 0
+        };
+      })
+      .filter(r => includeEmpty || r.productCount > 0);
 
     res.json(rows);
   } catch (err) {
@@ -791,10 +838,30 @@ router.get('/ads-summary', async (req, res) => {
     filter.deletedAt = null;
 
     // Optional category filter (?categoryId=X). Powers the Product Ads
-    // page Category dropdown. Empty string or 'all' = no filter.
+    // page cascading Category dropdowns. Empty string or 'all' = no
+    // filter. Products only ever attach to LEAF categories via
+    // categoryRef, so a non-leaf pick has to fan out to every descendant
+    // leaf or it silently returns zero rows.
     const categoryId = req.query.categoryId;
     if (categoryId && categoryId !== 'all' && mongoose.isValidObjectId(categoryId)) {
-      filter.categoryRef = new mongoose.Types.ObjectId(String(categoryId));
+      const rootObjectId = new mongoose.Types.ObjectId(String(categoryId));
+      const subtree = await Category.find(
+        tenantFilter(req, { brandId: brandObjectId, deletedAt: null })
+      ).select('_id parentId').lean();
+      const kidsOf = new Map();
+      for (const c of subtree) {
+        const pid = c.parentId ? String(c.parentId) : 'root';
+        if (!kidsOf.has(pid)) kidsOf.set(pid, []);
+        kidsOf.get(pid).push(String(c._id));
+      }
+      const ids = [];
+      const stack = [String(rootObjectId)];
+      while (stack.length) {
+        const id = stack.pop();
+        ids.push(new mongoose.Types.ObjectId(id));
+        for (const k of (kidsOf.get(id) || [])) stack.push(k);
+      }
+      filter.categoryRef = ids.length === 1 ? ids[0] : { $in: ids };
     }
 
     // Pull products + ad aggregation + per-product campaign chips in
