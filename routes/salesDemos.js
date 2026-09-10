@@ -3,6 +3,7 @@
 // scoped to that advertiser (via req.advertiserId, set by requireAuth
 // + the advertiser picker). Non-sales users get 403.
 
+const { resolveCatalogSyncMode } = require('../services/scheduledSyncService');
 const express = require('express');
 const router  = express.Router();
 
@@ -20,6 +21,7 @@ const {
   normalizeIgHandle,
   normalizeShopifyUrl,
   normalizeMethod,
+  normalizeSeedProductUrls,
   isAllowedBootstrapper
 } = require('../services/salesDemosService');
 const { syncBrandApify } = require('../services/apifyIngestService');
@@ -252,20 +254,52 @@ router.post('/brands', async (req, res) => {
 
 // PATCH /api/sales-demos/brands/:id — update Apify config on an
 // existing demo brand.
-// Body: { igHandle?, shopifyUrl?, method? }
-// method: 'shopify-direct' | 'apify' (invalid values ignored)
+// Body: { igHandle?, shopifyUrl?, method?, seedProductUrls?, catalogSyncMode? }
+// method: 'shopify-direct' | 'apify' | 'generic-sitemap' (invalid values ignored)
+// seedProductUrls: array of absolute PDP URLs; explicit [] clears the list.
+// catalogSyncMode: 'demo' (catalog frozen after ingest — the nightly resync
+//   skips this brand; manual sync is the only refresh) | 'production' (daily
+//   updates). Explicit null clears back to the isDemo-derived default.
 router.patch('/brands/:id', async (req, res) => {
   try {
     const brand = await Brand.findOne({ _id: req.params.id, advertiserId: req.salesDemosAdvertiserId, isDemo: true });
     if (!brand) return res.status(404).json({ error: 'demo brand not found' });
 
-    const { igHandle, shopifyUrl, method } = req.body || {};
+    if (!brand.apifyDemo) brand.apifyDemo = {};
+    const { igHandle, shopifyUrl, method, seedProductUrls, catalogSyncMode } = req.body || {};
     if (igHandle !== undefined)   brand.apifyDemo.igHandle   = normalizeIgHandle(igHandle);
     if (shopifyUrl !== undefined) brand.apifyDemo.shopifyUrl = normalizeShopifyUrl(shopifyUrl);
     const normalizedMethod = normalizeMethod(method);
     if (normalizedMethod) brand.apifyDemo.method = normalizedMethod;
+    // Explicit null is meaningful — it clears back to the isDemo-derived
+    // default — so distinguish "absent" from "null" rather than truthiness.
+    if (catalogSyncMode !== undefined) {
+      if (catalogSyncMode !== null && catalogSyncMode !== 'demo' && catalogSyncMode !== 'production') {
+        return res.status(400).json({ error: "catalogSyncMode must be 'demo', 'production', or null" });
+      }
+      brand.catalogSyncMode = catalogSyncMode;
+    }
+    let seedResult = null;
+    if (seedProductUrls !== undefined) {
+      if (!Array.isArray(seedProductUrls)) {
+        return res.status(400).json({ error: 'seedProductUrls must be an array of strings' });
+      }
+      // Same-request shopifyUrl already assigned above so a combined
+      // PATCH cannot same-origin-check against the stale origin.
+      const origin = brand.apifyDemo.shopifyUrl || brand.websiteUrl;
+      seedResult = normalizeSeedProductUrls(seedProductUrls, origin);
+      brand.apifyDemo.seedProductUrls = seedResult.urls;
+    }
     await brand.save();
-    res.json({ brand });
+    if (seedResult) {
+      return res.json({
+        brand,
+        seedProductUrls: seedResult.urls,
+        rejected: seedResult.rejected,
+        catalogSyncMode: resolveCatalogSyncMode(brand)
+      });
+    }
+    res.json({ brand, catalogSyncMode: resolveCatalogSyncMode(brand) });
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message || 'update demo brand failed' });
   }

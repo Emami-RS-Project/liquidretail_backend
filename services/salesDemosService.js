@@ -60,6 +60,15 @@ function normalizeMethod(raw) {
 // Normalize a Shopify store URL to a canonical form. Accepts bare
 // hostnames ("brand.myshopify.com") or full URLs. Returns null when
 // the input isn't URL-shaped enough to be useful.
+// Sanitize an operator-curated seed-PDP list. Explicit [] is "clear the
+// list". Delegates to sanitizeSeedProductUrls (same-origin + SSRF denylist)
+// so PATCH and ingest cannot drift. Lazy-require to keep this module's
+// load graph free of the generic-catalog resolver.
+function normalizeSeedProductUrls(raw, originUrl) {
+  const { sanitizeSeedProductUrls } = require('./genericCatalogResolver');
+  return sanitizeSeedProductUrls(raw, originUrl);
+}
+
 function normalizeShopifyUrl(raw) {
   if (!raw) return null;
   let s = String(raw).trim();
@@ -151,6 +160,7 @@ module.exports = {
   normalizeIgHandle,
   normalizeShopifyUrl,
   normalizeMethod,
+  normalizeSeedProductUrls,
   createDemoBrand,
   isAllowedBootstrapper
 };

@@ -25,6 +25,7 @@ const CatalogProduct = require('../models/CatalogProduct');
 const Category = require('../models/Category');
 const {
   resolveGenericCatalog,
+  sanitizeSeedProductUrls,
   DEFAULT_CAP
 } = require('./genericCatalogResolver');
 // Shared per-product alt-image cap (hero is separate). Zero-dep module
@@ -54,7 +55,7 @@ const LOG = '🗺';
 const UPSERT_BUDGET_MS = parseInt(process.env.GENERIC_CATALOG_UPSERT_BUDGET_MS, 10);
 
 /**
- * syncBrandGenericCatalog(brand, run, { isBrandAborted, categories, uncapped })
+ * syncBrandGenericCatalog(brand, run, { isBrandAborted, categories, uncapped, seedProductUrls })
  *
  * brand  – hydrated Brand doc (_id, advertiserId, name, catalog URL fields)
  * run    – progressService run handle (stage/tick/checkpoint)
@@ -68,7 +69,18 @@ const UPSERT_BUDGET_MS = parseInt(process.env.GENERIC_CATALOG_UPSERT_BUDGET_MS, 
  *   categoryOptions?, categoryPromptSuggested?
  * }
  */
-async function syncBrandGenericCatalog(brand, run, { isBrandAborted, categories, uncapped } = {}) {
+/**
+ * opts.seedProductUrls (explicit per-run override) ?? brand.apifyDemo.seedProductUrls.
+ * `??` so an omitted option still reads the persisted list, while an
+ * explicit [] means "sitemap this run" without clearing the brand.
+ */
+function resolveSeedProductUrlsOption(opts, brand) {
+  const fromOpts = opts && opts.seedProductUrls;
+  const fromBrand = brand && brand.apifyDemo && brand.apifyDemo.seedProductUrls;
+  return fromOpts ?? fromBrand;
+}
+
+async function syncBrandGenericCatalog(brand, run, { isBrandAborted, categories, uncapped, seedProductUrls } = {}) {
   const t0 = Date.now();
   const errors = [];
   let productsUpserted = 0;
@@ -102,6 +114,25 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted, categories,
 
   const boundAbort = async () => abortCheck(brand._id, run);
 
+  // WHY PERSISTED, NOT PER-RUN: scheduledSyncService.dispatchCatalogResync
+  // calls syncBrandApify(brand._id, { skipInstagram: true, uncapped: true })
+  // for demo brands — the nightly resync is PERSIST-UNCAPPED, so it ignores
+  // CATALOG_INGEST_LIMIT. If the seed list were per-run only, the nightly
+  // job would re-walk the whole sitemap and blow a curated 30-product demo
+  // out to the retailer's entire catalog. Persisting it on the brand keeps
+  // the nightly resync scoped to the same curated set.
+  //
+  // Sanitizer FIRST — never trust what is already persisted. An all-rejected
+  // list is passed through as [] so the resolver falls back to sitemap
+  // discovery rather than crawling nothing.
+  const rawSeeds = resolveSeedProductUrlsOption({ seedProductUrls }, brand);
+  const sanitizedSeeds = sanitizeSeedProductUrls(rawSeeds, origin);
+  if (sanitizedSeeds.rejected.length) {
+    console.warn(
+      `   ⚠️  ${LOG}  seed URL sanitizer dropped ${sanitizedSeeds.rejected.length} URL(s)`
+    );
+  }
+
   let access;
   try {
     access = await resolveGenericCatalog(brand, {
@@ -110,7 +141,8 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted, categories,
       cap: CAP,
       // Operator-selected category keys (from a prior discoverOnly preview).
       // Resolver no-ops the filter when the feature flag is off.
-      categories: Array.isArray(categories) ? categories : undefined
+      categories: Array.isArray(categories) ? categories : undefined,
+      seedProductUrls: sanitizedSeeds.urls
     });
   } catch (err) {
     errors.push(`generic catalog resolver: ${err.message}`);
@@ -158,7 +190,9 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted, categories,
     ` platform=${stats.platform ?? '—'} conf=${stats.confidence ?? '—'}` +
     ` scanned=${stats.urlsScanned ?? '?'} jsonLd=${stats.jsonLdProductsFound ?? '?'}` +
     ` og=${stats.ogFallbackUsed ?? '?'} invalid=${stats.validationFailures ?? '?'}` +
-    ` cf=${stats.cfChallenges ?? '?'})` +
+    ` cf=${stats.cfChallenges ?? '?'}` +
+    (stats.seeded ? ` seeded=${stats.seeded}` : '') +
+    `)` +
     (access.reason ? ` reason=${access.reason}` : '')
   );
 
@@ -647,5 +681,6 @@ async function syncBrandGenericCatalog(brand, run, { isBrandAborted, categories,
 }
 
 module.exports = {
-  syncBrandGenericCatalog
+  syncBrandGenericCatalog,
+  resolveSeedProductUrlsOption
 };
