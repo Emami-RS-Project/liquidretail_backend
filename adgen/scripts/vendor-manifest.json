@@ -1,15 +1,15 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "301b458e6f25f27336546bf68cf442a733ddbb9c",
-  "generatedAt": "2026-09-10T18:51:23.843Z",
+  "backendHead": "27437447e0596c78cded97f224ef428623b17897",
+  "generatedAt": "2026-09-10T19:35:02.246Z",
   "files": {
     "models/Ad.js": {
-      "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
+      "backendHash": "27ad9c5345ed09228c9bb003a3c6708d024718d22968e24ad6cf66d45e2ca4c9",
       "adgenHash": "6ea7ceca20f9a77a642b802cca1e6cd5498a2b54b5a7e205426d07c34f800f69",
-      "backendSha": "6cee8eac343fe07493fa83c049d8c468343a0ffd",
+      "backendSha": "27437447e0596c78cded97f224ef428623b17897",
       "status": "unported",
-      "reason": "add titlingResumeBrandMissingSince (Date) — titling-resume brand-giveup clock fix; both Ad copies must declare it (Mongoose-strict), backend never reads/writes it",
+      "reason": "2026-09-10 HASH REFRESH ONLY — the debt is deliberately NOT discharged. Backend #438 (27437447) added titlingResumeBrandMissingSince (Date) to BOTH Ad copies for the titling-resume brand-giveup clock fix; the prior reason text (authored by that change) stands unchanged: both copies must declare it because Mongoose strict would drop the write, and backend never reads or writes it. This re-attestation exists solely because #438 landed without reconciling, leaving trunk red on the 'no backend drift since last look' check (last look 6cee8eac). Re-attested as unported/port-to-backend so owedSince is PRESERVED and no obligation is silently discharged. Reconciled by the Athleta/merge-coordination session, NOT by the change's author: that session archived immediately after merging, so nobody remained to attest it, and leaving trunk red for an absent owner is worse than a conservative hash refresh. Whoever next looks at this entry owns the actual judgment that this re-attestation deliberately declines to make: whether the residual debt is real (keep unported) or whether adgen owning this shape is now settled (--downgrade-to-fork). Do not read this refresh as an endorsement of either.",
       "portTo": "backend",
       "owedSince": "2026-09-10T18:51:23.842Z"
     },
@@ -70,11 +70,11 @@
       "owedSince": null
     },
     "models/Brand.js": {
-      "backendHash": "741f39d1bb1f87a1f999a5dd85b4025e184f1f029d3d46588f25a2d45308143d",
+      "backendHash": "88d4a3c911555494e68dbdef2690e5953562a603d2ce8d15dbc3a99d17ba6f29",
       "adgenHash": "867bc01e144a7d8d77ee6bc822abf61e5b7a9ebb46ebda913162fc4de7683104",
-      "backendSha": "b6d175c3c4241fe917839e7884f8617e672ed4fd",
+      "backendSha": "64ef4e94965c7b06e34e44f1b07bd90ef12d53ea",
       "status": "fork",
-      "reason": "2026-09-06 backend #391/#392 added lastCatalogResyncAt (Date, default null) for scheduled Shopify-direct/generic/Apify catalog re-sync (scheduledSyncService.runDueCatalogResyncs) -- carries forward from the prior look. Since then, two more backend commits added three NEW backend-only fields: catalogYoloBackoffUntil (Date), catalogYoloBackoffFailures (Number), catalogYoloBackoffReason (String) -- per-brand catalog-YOLO backoff state that survives worker crash-loops; and catalogPostSyncHeartbeatAt (Date) -- a cross-process 'chain is alive' heartbeat for runPostSyncChain, independent of progressService's 4h MAX_RUN_MS, goes stale after POST_SYNC_CHAIN_HEARTBEAT_STALE_MIN. Confirmed via grep: zero references to any of these 4 fields anywhere in adgen/src. Adgen has zero Brand.create/update/save call sites (same precedent as lastCatalogResyncAt) -- writer is backend-only catalog ingest. verifyModelParity only requires adgen-fields SUBSET backend-fields, so backend-only fields are fine (same pattern as CampaignRun.automation). Not porting any of the 4 fields: adgen does not run catalog re-sync, catalog-YOLO backoff, or the post-sync chain, and would never read or stamp them."
+      "reason": "2026-09-10 backend #439 (64ef4e94) added TWO new backend-only fields to brandSchema; carries the prior look's four forward. NEW: catalogSyncMode (String, enum ['demo','production',null], top-level) -- per-client catalog update cadence; 'demo' makes scheduledSyncService.selectDueCatalogResyncCandidates skip the brand entirely so a curated demo catalog is never re-walked by the nightly persist-uncapped resync, 'production' keeps daily updates, null resolves via resolveCatalogSyncMode() to 'demo' for isDemo brands and 'production' otherwise. And apifyDemo.seedProductUrls ([String]) -- an operator-curated list of absolute same-origin PDP URLs; when non-empty the generic-sitemap ingest scans exactly those instead of discovering and walking sitemaps. NOTE enrichInFlight is NOT a new field in this diff: it appears in the + lines only because a trailing comma was added when seedProductUrls was inserted after it, and adgen already declares it at adgen/src/models/Brand.js:349. Confirmed via grep: ZERO references to catalogSyncMode or seedProductUrls anywhere in adgen (not adgen/src, not adgen/scripts, not adgen/config, not this manifest). Adgen still has zero Brand.create/update/save call sites -- writer is backend-only catalog ingest, same precedent as lastCatalogResyncAt and the catalogYoloBackoff*/catalogPostSyncHeartbeatAt group in the prior look. verifyModelParity requires only adgen-fields SUBSET backend-fields, so backend-only fields are fine. Not porting either: adgen does not run catalog ingest, does not run the nightly resync, and would never read or stamp either field. KEEPING THE FORK. Process note for whoever looks next: this check compares against backend origin/main, so it CANNOT flag your own models/Brand.js drift before your PR merges -- a pre-merge '15/15 passed' says nothing about your own change, and trunk goes red the moment you land. Same root cause as verifyModelParity's origin/main comparison ref but the opposite failure mode: parity self-heals on merge, drift only APPEARS on merge. This is how #426 left trunk red for 5+ commits. Reconcile in the SAME PR as any models/Brand.js change."
     },
     "models/Campaign.js": {
       "backendHash": "079065a6d9dff95e04f8136469d847cb6f3703452e6553492ea35e26291df6ae",
