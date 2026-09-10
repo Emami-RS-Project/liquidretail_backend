@@ -1,15 +1,17 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "c235b681dc023ee32172054c66089e1a56a40ae2",
-  "generatedAt": "2026-09-10T18:09:15.016Z",
+  "backendHead": "301b458e6f25f27336546bf68cf442a733ddbb9c",
+  "generatedAt": "2026-09-10T18:51:23.843Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
-      "adgenHash": "76cbe21b26cf70e54b693ab2fc7aa08852557ecfa362befbd8833eb3930ab633",
+      "adgenHash": "6ea7ceca20f9a77a642b802cca1e6cd5498a2b54b5a7e205426d07c34f800f69",
       "backendSha": "6cee8eac343fe07493fa83c049d8c468343a0ffd",
-      "status": "fork",
-      "reason": "This PR adds Ad.videoQcRetry (Mixed, default null) on BOTH copies: adgen's live renderer claim-lock for the one-shot QC-triggered 720p retry, and backend models/Ad.js in the same PR so Mongoose strict on the API process cannot silently drop the field (same trap as renderError.predictionId). Remaining fork unchanged (adgen-only render/titling fields). Automatic retry is gated OFF by QC_RETRY_720P_ENABLED (strict === 'true')."
+      "status": "unported",
+      "reason": "add titlingResumeBrandMissingSince (Date) — titling-resume brand-giveup clock fix; both Ad copies must declare it (Mongoose-strict), backend never reads/writes it",
+      "portTo": "backend",
+      "owedSince": "2026-09-10T18:51:23.842Z"
     },
     "models/Advertiser.js": {
       "backendHash": "0a7e1bb9ca5e0fbbfc6972f9c96d87f839b0a86175831b5446ae27095137ba3f",
