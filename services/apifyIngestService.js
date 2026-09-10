@@ -96,7 +96,7 @@ function resolveCatalogMethod(cfg = {}) {
 // function re-reads the brand from Mongo, so a caller-side clear only works
 // if it is guaranteed to have committed and nothing else re-sets it first)
 // and it does not touch the brand's stored IG configuration at all.
-async function syncBrandApify(brandId, { skipInstagram = false, uncapped = false } = {}) {
+async function syncBrandApify(brandId, { skipInstagram = false, uncapped = false, seedProductUrls } = {}) {
   const brand = await Brand.findById(brandId);
   if (!brand) {
     const e = new Error(`Brand ${brandId} not found`);
@@ -152,7 +152,7 @@ async function syncBrandApify(brandId, { skipInstagram = false, uncapped = false
           out.shopify = { ok: false, reason: 'generic-sitemap method is disabled (GENERIC_CATALOG_ENABLED=false)' };
         } else {
           const r = await require('./genericCatalogIngestService')
-            .syncBrandGenericCatalog(brand, run, { isBrandAborted, uncapped: uncapped === true });
+            .syncBrandGenericCatalog(brand, run, { isBrandAborted, uncapped: uncapped === true, seedProductUrls });
           out.shopify = {
             added:   r.productsUpserted,
             videos:  r.videosIngested || 0,

@@ -177,9 +177,26 @@ function resolveScheduledCatalogMethod(brand, sourceSet) {
   return null;
 }
 
+/**
+ * resolveCatalogSyncMode(brand) → 'demo' | 'production'
+ *
+ * Pure. An explicit Brand.catalogSyncMode always wins; otherwise a demo brand
+ * defaults to 'demo' (frozen catalog) and everything else to 'production'.
+ * Kept exported so the harness evaluates the REAL resolver rather than a stub.
+ */
+function resolveCatalogSyncMode(brand) {
+  const explicit = brand && brand.catalogSyncMode;
+  if (explicit === 'demo' || explicit === 'production') return explicit;
+  return brand && brand.isDemo ? 'demo' : 'production';
+}
+
 function selectDueCatalogResyncCandidates(brands, sourceByBrand, now, windowStartMs) {
   const due = [];
   for (const b of brands || []) {
+    // 'demo' brands are FROZEN: the nightly job never touches them, so a
+    // curated demo catalog cannot be re-walked (and re-billed) behind the
+    // operator's back. An explicit manual sync is still the escape hatch.
+    if (resolveCatalogSyncMode(b) === 'demo') continue;
     if (!isCatalogResyncDue(b, now, windowStartMs)) continue;
     const key = String(b._id);
     const sources = sourceByBrand instanceof Map
@@ -278,7 +295,7 @@ async function runDueCatalogResyncs(summary, now) {
   // an eligible CatalogProduct.source nor a store origin still resolves
   // method=null and is skipped.
   const brands = await Brand.find({})
-    .select('_id advertiserId isDemo websiteUrl apifyDemo lastCatalogResyncAt')
+    .select('_id advertiserId isDemo catalogSyncMode websiteUrl apifyDemo lastCatalogResyncAt')
     .lean();
   if (!brands.length) return summary;
 
@@ -606,6 +623,7 @@ module.exports = {
   isInCatalogNightlyWindow,
   isCatalogResyncDue,
   resolveScheduledCatalogMethod,
+  resolveCatalogSyncMode,
   selectDueCatalogResyncCandidates,
   hasCatalogSyncInProgress,
   dispatchCatalogResync,
