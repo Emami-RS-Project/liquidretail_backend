@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "b7812f4f243842990e3f60bf6ed605f09d03a66a",
-  "generatedAt": "2026-09-08T19:40:16.581Z",
+  "backendHead": "c235b681dc023ee32172054c66089e1a56a40ae2",
+  "generatedAt": "2026-09-10T18:09:15.016Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "ba0f6e3d26fed68c88d1a762c11078ddbd5ccf49c364f1a85dcce4d6f9acd16e",
@@ -736,10 +736,8 @@
       "backendHash": "b24b691e1c18843ca9c73d3ade7f686a3c9f354833be39b7ccdf07ae733318ca",
       "adgenHash": "140a13461f65c7f494389db5fbbeee23bb255b6266afcdeda5033378c2ac2a14",
       "backendSha": "b557b492ad1373340831316bb21610c9bb6b1557",
-      "status": "unported",
-      "reason": "Debt substance unchanged from the 2026-08-27 look (backend still has no resume-from-receipt guard on the static/image charge point). Re-shaped by video-provider-collapse PR 0-3: the local shouldResumeImageAttempt predicate (duplicated from atlasVideoService) now delegates to the single shared spendReceipt.shouldResumeAttempt() instead of re-implementing the 3-clause allowResume/attempt/existingPredictionId check inline. Wrapper, not a copy. owedSince carries forward — this consolidation does not resolve the port; backend still owes an equivalent resume guard, now against spendReceipt.shouldResumeAttempt's shape rather than the old local mirror.",
-      "portTo": "backend",
-      "owedSince": "2026-08-27T10:28:36.278Z"
+      "status": "fork",
+      "reason": "NOT a debt any more — the obligation's premise expired with the 2026-09-07 adgen cutover. The debt (owedSince 2026-08-27) was 'backend still has no resume-from-receipt guard on the static/image charge point'. Backend no longer HAS that charge point: services/directImageRenderService.js was stripped of renderDirectImage and no longer requires atlasImageService at all, so the Ad-scoped billable image submit now lives solely in adgen. Verified on backend main: zero occurrences of allowResume/existingPredictionId outside atlasVideoService; buildSubmissionRecord is called only inside atlasImageService itself and no caller persists the returned submission; of the live requirers (aiLayoutStudio, personaAvatar, openai, gemini, catalogProductLifestyle) none reference Ad.imageGeneration and none wrap generation in a retry-after-receipt loop (their loops are variant/aspect combos and model-candidate fallbacks, each a distinct fresh submit); imageRecoveryService is peek-only and says so ('NEVER SUBMITS: the only provider call is peekImagePrediction'); resumeImageForAd has no production callers and never returns resumed:true. With no path that stamps an image receipt and can re-enter a submit against it, a resume guard in backend would guard a door that does not exist. Backend independently retains the CLAUDE.md section 2 invariants that DO apply to it: maxRedirects:0 on the billable generateImage POST, and chargedError. adgen owns this shape deliberately. Re-open as unported if backend ever regains an Ad-scoped image charge point."
     },
     "services/atlasLlmService.js": {
       "backendHash": "86eb6f236480a103f90082d44a1ee096ad9b064608cf8b4abeeabcad7cd2a649",
