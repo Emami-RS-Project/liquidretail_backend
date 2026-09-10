@@ -239,12 +239,31 @@ const RATING_QUALITY_PATTERNS = [
 // tier can be checked against the real count, not just "some count exists".
 const REVIEW_VOLUME_CLAIM = /(\d[\d,]*(?:\.\d+)?)\s*(k)?\s*\+?\s*(?:reviews?|ratings?|customers?)\b/i;
 
+// Performance-attribute claim, e.g. "UPF 50+ Protection", "SPF 30",
+// "waterproof to 10m". NOT barred outright — a legitimately substantiated
+// UPF rating is exactly what this gate exists to ALLOW. Shape matches
+// review_volume: parse the asserted value, require real PDP evidence to
+// meet it, fail closed when evidence is supplied and does not meet it.
+//
+// BADGE-PATH COMPAT: today's callers pass {rating, reviewCount} only.
+// When no PDP-fact key is present on `evidence`, performance_attribute
+// strings KEEP passing through (the unclassified behaviour E1 pins for
+// "UPF 50+ Protection"). Do NOT treat "facts not provided" as "facts
+// empty" — that would strip every UPF badge on the live path.
+const PERFORMANCE_ATTRIBUTE_PATTERNS = [
+  /\bupf\s*(\d+(?:\.\d+)?)\s*\+?/i,
+  /\bspf\s*(\d+(?:\.\d+)?)\s*\+?/i,
+  /\bwaterproof(?:\s+to)?\s*(\d+(?:\.\d+)?)?\s*(m|meters?|mm|atm)?\b/i,
+  /\bwater[- ]resistant(?:\s+to)?\s*(\d+(?:\.\d+)?)?\s*(m|meters?|mm|atm)?\b/i,
+  /\b(\d+(?:\.\d+)?)\s*(m|meters?|mm|atm)\s+waterproof\b/i,
+];
+
 const RATING_CLAIM_MIN = 4.5;
 const SAMPLE_FLOOR = 100;
 
 /**
  * Classify a single candidate badge string.
- * @returns {'unverifiable_attribute'|'sales_standing'|'rating_quality'|'review_volume'|'unclassified'|null}
+ * @returns {'unverifiable_attribute'|'sales_standing'|'rating_quality'|'review_volume'|'performance_attribute'|'unclassified'|null}
  */
 function classify(text) {
   const s = typeof text === 'string' ? text.trim() : '';
@@ -252,11 +271,13 @@ function classify(text) {
   // Order matters: an environmental/sales phrase that happens to also
   // contain a number ("#1 eco-friendly pick") must still be barred
   // outright, so those two categories are checked before the evidence-
-  // gated ones.
+  // gated ones. performance_attribute sits AFTER review_volume so
+  // "50+ reviews" cannot be stolen by a UPF/SPF digit pattern.
   if (matchesAny(UNVERIFIABLE_ATTRIBUTE_PATTERNS, s)) return 'unverifiable_attribute';
   if (matchesAny(SALES_STANDING_PATTERNS, s)) return 'sales_standing';
   if (matchesAny(RATING_QUALITY_PATTERNS, s)) return 'rating_quality';
   if (REVIEW_VOLUME_CLAIM.test(s)) return 'review_volume';
+  if (matchesAny(PERFORMANCE_ATTRIBUTE_PATTERNS, s)) return 'performance_attribute';
   return 'unclassified';
 }
 
@@ -267,6 +288,111 @@ function parseAssertedCount(text) {
   const base = Number(m[1].replace(/,/g, ''));
   if (!Number.isFinite(base)) return null;
   return m[2] ? base * 1000 : base;
+}
+
+/**
+ * Parse a performance-attribute assertion.
+ * @returns {{ attr: string, value: number|null, unit: string|null }|null}
+ */
+function parsePerformanceAttribute(text) {
+  const s = String(text || '');
+  if (!s) return null;
+  const upf = /\bupf\s*(\d+(?:\.\d+)?)\s*\+?/i.exec(s);
+  if (upf) {
+    const value = Number(upf[1]);
+    return { attr: 'upf', value: Number.isFinite(value) ? value : null, unit: null };
+  }
+  const spf = /\bspf\s*(\d+(?:\.\d+)?)\s*\+?/i.exec(s);
+  if (spf) {
+    const value = Number(spf[1]);
+    return { attr: 'spf', value: Number.isFinite(value) ? value : null, unit: null };
+  }
+  const wpLead = /\b(waterproof|water[- ]resistant)(?:\s+to)?\s*(\d+(?:\.\d+)?)?\s*(m|meters?|mm|atm)?\b/i.exec(s);
+  if (wpLead) {
+    const attr = /water[- ]resistant/i.test(wpLead[1]) ? 'water-resistant' : 'waterproof';
+    const value = wpLead[2] != null ? Number(wpLead[2]) : null;
+    return {
+      attr,
+      value: Number.isFinite(value) ? value : null,
+      unit: wpLead[3] ? String(wpLead[3]).toLowerCase() : null,
+    };
+  }
+  const wpTrail = /\b(\d+(?:\.\d+)?)\s*(m|meters?|mm|atm)\s+waterproof\b/i.exec(s);
+  if (wpTrail) {
+    const value = Number(wpTrail[1]);
+    return {
+      attr: 'waterproof',
+      value: Number.isFinite(value) ? value : null,
+      unit: wpTrail[2] ? String(wpTrail[2]).toLowerCase() : null,
+    };
+  }
+  return null;
+}
+
+function evidenceHasPdpFacts(evidence) {
+  if (!evidence || typeof evidence !== 'object') return false;
+  return Object.prototype.hasOwnProperty.call(evidence, 'pdpMaterialFacts')
+    || Object.prototype.hasOwnProperty.call(evidence, 'pdpSpecFacts')
+    || Object.prototype.hasOwnProperty.call(evidence, 'pdpFaqAnswers')
+    || Object.prototype.hasOwnProperty.call(evidence, 'pdpFacts');
+}
+
+function flattenPdpFacts(evidence) {
+  const out = [];
+  if (!evidence || typeof evidence !== 'object') return out;
+  if (Array.isArray(evidence.pdpFacts)) {
+    for (const t of evidence.pdpFacts) {
+      if (typeof t === 'string' && t.trim()) out.push(t.trim());
+    }
+  }
+  const pushRow = (row) => {
+    if (!row || typeof row !== 'object') return;
+    const key = typeof row.key === 'string' ? row.key.trim() : '';
+    const value = typeof row.value === 'string' ? row.value.trim() : '';
+    const answer = typeof row.answer === 'string' ? row.answer.trim() : '';
+    if (value) out.push(value);
+    if (key && value) {
+      out.push(`${key} ${value}`);
+      out.push(`${key}: ${value}`);
+    }
+    if (answer) out.push(answer);
+  };
+  if (Array.isArray(evidence.pdpMaterialFacts)) evidence.pdpMaterialFacts.forEach(pushRow);
+  if (Array.isArray(evidence.pdpSpecFacts)) evidence.pdpSpecFacts.forEach(pushRow);
+  if (Array.isArray(evidence.pdpFaqAnswers)) evidence.pdpFaqAnswers.forEach(pushRow);
+  return out;
+}
+
+function unitsCompatible(a, b) {
+  if (!a || !b) return true;
+  const na = String(a).toLowerCase();
+  const nb = String(b).toLowerCase();
+  if (na === nb) return true;
+  const meters = new Set(['m', 'meter', 'meters']);
+  if (meters.has(na) && meters.has(nb)) return true;
+  return false;
+}
+
+/**
+ * True when the asserted performance attribute is met by a matching
+ * pdpMaterialFacts / pdpSpecFacts / pdpFaqAnswers entry. Fail closed
+ * when nothing matches. A higher evidence value licenses a lower claim
+ * (UPF 50+ licenses "UPF 50", not "UPF 70").
+ */
+function performanceAttributeMeetsFacts(text, evidence) {
+  const asserted = parsePerformanceAttribute(text);
+  if (!asserted) return false;
+  const facts = flattenPdpFacts(evidence);
+  if (!facts.length) return false;
+  for (const fact of facts) {
+    const got = parsePerformanceAttribute(fact);
+    if (!got || got.attr !== asserted.attr) continue;
+    if (asserted.value == null) return true;
+    if (got.value == null) continue;
+    if (!unitsCompatible(asserted.unit, got.unit)) continue;
+    if (got.value >= asserted.value) return true;
+  }
+  return false;
 }
 
 /**
@@ -314,6 +440,17 @@ function substantiateBadges(candidates, evidence = {}) {
       if (strong) out.push(text);
       continue;
     }
+    if (category === 'performance_attribute') {
+      // Badge path today does not pass PDP facts — preserve the E1
+      // unclassified pass-through for those callers. When a caller DOES
+      // supply a PDP-fact key, require a matching entry (fail closed).
+      if (!evidenceHasPdpFacts(evidence)) {
+        out.push(text);
+        continue;
+      }
+      if (performanceAttributeMeetsFacts(text, evidence)) out.push(text);
+      continue;
+    }
     // 'unclassified' — not a recognized comparative-superiority or
     // environmental/ethical claim pattern. Passes through unchanged; see
     // the module doc's "SCOPE" section. Extend the two barred-outright
@@ -337,6 +474,9 @@ function substantiateBadge(value, evidence) {
 module.exports = {
   classify,
   parseAssertedCount,
+  parsePerformanceAttribute,
+  performanceAttributeMeetsFacts,
+  evidenceHasPdpFacts,
   hasStrongSignal,
   substantiateBadges,
   substantiateBadge,
@@ -346,4 +486,5 @@ module.exports = {
   UNVERIFIABLE_ATTRIBUTE_PATTERNS,
   RATING_QUALITY_PATTERNS,
   REVIEW_VOLUME_CLAIM,
+  PERFORMANCE_ATTRIBUTE_PATTERNS,
 };

@@ -19,11 +19,11 @@
 const axios = require('axios');
 const { decrypt } = require('./integrationCryptoService');
 const googleAds = require('./googleAdsOAuthService');
+const { googleAdsApiRoot } = require('./googleAdsApiVersion');
 const { matchCampaignCreatives, extractCreativeContent, creativeFields } = require('./googleAdsCreativeMatcher');
 const { deriveCampaignKind } = require('./creativeMatcherCore');
 
-const ADS_API_VERSION = process.env.GOOGLE_ADS_API_VERSION || 'v19';
-const ADS_API_ROOT    = `https://googleads.googleapis.com/${ADS_API_VERSION}`;
+const ADS_API_ROOT = googleAdsApiRoot();
 
 const MAX_CAMPAIGNS = 200;
 
@@ -66,7 +66,7 @@ async function syncForCredential(cred) {
       SELECT
         campaign.id, campaign.name, campaign.status,
         campaign.advertising_channel_type, campaign.advertising_channel_sub_type,
-        campaign.start_date, campaign.end_date,
+        campaign.start_date_time, campaign.end_date_time,
         campaign.bidding_strategy_type,
         campaign_budget.amount_micros, campaign_budget.resource_name
       FROM campaign
@@ -94,10 +94,11 @@ async function syncForCredential(cred) {
         sharedBudgetId: r.campaignBudget?.resourceName || null
       },
       schedule: {
-        // Google date format: YYYY-MM-DD. Build ISO at noon UTC to
-        // dodge timezone-shift surprises in display code.
-        start: c.startDate ? new Date(`${c.startDate}T12:00:00Z`) : null,
-        end:   c.endDate   ? new Date(`${c.endDate}T12:00:00Z`)   : null
+        // v23 renamed start_date/end_date → start_date_time/end_date_time
+        // (`yyyy-MM-dd HH:mm:ss`). Date-only prefix kept at noon UTC so
+        // display code does not shift a calendar day.
+        start: googleCampaignDate(c.startDateTime),
+        end:   googleCampaignDate(c.endDateTime)
       },
       targeting: {
         geo: [], ageMin: null, ageMax: null,
@@ -299,7 +300,7 @@ async function syncForCredential(cred) {
         metrics.impressions, metrics.clicks, metrics.ctr,
         metrics.average_cpc, metrics.average_cpm, metrics.cost_micros,
         metrics.conversions, metrics.conversions_value,
-        metrics.video_views
+        metrics.video_trueview_views
       FROM campaign
       WHERE campaign.status != 'REMOVED'
       LIMIT 1000
@@ -378,6 +379,15 @@ async function runGAQL(ctx, query) {
   return results;
 }
 
+// v23+ campaign.start_date_time is `yyyy-MM-dd HH:mm:ss`. Pre-v23 was
+// `YYYY-MM-DD`. Take the calendar day and pin noon UTC.
+function googleCampaignDate(s) {
+  if (!s) return null;
+  const day = String(s).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  return new Date(`${day}T12:00:00Z`);
+}
+
 // Map Google's metrics.* shape onto the unified Campaign.insights
 // shape. Google natively uses micros for currency fields and a
 // 0–1 fraction for ctr — both match our schema, so the conversion is
@@ -399,7 +409,7 @@ function normalizeGoogleInsights(m, currency) {
     frequency:             null,
     conversions:           num(m.conversions),
     conversionValueMicros: m.conversionsValue != null ? Math.round(num(m.conversionsValue) * 1_000_000) : null,
-    videoViews:            m.videoViews != null ? Math.round(num(m.videoViews)) : null,
+    videoViews:            m.videoTrueviewViews != null ? Math.round(num(m.videoTrueviewViews)) : null,
     currency:              currency || null,
     rangeDays:             null,
     fetchedAt:             new Date()
@@ -414,4 +424,4 @@ function gaqlError(err) {
   return err.message || String(err);
 }
 
-module.exports = { syncForCredential };
+module.exports = { syncForCredential, googleCampaignDate };

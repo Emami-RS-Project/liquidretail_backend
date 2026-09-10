@@ -15,14 +15,11 @@
 // instant, production access requires Google review.
 
 const axios = require('axios');
+const { googleAdsApiRoot } = require('./googleAdsApiVersion');
 
 const OAUTH_AUTHORIZE = 'https://accounts.google.com/o/oauth2/v2/auth';
 const OAUTH_TOKEN     = 'https://oauth2.googleapis.com/token';
-// Google Ads API versions have ~14-month lifespans. Bump default
-// when the current one nears sunset (check release notes at
-// https://developers.google.com/google-ads/api/docs/release-notes).
-const ADS_API_VERSION = process.env.GOOGLE_ADS_API_VERSION || 'v19';
-const ADS_API_ROOT    = `https://googleads.googleapis.com/${ADS_API_VERSION}`;
+const ADS_API_ROOT    = googleAdsApiRoot();
 
 const SCOPES = ['https://www.googleapis.com/auth/adwords'];
 

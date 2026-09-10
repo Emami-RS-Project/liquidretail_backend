@@ -300,6 +300,152 @@ const catalogProductSchema = new mongoose.Schema({
     _id: false
   }],
 
+  // Per-SKU marketing line (PDP slogan / metafield). Distinct from
+  // Brand.tagline. Phase 0 declares the field; Phase 2 writes it from the PDP.
+  // default undefined so "never compiled" is distinguishable from null.
+  marketingLine:   { type: String, default: undefined },
+  // Flash last-resort stamp. A set stamp with an empty/absent line means
+  // "tried, genuinely nothing" — do not re-derive. Mirrors shortBenefitsDerivedAt.
+  marketingLineDerivedAt: { type: Date, default: null },
+  // Which waterfall tier produced marketingLine. Declared so the claim
+  // ceiling can distinguish json-ld / description-sentence (T2, licensed)
+  // from flash (T5, not advertiser copy). Adgen never writes this field.
+  marketingLineSource: {
+    type: String,
+    enum: ['json-ld', 'description-sentence', 'flash'],
+    default: undefined,
+  },
+  // PDP facts — backend ingest writes these; adgen reads them for the
+  // advertiser claim ceiling (T2 evidence-scoped spans). Mongoose strict
+  // drops undeclared paths, so they MUST be declared for .select() to
+  // return them on the render path.
+  pdpSpecFacts: {
+    type: [{
+      key:       { type: String, default: undefined },
+      value:     { type: String, default: undefined },
+      sourceUrl: { type: String, default: undefined },
+      _id: false,
+    }],
+    default: undefined,
+  },
+  pdpSpecFactsSource: {
+    type: String,
+    enum: ['json-ld', 'html-table'],
+    default: undefined,
+  },
+  pdpMaterialFacts: {
+    type: [{
+      kind:      { type: String, enum: ['labelled', 'feature', 'composition'], default: undefined },
+      key:       { type: String, default: undefined },
+      value:     { type: String, default: undefined },
+      sourceUrl: { type: String, default: undefined },
+      _id: false,
+    }],
+    default: undefined,
+  },
+  pdpMaterialFactsSource: {
+    type: String,
+    enum: ['labelled', 'feature-list', 'composition', 'mixed'],
+    default: undefined,
+  },
+  pdpFaqAnswers: {
+    type: [{
+      question:  { type: String, default: undefined },
+      answer:    { type: String, default: undefined },
+      sourceUrl: { type: String, default: undefined },
+      _id: false,
+    }],
+    default: undefined,
+  },
+  pdpFaqAnswersSource: {
+    type: String,
+    enum: ['json-ld'],
+    default: undefined,
+  },
+  colourway:       { type: [String], default: undefined },
+  colourwaySource: {
+    type: String,
+    enum: ['shopify_options', 'title_parse', 'none'],
+    default: undefined,
+  },
+
+  // Compiled content rollup (ContentAtom ids + sufficiency + seeds +
+  // rating-policy snapshot). default undefined — an uncompiled product is
+  // distinguishable from "compiled, empty". Nested defaults are also
+  // undefined so Mongoose does not materialise an empty subdoc on read.
+  // MUST stay declared: Mongoose strict drops undeclared $set paths.
+  contentIndex: {
+    type: new mongoose.Schema({
+      compileVersion: { type: String, default: undefined },
+      compiledAt:     { type: Date, default: undefined },
+      sufficiency: {
+        overall: { type: Number, default: undefined },
+        byStage: {
+          awareness:     { type: Number, default: undefined },
+          consideration: { type: Number, default: undefined },
+          conversion:    { type: Number, default: undefined },
+          retention:     { type: Number, default: undefined },
+        },
+        blockers: { type: [String], default: undefined },
+      },
+      atomIds:          { type: [mongoose.Schema.Types.ObjectId], default: undefined },
+      inheritedAtomIds: { type: [mongoose.Schema.Types.ObjectId], default: undefined },
+      marketingLine:    { type: String, default: undefined },
+      colourway:        { type: [String], default: undefined },
+      colourwaySource:  {
+        type: String,
+        enum: ['shopify_options', 'title_parse', 'none'],
+        default: undefined,
+      },
+      seeds: [{
+        mediaId:   { type: mongoose.Schema.Types.ObjectId, ref: 'Media', default: undefined },
+        feedIndex: { type: Number, default: undefined },
+        shotStyle: {
+          type: String,
+          enum: ['packshot', 'lifestyle', 'ambiguous', 'unknown'],
+          default: undefined,
+        },
+        shotType: {
+          type: String,
+          enum: ['lifestyle', 'on_model', 'product_only', 'flat_lay', 'detail', 'packaging', 'unknown'],
+          default: undefined,
+        },
+        role: { type: String, enum: ['hero', 'alt'], default: undefined },
+        _id: false,
+      }],
+      ratingPolicy: {
+        productStars:   { type: String, default: undefined },
+        productCount:   { type: Number, default: undefined },
+        productPctFive: { type: Number, default: undefined },
+        brandStars:     { type: String, default: undefined },
+        brandCount:     { type: Number, default: undefined },
+        eligibleForms:  {
+          type: [{ type: String, enum: ['stars+count', 'count-only', 'brand-scoped'] }],
+          default: undefined,
+        },
+      },
+    }, { _id: false }),
+    default: undefined,
+  },
+
+  // Paid lifestyle render (gpt-image-2/edit → Cloudinary), written by
+  // services/catalogProductLifestyleImageService.js:172.
+  //
+  // DECLARED 2026-09-09 because it was NOT, and Mongoose strict was
+  // silently dropping the write. That is a money bug, not a tidiness one:
+  // the service selects this path back at :66 and uses it at :74 as its
+  // IDEMPOTENCE GUARD ("product already has lifestyle_image (clear the
+  // field to regenerate)"). With the write dropped the guard could never
+  // fire, so every invocation of the agent capability
+  // catalogGenerateLifestyleImages re-paid for products that already had
+  // an image — bounded at ~$2/run by MAX_STEPS_PER_RUN=50 but UNBOUNDED
+  // across runs, while reporting success each time. Found by
+  // scripts/verifyMongooseContracts.js.
+  lifestyle_image:    { type: String, default: null },
+  // Companion stamp. Replaces an undeclared `updatedAt` in the same $set
+  // (this schema has firstSeenAt/lastSyncedAt and no updatedAt; reusing
+  // lastSyncedAt would misreport a catalog sync).
+  lifestyleImageAt:   { type: Date, default: null },
   firstSeenAt:  { type: Date, default: Date.now },
   lastSyncedAt: { type: Date, default: Date.now }
 });

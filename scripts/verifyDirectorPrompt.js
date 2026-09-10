@@ -45,6 +45,7 @@ const fs = require('fs');
 const path = require('path');
 
 const director = require('../services/aiCreativeDirectorService');
+const { withMutatedSource } = require('./lib/harnessMutate');
 const SERVICE_PATH = path.join(__dirname, '..', 'services', 'aiCreativeDirectorService.js');
 
 let pass = 0;
@@ -304,8 +305,8 @@ check(
   // Without the bump, the cache-hit test (cached.signalsVersion ===
   // DIRECTOR_SIGNALS_VERSION) keeps serving concepts derived from the starved
   // brief, and the fix above is a no-op on every existing artifact.
-  'E6 DIRECTOR_SIGNALS_VERSION is 3.6.0 (brand_signal.personas)',
-  /const DIRECTOR_SIGNALS_VERSION = '3\.6\.0'/.test(fileSrc),
+  'E6 DIRECTOR_SIGNALS_VERSION is 3.7.0 (content_sufficiency / marketing_line / pdp specs / quote stage)',
+  /const DIRECTOR_SIGNALS_VERSION = '3\.7\.0'/.test(fileSrc),
   'signals version must be bumped so existing CreativeDirectionArtifacts re-derive'
 );
 check(
@@ -507,6 +508,63 @@ function withPersonasFlag(val, fn) {
       && personas[3].name === 'Fourth');
 }
 
+{
+  const ORIG_ATOM = process.env.CONTENT_ATOM_READ;
+  function withAtomRead(v, fn) {
+    if (v == null) delete process.env.CONTENT_ATOM_READ;
+    else process.env.CONTENT_ATOM_READ = v;
+    try { return fn(); }
+    finally {
+      if (ORIG_ATOM === undefined) delete process.env.CONTENT_ATOM_READ;
+      else process.env.CONTENT_ATOM_READ = ORIG_ATOM;
+    }
+  }
+  const roundArgs = {
+    inputSummary: { product_signal: { name: 'Test Tee' }, brand_signal: { name: 'Acme' } },
+    creativeIntent: null,
+    platformFormat: 'meta_feed_1_1',
+    universe: universeOf(1),
+    roundIndex: 0,
+    avoidList: []
+  };
+  const offAtom = withAtomRead(undefined, () => director.buildPromptRound(roundArgs));
+  const falseAtom = withAtomRead('false', () => director.buildPromptRound(roundArgs));
+  const onAtom = withAtomRead('true', () => director.buildPromptRound(roundArgs));
+  check('I0 CONTENT_ATOM_READ unset Meta prompt is byte-identical to false',
+    offAtom.system === falseAtom.system && offAtom.user === falseAtom.user);
+  check('I1 flag-off omits CONTENT SUFFICIENCY / MARKETING LINE / QUOTE STAGE rules',
+    !offAtom.system.includes('CONTENT SUFFICIENCY:')
+      && !offAtom.system.includes('MARKETING LINE:')
+      && !offAtom.system.includes('QUOTE STAGE:'));
+  check('I2 flag-on CONTENT SUFFICIENCY names 0–6 overall and blockers',
+    onAtom.system.includes('CONTENT SUFFICIENCY:')
+      && onAtom.system.includes('0–6 overall')
+      && onAtom.system.includes('blockers[]'));
+  check('I3 flag-on MARKETING LINE distinguishes store-import from synthesized',
+    onAtom.system.includes('origin "store-import"')
+      && onAtom.system.includes('origin "synthesized"')
+      && onAtom.system.includes('MUST NOT present it as the merchant'));
+  check('I4 flag-on QUOTE STAGE lists retention|conquest',
+    onAtom.system.includes('QUOTE STAGE:')
+      && onAtom.system.includes('retention|conquest'));
+  check('I5 HONESTY RULE is byte-identical across CONTENT_ATOM_READ arms',
+    offAtom.system.includes('HONESTY RULE:') && onAtom.system.includes('HONESTY RULE:')
+      && offAtom.system.split('\n').filter((l) => l.startsWith('- HONESTY RULE:'))[0]
+        === onAtom.system.split('\n').filter((l) => l.startsWith('- HONESTY RULE:'))[0]);
+  check('I6 catalogSpecsForDirector fills pdpSpecFacts when Mixed specs empty',
+    JSON.stringify(director.catalogSpecsForDirector({
+      pdpSpecFacts: [{ key: 'Material', value: '100% Nylon' }, { key: 'UPF', value: '50+ Protection' }]
+    })).includes('100% Nylon'));
+  check('I7 marketingLine flash is synthesized / not a merchant slogan',
+    director.marketingLineProvenanceForDirector('flash').origin === 'synthesized'
+      && director.marketingLineProvenanceForDirector('flash').verbatim === false);
+  check('I8 marketingLine json-ld is store-import / verbatim',
+    director.marketingLineProvenanceForDirector('json-ld').origin === 'store-import'
+      && director.marketingLineProvenanceForDirector('json-ld').verbatim === true);
+  check('I9 marketingLine description-sentence is store-import',
+    director.marketingLineProvenanceForDirector('description-sentence').origin === 'store-import');
+}
+
 // ── H. ugc_signal.rights_approved (item 7) ───────────────────────────────
 check('H0 source reads media.rights.approved (not platformStats.rights_approved)',
   /m\.rights\?\.approved/.test(fileSrc)
@@ -563,11 +621,13 @@ function query(value) {
 }
 
 async function runAsyncDirectorDataForward() {
+  const mongoose = require('mongoose');
   const Brand = require('../models/Brand');
   const CatalogProduct = require('../models/CatalogProduct');
   const ProductMatchArtifact = require('../models/ProductMatchArtifact');
   const Media = require('../models/Media');
   const Comment = require('../models/Comment');
+  const inv = require('../services/contentInventory');
   const orig = {
     brand: Brand.findById,
     product: CatalogProduct.findById,
@@ -575,6 +635,9 @@ async function runAsyncDirectorDataForward() {
     media: Media.find,
     comment: Comment.find
   };
+  const ORIG_ATOM = process.env.CONTENT_ATOM_READ;
+  const ORIG_ALIGN = process.env.DIRECTOR_QUOTE_POOL_ALIGNED;
+  const ORIG_MENU = process.env.DIRECTOR_PROOF_MENU_ENABLED;
   function restore() {
     Brand.findById = orig.brand;
     CatalogProduct.findById = orig.product;
@@ -583,6 +646,13 @@ async function runAsyncDirectorDataForward() {
     Comment.find = orig.comment;
     if (ORIG_PERSONAS === undefined) delete process.env.DIRECTOR_BRAND_PERSONAS;
     else process.env.DIRECTOR_BRAND_PERSONAS = ORIG_PERSONAS;
+    if (ORIG_ATOM === undefined) delete process.env.CONTENT_ATOM_READ;
+    else process.env.CONTENT_ATOM_READ = ORIG_ATOM;
+    if (ORIG_ALIGN === undefined) delete process.env.DIRECTOR_QUOTE_POOL_ALIGNED;
+    else process.env.DIRECTOR_QUOTE_POOL_ALIGNED = ORIG_ALIGN;
+    if (ORIG_MENU === undefined) delete process.env.DIRECTOR_PROOF_MENU_ENABLED;
+    else process.env.DIRECTOR_PROOF_MENU_ENABLED = ORIG_MENU;
+    try { inv._resetCache(); inv._setModels(null); } catch (_) { /* cleanup */ }
   }
 
   try {
@@ -658,6 +728,162 @@ async function runAsyncDirectorDataForward() {
     check('H3 platformStats.rights_approved is ignored (still null/falsey)',
       rightsOff.ugc_signal.rights_approved == null,
       `got ${rightsOff.ugc_signal && rightsOff.ugc_signal.rights_approved}`);
+
+    // ── R4 + Director feeding (CONTENT_ATOM_READ) ──────────────────
+    const ATOM_QUOTE = 'These are the most comfortable shoes I have ever worn. I bought a second pair the next week.';
+    const MIXED_QUOTE = 'These Mixed-path loafers are unbelievably comfortable and I bought a second pair the next week.';
+    const atomId = new mongoose.Types.ObjectId();
+    const productOid = new mongoose.Types.ObjectId();
+    const atomDoc = {
+      _id: atomId,
+      type: 'verbatim_quote',
+      status: 'active',
+      owner: { kind: 'product', id: productOid },
+      text: ATOM_QUOTE,
+      provenance: { origin: 'scraped', verbatim: true, author: 'Ada', perQuoteRating: 5 },
+      printability: { printable: true, dropReason: null },
+      funnelFit: ['consideration'],
+      stage: 'consideration'
+    };
+    const compiledProduct = {
+      _id: productOid,
+      title: 'Roma Sneaker | White - Wine',
+      productReviews: {
+        quotesOrigin: 'scraped',
+        quotes: [{ text: MIXED_QUOTE, origin: 'scraped', verbatim: true, rating: 5, author: 'Bea', stage: 'conversion' }]
+      },
+      pdpSpecFacts: [
+        { key: 'Material', value: '100% Nylon' },
+        { key: 'UPF', value: '50+ Protection' }
+      ],
+      pdpMaterialFacts: [{ kind: 'labelled', key: 'Stretch', value: '4-Way Stretch' }],
+      marketingLine: 'Built for the water',
+      marketingLineSource: 'json-ld',
+      contentIndex: {
+        compiledAt: new Date(),
+        atomIds: [atomId],
+        inheritedAtomIds: [],
+        sufficiency: {
+          overall: 4,
+          byStage: { awareness: 2, consideration: 3, conversion: 1, retention: 0 },
+          blockers: []
+        }
+      }
+    };
+    function stubInventory() {
+      inv._resetCache();
+      inv._setModels({
+        CatalogProduct: {
+          findOne() {
+            return {
+              select() { return this; },
+              lean() { return Promise.resolve({ contentIndex: compiledProduct.contentIndex }); }
+            };
+          }
+        },
+        ContentAtom: {
+          find() { return { lean() { return Promise.resolve([atomDoc]); } }; }
+        }
+      });
+    }
+
+    process.env.DIRECTOR_QUOTE_POOL_ALIGNED = 'true';
+    process.env.DIRECTOR_PROOF_MENU_ENABLED = 'true';
+    process.env.CONTENT_ATOM_READ = 'true';
+    Brand.findById = () => query({ name: 'Acme', summary: 's', tagline: 't', tone: [], logoUrl: null });
+    CatalogProduct.findById = () => query(compiledProduct);
+    ProductMatchArtifact.find = () => query([]);
+    Media.find = () => query([]);
+    Comment.find = () => query([]);
+    stubInventory();
+
+    const fed = await director.assembleSignals({
+      brandId: '000000000000000000000001',
+      productId: String(productOid),
+      campaignKind: 'product',
+      seededUniverse: []
+    });
+    check('R4 flag-on primary_quote is the atom quote, not Mixed',
+      !!(fed.social_proof_signal.primary_quote
+        && fed.social_proof_signal.primary_quote.text
+        && fed.social_proof_signal.primary_quote.text.includes('most comfortable shoes')));
+    check('R4 flag-on primary_quote is not the Mixed quote',
+      !(fed.social_proof_signal.primary_quote
+        && fed.social_proof_signal.primary_quote.text
+        && fed.social_proof_signal.primary_quote.text.includes('Mixed-path loafers')));
+    const proofQuotes = (((fed.social_proof_signal.proof_options || []).find((o) => o.tier === 'product') || {}).quotes) || [];
+    check('R4 flag-on proof_options.product quotes are atom-derived',
+      proofQuotes.some((q) => q && q.text && q.text.includes('most comfortable shoes')));
+    check('R4 renderer pick after prime matches Director primary',
+      (() => {
+        const lis = require('../services/layoutInputService');
+        const picked = lis.pickPrimaryProductQuote(compiledProduct.productReviews, {
+          productId: productOid,
+          productTitle: compiledProduct.title
+        });
+        return !!(picked && picked.text === ATOM_QUOTE
+          && fed.social_proof_signal.primary_quote
+          && fed.social_proof_signal.primary_quote.text.includes('most comfortable'));
+      })());
+    check('I10 flag-on specs fill from pdpSpecFacts',
+      Array.isArray(fed.product_signal.specs)
+        && fed.product_signal.specs.some((s) => s && String(s.value).includes('Nylon')));
+    check('I11 flag-on marketing_line is store-import merchant slogan',
+      !!(fed.product_signal.marketing_line
+        && fed.product_signal.marketing_line.text
+        && fed.product_signal.marketing_line.text.includes('Built for the water')
+        && fed.product_signal.marketing_line.origin === 'store-import'));
+    check('I12 flag-on content_sufficiency.overall is 4',
+      !!(fed.product_signal.content_sufficiency
+        && fed.product_signal.content_sufficiency.overall === 4));
+    check('I13 flag-on proof quote carries ingest stage',
+      proofQuotes.some((q) => q && q.stage === 'consideration'));
+
+    process.env.CONTENT_ATOM_READ = 'false';
+    inv._resetCache();
+    const offFed = await director.assembleSignals({
+      brandId: '000000000000000000000001',
+      productId: String(productOid),
+      campaignKind: 'product',
+      seededUniverse: []
+    });
+    check('I14 flag-off omits content_sufficiency key',
+      !Object.prototype.hasOwnProperty.call(offFed.product_signal, 'content_sufficiency'));
+    check('I15 flag-off omits marketing_line key',
+      !Object.prototype.hasOwnProperty.call(offFed.product_signal, 'marketing_line'));
+    check('I16 flag-off specs do not fill from pdp facts',
+      Array.isArray(offFed.product_signal.specs) && offFed.product_signal.specs.length === 0);
+
+    process.env.CONTENT_ATOM_READ = 'true';
+    process.env.DIRECTOR_QUOTE_POOL_ALIGNED = 'true';
+    stubInventory();
+    const r4Needle = 'if (productId && contentInventory.contentAtomReadEnabled()) {';
+    await withMutatedSource(
+      SERVICE_PATH,
+      r4Needle,
+      'if (false && productId && contentInventory.contentAtomReadEnabled()) {',
+      async (mutatedDirector) => {
+        inv._resetCache();
+        const skipped = await mutatedDirector.assembleSignals({
+          brandId: '000000000000000000000001',
+          productId: String(productOid),
+          campaignKind: 'product',
+          seededUniverse: []
+        });
+        const skippedText = skipped.social_proof_signal
+          && skipped.social_proof_signal.primary_quote
+          && skipped.social_proof_signal.primary_quote.text;
+        check('R-R4 skipping loadInventory ranks Mixed, not the atom',
+          typeof skippedText === 'string' && skippedText.includes('Mixed-path loafers'));
+        console.log('\n── R-R4 revert transcript ──');
+        console.log(JSON.stringify({
+          atomQuote: ATOM_QUOTE,
+          mixedQuote: MIXED_QUOTE,
+          skippedPrimary: skippedText
+        }, null, 2));
+        console.log('── end R-R4 ──\n');
+      }
+    );
   } finally {
     restore();
   }

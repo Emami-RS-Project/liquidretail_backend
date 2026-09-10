@@ -576,7 +576,7 @@ async function buildMetaForAd(ad, brand, opts = {}) {
       // Without it the cascade's catalogProduct.shortBenefits source is
       // permanently undefined (silent .select() omission) and video falls
       // through to a stale LayoutInputArtifact.
-      catalogProduct = await CatalogProduct.findById(ad.productId).select('title description price rating productReviews imageUrl titleStyleSpec categoryRef recentQuoteKeys lastQuoteRunId lastQuoteFingerprint shortBenefits').lean();
+      catalogProduct = await CatalogProduct.findById(ad.productId).select('title description price rating productReviews imageUrl titleStyleSpec categoryRef recentQuoteKeys lastQuoteRunId lastQuoteFingerprint shortBenefits contentIndex pdpMaterialFacts pdpSpecFacts pdpFaqAnswers marketingLine marketingLineSource').lean();
     } catch { /* optional */ }
   }
 
@@ -665,7 +665,14 @@ async function buildMetaForAd(ad, brand, opts = {}) {
     resolveMeta, mergeCascades, buildContext,
     DEFAULT_META_CASCADES,
   } = require('./metaCascadeResolver');
-  const context = buildContext({ ad, brand, catalogProduct, layoutInput, catalogMedias, igCredential });
+  let contentAtoms = null;
+  if (process.env.CONTENT_ATOM_READ === 'true' && catalogProduct && catalogProduct.contentIndex && catalogProduct.contentIndex.compiledAt) {
+    try {
+      const inv = await require('./contentInventory').loadInventory(catalogProduct._id);
+      contentAtoms = (inv && inv.benefits) || [];
+    } catch { contentAtoms = []; }
+  }
+  const context = buildContext({ ad, brand, catalogProduct, layoutInput, catalogMedias, igCredential, contentAtoms });
   const merged  = mergeCascades(DEFAULT_META_CASCADES, brand?.metaCascades || null);
   const cascaded = resolveMeta(merged, context);
 
@@ -929,10 +936,16 @@ async function buildMetaForAd(ad, brand, opts = {}) {
   // written together by enrichment) — never averaged from CatalogProduct
   // rows, never the layoutInput brand-fallback pair (that exists only so a
   // no-SKU ad isn't blank; the video path always has this real snapshot).
-  const brandSnapshot = brand?.brandReviews && typeof brand.brandReviews === 'object'
+  let brandSnapshot = brand?.brandReviews && typeof brand.brandReviews === 'object'
     ? { rating: brand.brandReviews.rating ?? null, reviewCount: brand.brandReviews.reviewCount ?? null }
     : null;
   const brandAttribution = brandAttributionLabel(brand);
+
+  {
+    const swapped = require('./contentInventory').applyAtomRatingPairs(catalogProduct, productSnapshot, brandSnapshot);
+    productSnapshot = swapped.product;
+    brandSnapshot = swapped.brand;
+  }
 
   const coherent = resolveCoherentSocialProof({
     quote: pq || null,
@@ -962,8 +975,37 @@ async function buildMetaForAd(ad, brand, opts = {}) {
   // do the ordinary cascaded values stand. Deliberately fail-closed: a
   // tenant override for proof copy losing to the gated line is a smaller
   // cost than an unsubstantiated number beside a testimonial.
-  const finalQuoteText = coherent.quote ? (coherent.quote.text || null) : (cascaded.quote ?? null);
-  const finalQuoteSnippet = coherent.quote ? (coherent.quote.snippet ?? null) : (cascaded.quoteSnippet ?? null);
+  let finalQuoteText = coherent.quote ? (coherent.quote.text || null) : (cascaded.quote ?? null);
+  let finalQuoteSnippet = coherent.quote ? (coherent.quote.snippet ?? null) : (cascaded.quoteSnippet ?? null);
+  let finalBenefits = cascaded.benefits ?? [];
+  // Fit-before-write (copyBudgets). Flag-off: pixels unchanged; we still
+  // ALARM when the unfitted quote/headline would hit truncateWordSafe.
+  // Flag-on: pick a pre-fitted variant (or drop) so the Remotion clamp no-ops.
+  try {
+    const copyBudgets = require('./copyBudgets');
+    const headlineFormat = classifyFormat(ad);
+    const budgets = copyBudgets.videoBudgets(ad.platformFormat || null, headlineFormat);
+    if (copyBudgets.isFitBeforeWriteEnabled()) {
+      const fitted = copyBudgets.applyFitBeforeWriteToVideoMeta({
+        quote: finalQuoteText,
+        quoteSnippet: finalQuoteSnippet,
+        variants: coherent.quote && coherent.quote.variants,
+        benefits: finalBenefits,
+      }, { platformFormat: ad.platformFormat || null, format: headlineFormat });
+      finalQuoteText = fitted.quote;
+      finalQuoteSnippet = fitted.quoteSnippet;
+      finalBenefits = fitted.benefits;
+      if ((fitted.clampFired && fitted.clampFired.length) || (fitted.sacrificedRoles && fitted.sacrificedRoles.length)) {
+        copyBudgets.recordClamp(ad._id, fitted);
+      }
+    }
+    // Alarm only if the string that will actually paint still exceeds the
+    // cap (flag-off: the unfitted quote; flag-on: a leftover after fit).
+    copyBudgets.noteIfExceedsCap(ad._id, 'quote', finalQuoteText || finalQuoteSnippet, budgets.quote);
+    copyBudgets.noteIfExceedsCap(ad._id, 'headline', cascaded.headline, budgets.headline);
+  } catch (err) {
+    console.warn(`   ⚠️  copyBudgets[ad=${ad && ad._id}]: ${err && err.message} — keeping unfitted quote`);
+  }
 
   // deliveryLine and promoText share their two highest-priority sources
   // (ad.copy.offer_text, then layoutInput.input.cta.offer_text), so any ad
@@ -1007,6 +1049,36 @@ async function buildMetaForAd(ad, brand, opts = {}) {
   const gatedBadges = substantiateBadges(cascaded.badges, claimEvidence);
   const gatedDeliveryLine = substantiateBadge(cascaded.deliveryLine ?? null, claimEvidence);
 
+  // Advertiser claim ceiling on headline + benefits. The badge gate above
+  // is unchanged (unclassified pass-through, including UPF-without-facts).
+  // Flag-off: identity. Quotes stay on toPrintableCustomerQuote.
+  let gatedHeadline = cascaded.headline ?? null;
+  let gatedBenefits = finalBenefits;
+  {
+    const {
+      claimCeilingEnforced,
+      loadAdvertiserClaimCorpus,
+      applyClaimCeilingToText,
+      applyClaimCeilingToList,
+    } = require('./advertiserClaimCorpus');
+    if (claimCeilingEnforced()) {
+      let corpus;
+      try {
+        corpus = await loadAdvertiserClaimCorpus({
+          brandId: (brand && (brand._id || brand.id)) || ad.brandId,
+          productId: ad.productId,
+          brand,
+          product: catalogProduct,
+        });
+      } catch (_) {
+        corpus = { spans: [], absent: true, assembledAt: new Date() };
+      }
+      const productId = ad.productId || null;
+      gatedHeadline = applyClaimCeilingToText(gatedHeadline, corpus, { productId });
+      gatedBenefits = applyClaimCeilingToList(gatedBenefits, corpus, { productId });
+    }
+  }
+
   return {
     // Cascaded fields — every one of these can be re-pointed via
     // Brand.metaCascades[<field>] without a code change. Undefined
@@ -1020,9 +1092,9 @@ async function buildMetaForAd(ad, brand, opts = {}) {
     productNameFull:    productNameCleaned.productNameFull,
     productDescription: cascaded.productDescription ?? null,
     price:              cascaded.price              ?? null,
-    benefits:           cascaded.benefits           ?? [],
+    benefits:           gatedBenefits,
     badges:             gatedBadges,
-    headline:           cascaded.headline           ?? null,
+    headline:           gatedHeadline,
     // quote / quoteSnippet: forced to the chokepoint's verified line when
     // one exists — see the "F4 IMPOSSIBLE BY CONSTRUCTION" comment above.
     quote:              finalQuoteText,

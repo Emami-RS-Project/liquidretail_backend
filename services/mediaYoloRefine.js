@@ -179,7 +179,7 @@ function buildOpenVocabPrompt({ title, category, brand } = {}) {
 }
 
 /**
- * Detect YOLO on ONE Media doc and write refinedProducts + yoloProducts +
+ * Detect YOLO on ONE Media doc and write refinedProducts +
  * yoloDetectedAt. Idempotent — short-circuits when refinedProducts is
  * already populated.
  *
@@ -280,13 +280,27 @@ async function detectYoloForMedia(media, { trigger = 'ingest' } = {}) {
     }
   }
 
-  // Persist. yoloProducts stores the raw YOLO output so a future consumer
-  // can re-derive without another YOLO call; refinedProducts is what most
-  // consumers read.
+  // Persist. refinedProducts is what every consumer reads.
+  //
+  // `yoloProducts` is deliberately NOT written here. It was, until
+  // 2026-09-08, with a comment claiming it stored raw output "so a future
+  // consumer can re-derive without another YOLO call" — that promise was
+  // false twice over: `models/Media.js` does not declare the path, so
+  // Mongoose strict dropped the write in silence (same trap that lost
+  // `veoProvider`/`veoResolution` and `renderError.predictionId`), and no
+  // consumer reads `Media.yoloProducts` anyway — `pickTopYoloProduct`,
+  // `detectInspect` and `catalogProductDraftService` all read it off a
+  // DetectionArtifact, which DOES declare it (`models/DetectionArtifact.js:26`).
+  // Removing the write is behaviour-preserving by construction: a write that
+  // was already being dropped cannot change anything by going away.
+  //
+  // Do NOT "fix" this by declaring yoloProducts on Media — that would begin
+  // persisting raw detections across 75k+ rows for no consumer. If a future
+  // scene/object pass needs detections on Media, give it its OWN declared
+  // field; see the scene-taxonomy design, which says so explicitly.
   await Media.updateOne(
     { _id: media._id },
     { $set: {
-        yoloProducts:    yoloDetections,
         refinedProducts: refined,
         yoloDetectedAt:  new Date()
     } }
@@ -450,8 +464,7 @@ async function detectYoloForMediaBatch(mediaList, { product = null, trigger = 'i
       await Media.updateOne(
         { _id: media._id },
         { $set: {
-            yoloProducts:    yoloDetections,
-            refinedProducts: refined,
+                refinedProducts: refined,
             yoloDetectedAt:  new Date()
         } }
       );

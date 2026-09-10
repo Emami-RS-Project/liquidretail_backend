@@ -68,6 +68,24 @@ function isEmpty(v) {
 function extractSource(source, context) {
   if (!source || typeof source !== 'object') return undefined;
   if (source.type === 'literal') return source.value;
+  if (source.type === 'atoms') {
+    const wanted = (source.filter && source.filter.type) || 'benefit';
+    const atoms = Array.isArray(context && context.contentAtoms)
+      ? context.contentAtoms
+      : (context && context.contentInventory && Array.isArray(context.contentInventory.atoms)
+        ? context.contentInventory.atoms
+        : null);
+    if (!atoms || !atoms.length) return undefined;
+    const texts = [];
+    for (const a of atoms) {
+      if (!a) continue;
+      if (a.status && a.status !== 'active') continue;
+      if (a.type !== wanted) continue;
+      const t = typeof a.text === 'string' ? a.text.replace(/\s+/g, ' ').trim() : '';
+      if (t) texts.push(t);
+    }
+    return texts.length ? texts : undefined;
+  }
   if (source.type === 'doc') {
     if (!CONTEXT_DOC_NAMES.has(source.doc)) return undefined;
     const doc = context[source.doc];
@@ -211,7 +229,7 @@ function validateBrandOverrides(overrides) {
 // via pickProductOnlyUrl) so the productOnlyImageUrl cascade stays purely
 // declarative.
 
-function buildContext({ ad = null, brand = null, catalogProduct = null, layoutInput = null, catalogMedias = [], igCredential = null } = {}) {
+function buildContext({ ad = null, brand = null, catalogProduct = null, layoutInput = null, catalogMedias = [], igCredential = null, contentAtoms = null, contentInventory = null } = {}) {
   const productOnlyMedia = (catalogMedias || [])
     .find((m) => m?.classification?.shotType === 'product_only' && m?.fileUrl) || null;
   return {
@@ -221,6 +239,8 @@ function buildContext({ ad = null, brand = null, catalogProduct = null, layoutIn
     layoutInput:              layoutInput || null,
     catalogMediaProductOnly:  productOnlyMedia,
     igCredential:             igCredential || null,
+    contentAtoms:             contentAtoms || null,
+    contentInventory:         contentInventory || null,
   };
 }
 

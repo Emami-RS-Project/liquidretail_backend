@@ -348,6 +348,12 @@ async function refreshOne({ productId, allowHeadless = null }) {
 
   await CatalogProduct.updateOne({ _id: product._id }, { $set: setOps });
 
+  // $0, flag-gated. This writer does not go through captureForProduct, so
+  // the scrape-service hook cannot cover it. Compile has no LLM.
+  if (process.env.CONTENT_ATOM_COMPILE === 'true') {
+    require('./contentCompiler').scheduleForProduct({ productId: product._id });
+  }
+
   return {
     ok: true,
     productId:  String(product._id),

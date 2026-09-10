@@ -15,6 +15,10 @@
 //   3. GET {store}/products/{handle}  (HTML)
 //        JSON-LD blocks (application/ld+json) for aggregateRating + review[]
 //        injected by review apps (judge.me, yotpo, loox, stamped, okendo).
+//        Same parse pass (flag-gated) also reads Product.slogan /
+//        additionalProperty and description <table>s for marketingLine +
+//        pdpSpecFacts, plus labelled Material: / feature lists / FAQ JSON-LD
+//        (same SPECS_FROM_PDP gate) — zero extra HTTP.
 //
 // Rate-limit posture (empirically verified):
 //   Shopify's Cloudflare edge 429s penalized datacenter/cloud IPs and the
@@ -454,6 +458,8 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted, uncapped } =
   const shotSession = ingestShotClassify.createSession();
   const pendingClassify = [];
   const pendingBenefits = [];
+  const pendingCompile = [];
+  const pendingMarketingFlash = [];
   let midUpsertCancelled = false;
   // Universal ingest cap (2026-09-02, services/ingestLimits.js). Bounded
   // by CATALOG_INGEST_LIMIT env; defaults to 10 rows per pass. Stops the
@@ -538,6 +544,9 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted, uncapped } =
       );
       const doc = upsertResult?.value || upsertResult;
       benefits.collectAfterCatalogUpsert(upsertResult, pendingBenefits, { changed: benefitsStale });
+      if (process.env.CONTENT_ATOM_COMPILE === 'true' && doc && doc._id) {
+        pendingCompile.push(doc._id);
+      }
       productsUpserted += 1;
       persistedCount += 1;
 
@@ -871,15 +880,89 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted, uncapped } =
       const rev = reviewsEngine.extractOnPageReviews(html);
       const productReviews = reviewsEngine.buildProductReviews(rev);
 
+      const $set = {};
       if (productReviews) {
-        const $set = { productReviews };
+        $set.productReviews = productReviews;
         if (productReviews.rating != null) $set.rating = productReviews.rating;
+      }
 
+      // Same HTML, flag-gated. Parser strictly === 'true' — unset / "false"
+      // / "TRUE" leave Stage 3 byte-identical to the reviews-only write.
+      const wantLine = process.env.PRODUCT_MARKETING_LINE === 'true';
+      const wantSpecs = process.env.SPECS_FROM_PDP === 'true';
+      if (wantLine || wantSpecs) {
+        const pdp = require('./pdpContentExtractService');
+        const descriptionHtml = p.body_html || '';
+        const descriptionText = stripHtml(descriptionHtml || p.description, 2000) || '';
+        const productUrl = `${origin}/products/${encodeURIComponent(p.handle)}`;
+        const forbiddenLines = brand && brand.tagline ? [brand.tagline] : [];
+        if (wantLine) {
+          const line = pdp.extractMarketingLine({
+            html,
+            description: descriptionText,
+            forbiddenLines,
+          });
+          if (line.marketingLine) {
+            $set.marketingLine = line.marketingLine;
+            $set.marketingLineSource = line.source;
+          } else {
+            // Consult the EXISTING row — a decided-empty SKU carries
+            // marketingLineDerivedAt and must not re-enter the flash
+            // queue on nightly resync. Fail-open on a lookup throw:
+            // enqueueMarketingLineFlash re-reads and derive still
+            // refuses a stamped product (second gate).
+            let existing = null;
+            try {
+              existing = await CatalogProduct.findOne({ brandId: brand._id, externalId: String(p.id) })
+                .select('marketingLine marketingLineDerivedAt')
+                .lean();
+            } catch (_) { existing = null; }
+            if (pdp.shouldEnqueueMarketingLineFlash(existing, descriptionText)) {
+              pendingMarketingFlash.push({
+                brandId: brand._id,
+                externalId: String(p.id),
+                title: p.title || null,
+                description: descriptionText,
+                forbiddenLines,
+              });
+            }
+          }
+        }
+        if (wantSpecs) {
+          const specs = pdp.extractPdpSpecFacts({
+            html,
+            descriptionHtml,
+            productUrl,
+          });
+          if (specs.facts.length) {
+            $set.pdpSpecFacts = specs.facts;
+            $set.pdpSpecFactsSource = specs.source;
+          }
+          const materials = pdp.extractPdpMaterialFacts({
+            descriptionHtml,
+            productUrl,
+          });
+          if (materials.facts.length) {
+            $set.pdpMaterialFacts = materials.facts;
+            $set.pdpMaterialFactsSource = materials.source;
+          }
+          const faqs = pdp.extractPdpFaqAnswers({
+            html,
+            productUrl,
+          });
+          if (faqs.facts.length) {
+            $set.pdpFaqAnswers = faqs.facts;
+            $set.pdpFaqAnswersSource = faqs.source;
+          }
+        }
+      }
+
+      if (Object.keys($set).length) {
         await CatalogProduct.updateOne(
           { brandId: brand._id, externalId: String(p.id) },
           { $set }
         );
-        reviewsCaptured += 1;
+        if (productReviews) reviewsCaptured += 1;
       } else if (rev.platform) {
         // Widget present but nothing structured to read — the store has
         // its review app's rich snippets turned off. Worth a log line:
@@ -1000,6 +1083,16 @@ async function syncBrandShopifyDirect(brand, run, { isBrandAborted, uncapped } =
   require('./productBenefitsService').enqueueFromPending({
     pending: pendingBenefits, brand, backgroundWork
   });
+  if (process.env.PRODUCT_MARKETING_LINE === 'true') {
+    require('./pdpContentExtractService').enqueueMarketingLineFlash({
+      pending: pendingMarketingFlash, backgroundWork
+    });
+  }
+  if (process.env.CONTENT_ATOM_COMPILE === 'true') {
+    require('./contentCompiler').enqueueFromPending({
+      pending: pendingCompile, backgroundWork
+    });
+  }
 
   const durationMs = Date.now() - t0;
   console.log(
@@ -1079,5 +1172,11 @@ module.exports = {
   resolveStoreOrigin,
   mapShopifyProductImages,
   mapShopifyNormalizedToFlat,
-  RAW_DATA_CAP_BYTES
+  RAW_DATA_CAP_BYTES,
+  // Same fetch Stage 3 uses — backfillPdpContent must not hand-roll a twin.
+  politeFetch,
+  pace,
+  PACE_MS,
+  UA,
+  REQUEST_TIMEOUT_MS,
 };

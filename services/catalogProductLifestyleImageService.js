@@ -172,7 +172,8 @@ async function generateOne({ productId }) {
   await CatalogProduct.updateOne({ _id: product._id }, {
     $set: {
       lifestyle_image: lifestyleUrl,
-      updatedAt: new Date()
+      // was `updatedAt` — not a path on this schema, so strict dropped it
+      lifestyleImageAt: new Date()
     }
   });
 

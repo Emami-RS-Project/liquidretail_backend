@@ -623,6 +623,13 @@ export const Canonical = ({ format = 'feed', safeZoneKey = null, platformFormat 
             // pmax_video_*) — inert for vertical/feed/square/landscape/
             // stories. See resolveSurfaceSafeWidthPx in slotContent.js.
             safeZoneKey: zoneKey,
+            onClamp: (ev) => {
+              try {
+                console.warn(
+                  `[clamp] ${ev.kind} slot=${ev.slot} ${ev.fromChars}→${ev.toChars} cap=${ev.cap} method=${ev.method || ''}`
+                );
+              } catch (_) { /* never fail paint */ }
+            },
           };
           const content = resolveSlotContent(rawSlot, meta, allSlots, capCtx);
           resolvedByRawSlot.set(rawSlot, { content, usableWidthPx, fontPx, maxLines: capCtx.maxLines });
@@ -677,6 +684,15 @@ export const Canonical = ({ format = 'feed', safeZoneKey = null, platformFormat 
         const fitPlan = boxHeightPx != null
           ? planGroupFit({ rows: fitRows, boxHeightPx, rowGapPx })
           : { scale: 1, dropReviewsRowId: null, droppedRowIds: new Set() };
+        if (fitPlan.scale < 1
+          || fitPlan.dropReviewsRowId
+          || (fitPlan.droppedRowIds && fitPlan.droppedRowIds.size)) {
+          try {
+            console.warn(
+              `[clamp] stackFit scale=${fitPlan.scale} dropReviews=${fitPlan.dropReviewsRowId || ''} droppedRows=${[...(fitPlan.droppedRowIds || [])].join(',')}`
+            );
+          } catch (_) { /* never fail paint */ }
+        }
 
         return (
           <div

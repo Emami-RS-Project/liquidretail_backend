@@ -57,12 +57,14 @@ if (!productId) {
     return;
   }
 
-  // Step 1: wipe refinedProducts + yoloProducts + yoloDetectedAt on all
+  // Step 1: wipe refinedProducts + yoloDetectedAt on all
   // this product's Media. yoloFailReason is left alone — a "permanent"
   // marker should still keep the Media out of automatic retry queues.
   const wipe = await Media.updateMany(
     { _id: { $in: mediaIds } },
-    { $set: { refinedProducts: [], yoloProducts: [], yoloDetectedAt: null } }
+    // yoloProducts is NOT a declared Media path (it lives on
+    // DetectionArtifact) — clearing it here was a no-op Mongoose dropped.
+    { $set: { refinedProducts: [], yoloDetectedAt: null } }
   );
   console.log(`\n  Wiped: matched=${wipe.matchedCount} modified=${wipe.modifiedCount}`);
 

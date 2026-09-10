@@ -695,8 +695,8 @@ console.log('H. callers invoke applyStagedQuotePick (the live pick)');
     /pickPrimaryProductQuote\(product\?\.productReviews, opts/.test(ads));
   check('H8 productQuotesForDirector is the shared pool helper',
     /function productQuotesForDirector/.test(ads));
-  check('H9 DIRECTOR_SIGNALS_VERSION bumped past 3.4.0 (3.6.0 brand_signal.personas)',
-    /const DIRECTOR_SIGNALS_VERSION = '3\.6\.0'/.test(ads));
+  check('H9 DIRECTOR_SIGNALS_VERSION bumped past 3.4.0 (3.7.0 content_sufficiency / marketing_line / pdp specs)',
+    /const DIRECTOR_SIGNALS_VERSION = '3\.7\.0'/.test(ads));
 }
 
 // ══════════════════════════════════════════════════════════════════

@@ -65,9 +65,28 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-          cache-dependency-path: package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            adgen/package-lock.json
 
       - run: npm ci
+
+      # verifyContentAtomDualRead.js is the first backend-glob harness that
+      # live-require()s adgen source for a real dual-tree parity comparison,
+      # rather than reading it as text (every prior parity/drift check does
+      # fs.readFileSync + regex/AST, never requires the module). Without
+      # adgen's own node_modules, adgen/src/models/*.js resolve `mongoose`
+      # by walking up to the ROOT install (adgen has no node_modules of its
+      # own here), so the SAME mongoose singleton ends up asked to register
+      # e.g. `Media` twice -- once by backend's models/Media.js, once by
+      # adgen's twin -- and mongoose.model() throws OverwriteModelError on
+      # the second call. Root `npm ci` alone was sufficient for every harness
+      # that existed before this one; installing adgen's own dependencies
+      # (a separate npm project, its own package-lock.json) gives adgen's
+      # requires their own isolated mongoose instance, matching this repo's
+      # existing "always npm ci inside adgen/" rule (CLAUDE.md, adgen/CLAUDE.md)
+      # -- this job just never needed to follow it before.
+      - run: npm ci --prefix adgen
 
       - run: npm run lint
 

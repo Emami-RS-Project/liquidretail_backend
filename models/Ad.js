@@ -590,6 +590,15 @@ const adSchema = new mongoose.Schema({
   //   { include, maxItems, phase, reason, size, profile, source }
   // Mixed → callers MUST markModified('videoTitleDirection').
   videoTitleDirection: { type: mongoose.Schema.Types.Mixed, default: null },
+  // Fit-before-write backstop telemetry (Lane B). A clamp that still fires
+  // after budgeting is a miss — recorded fire-and-forget by copyBudgets.recordClamp,
+  // never on the render await path. Shape:
+  //   { clampFired: [{ slot, kind, fromChars, toChars, cap, method, at }],
+  //     sacrificedRoles: [string], updatedAt }
+  // Mixed → callers that mutate in place MUST markModified('clampTelemetry').
+  // Strict schema: an undeclared path is silently dropped (same trap as
+  // renderError.predictionId / veoProvider).
+  clampTelemetry: { type: mongoose.Schema.Types.Mixed, default: null },
   // Operator INPUT fields for video prompt — distinct from the render-time
   // audit outputs veoPrompt / veoModel above. Guidance merges into
   // buildVeoPrompt as the operatorPrompt prepend; raw fully replaces the

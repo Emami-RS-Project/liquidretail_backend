@@ -41,6 +41,8 @@ const path = require('path');
 const {
   classify,
   parseAssertedCount,
+  parsePerformanceAttribute,
+  performanceAttributeMeetsFacts,
   hasStrongSignal,
   substantiateBadges,
   substantiateBadge,
@@ -223,6 +225,64 @@ check('H1 substantiateBadges tolerates non-array / non-string / empty candidates
 check('H2 substantiateBadges tolerates malformed evidence (NaN/strings/missing)', () => {
   assertArrayEq(substantiateBadges(['Best seller'], { rating: 'high', reviewCount: '100' }), []);
   assertArrayEq(substantiateBadges(['Best seller'], undefined), []);
+});
+
+// ── I. performance_attribute — evidence-gated like review_volume; badge
+// path without PDP facts keeps today's unclassified pass-through ─────────
+check('I1 classify("UPF 50+ Protection") is performance_attribute, not unclassified', () => {
+  assert(classify('UPF 50+ Protection') === 'performance_attribute', classify('UPF 50+ Protection'));
+});
+check('I2 E1 badge path UNCHANGED: UPF still kept when evidence has no PDP-fact key', () => {
+  const kept = substantiateBadges(['UPF 50+ Protection'], { rating: null, reviewCount: null });
+  assertArrayEq(kept, ['UPF 50+ Protection']);
+});
+check('I3 UPF KEPT when pdpMaterialFacts carry a matching UPF 50+ row', () => {
+  const kept = substantiateBadges(['UPF 50+ Protection'], {
+    rating: null,
+    reviewCount: null,
+    pdpMaterialFacts: [{ kind: 'labelled', key: 'Sun Protection', value: 'UPF 50+' }],
+  });
+  assertArrayEq(kept, ['UPF 50+ Protection']);
+});
+check('I4 UPF DROPPED when PDP facts are present but do not meet the asserted value (fail closed)', () => {
+  const kept = substantiateBadges(['UPF 50+ Protection'], {
+    rating: null,
+    reviewCount: null,
+    pdpMaterialFacts: [{ kind: 'labelled', key: 'Material', value: '100% Cotton' }],
+  });
+  assertArrayEq(kept, []);
+});
+check('I5 empty pdpMaterialFacts array is "facts supplied" — fail closed, not pass-through', () => {
+  const kept = substantiateBadges(['UPF 50+ Protection'], {
+    rating: null,
+    reviewCount: null,
+    pdpMaterialFacts: [],
+  });
+  assertArrayEq(kept, []);
+});
+check('I6 UPF 30 fact does not license UPF 50 (asserted value must not exceed evidence)', () => {
+  const kept = substantiateBadges(['UPF 50'], {
+    pdpMaterialFacts: [{ key: 'UPF', value: '30' }],
+  });
+  assertArrayEq(kept, []);
+});
+check('I7 UPF 50+ fact DOES license a weaker UPF 50 claim', () => {
+  assert(performanceAttributeMeetsFacts('UPF 50', {
+    pdpMaterialFacts: [{ key: 'UPF', value: 'UPF 50+' }],
+  }) === true);
+});
+check('I8 parsePerformanceAttribute("UPF 50+ Protection") → upf/50', () => {
+  const p = parsePerformanceAttribute('UPF 50+ Protection');
+  assert(p && p.attr === 'upf' && p.value === 50, JSON.stringify(p));
+});
+check('I9 parsePerformanceAttribute("waterproof to 10m") → waterproof/10/m', () => {
+  const p = parsePerformanceAttribute('waterproof to 10m');
+  assert(p && p.attr === 'waterproof' && p.value === 10, JSON.stringify(p));
+});
+check('I10 unclassified strings are unchanged by the new category', () => {
+  assert(classify('All-Day Comfort') === 'unclassified');
+  assert(classify('100% Cotton') === 'unclassified');
+  assert(classify('Machine Washable') === 'unclassified');
 });
 
 const total = pass + failures.length;

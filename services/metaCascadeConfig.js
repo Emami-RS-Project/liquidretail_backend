@@ -23,6 +23,29 @@
 
 'use strict';
 
+function contentAtomReadEnabled() {
+  return process.env.CONTENT_ATOM_READ === 'true';
+}
+
+// Pre-change benefits cascade. Flag-off DEFAULT_META_CASCADES.benefits is
+// this array (sliced); flag-on prepends the atoms source. Never mutate.
+const LEGACY_BENEFITS_CASCADE = [
+  // CatalogProduct.shortBenefits is the same source the static Director
+  // reads (assembleSignals). LayoutInput is a fallback for historical
+  // artifacts derived before the catalog field existed.
+  { type: 'doc', doc: 'catalogProduct', path: 'shortBenefits' },
+  { type: 'doc', doc: 'layoutInput', path: 'input.product.short_benefits' },
+  { type: 'doc', doc: 'layoutInput', path: 'input.product.benefits' },
+  { type: 'literal', value: [] },
+];
+
+function defaultBenefitsCascade() {
+  if (contentAtomReadEnabled()) {
+    return [{ type: 'atoms', filter: { type: 'benefit' } }].concat(LEGACY_BENEFITS_CASCADE);
+  }
+  return LEGACY_BENEFITS_CASCADE.slice();
+}
+
 const DEFAULT_META_CASCADES = {
   // ── Identity ─────────────────────────────────────────────────────
   brandName: [
@@ -151,15 +174,10 @@ const DEFAULT_META_CASCADES = {
     { type: 'doc', doc: 'layoutInput', path: 'input.product.badges' },
     { type: 'literal', value: [] },
   ],
-  benefits: [
-    // CatalogProduct.shortBenefits is the same source the static Director
-    // reads (assembleSignals). LayoutInput is a fallback for historical
-    // artifacts derived before the catalog field existed.
-    { type: 'doc', doc: 'catalogProduct', path: 'shortBenefits' },
-    { type: 'doc', doc: 'layoutInput', path: 'input.product.short_benefits' },
-    { type: 'doc', doc: 'layoutInput', path: 'input.product.benefits' },
-    { type: 'literal', value: [] },
-  ],
+  // Getter: CONTENT_ATOM_READ === 'true' prepends the atoms source.
+  // Flag-off returns the pre-change array (no atoms entry at all — an
+  // inert-but-present entry is not byte-identical). See defaultBenefitsCascade.
+  get benefits() { return defaultBenefitsCascade(); },
   productOnlyImageUrl: [
     // catalogMediaProductOnly is pre-picked before resolution: the first
     // Media with classification.shotType === 'product_only'. Overridable
@@ -240,4 +258,7 @@ module.exports = {
   CASCADED_FIELDS,
   CONTEXT_DOC_NAMES,
   FIELD_LABELS,
+  LEGACY_BENEFITS_CASCADE,
+  defaultBenefitsCascade,
+  contentAtomReadEnabled,
 };

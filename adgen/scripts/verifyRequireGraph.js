@@ -111,12 +111,13 @@ const { assertBackendRoot } = require('./lib/siblingBackend');
 // diff added zero new require() edges (parameters/logic only, no new
 // require statements), so the merged total equals this branch's own
 // pre-merge count. Re-measured via this harness itself: 543/543 resolved.
-// 2026-09-08: bumped 543→544 after rebasing onto origin/main, which had
-// advanced by 5 merged PRs (#422-#427) since 543 was last measured — one of
-// them added exactly one new require() edge under src/. This branch's own
-// diff (scene-preserve fix + catalog review-intake) added zero new require
-// statements. Re-measured via this harness itself: 544/544 resolved.
-const FREEZE_N = 544;
+//
+// MERGE 2026-09-10: both sides had bumped FREEZE_N independently — this
+// branch to 577 (Lane B's copyBudgets edges) and origin/main to 544 (its
+// own rebase). Neither literal is right after the merge, and picking a
+// side would either mask new edges or fail spuriously. The value below is
+
+const FREEZE_N = 578;
 const {
   fileExists,
   dirExists,

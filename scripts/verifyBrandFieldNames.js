@@ -603,7 +603,6 @@ const CATALOG_SELECT_ALLOWLIST = new Map([
   // session.d/2026-09-07_catalog-product-info-scrape.md.
   ['createdAt',    'routes/catalog.js: schema sets no `timestamps`, so this is only present on rows some other writer stamped'],
   ['productImages', 'catalogProductLifestyleImageService: no writer anywhere in the repo — almost certainly fully dead'],
-  ['lifestyle_image', 'catalogProductLifestyleImageService: written on layoutInput/spec objects, not on CatalogProduct'],
   ['size',         'routes/catalog.js: not declared; likely a legacy variant field'],
 ]);
 

@@ -69,7 +69,16 @@ const integrationCredentialSchema = new mongoose.Schema({
   lastCatalogSyncAt:  Date,
   lastPostsSyncAt:    Date,
   // Ad Platforms Phase B-1 — populated by campaignSyncService.
-  lastCampaignSyncAt: Date
+  lastCampaignSyncAt: Date,
+
+  // Last campaign-sync failure breadcrumb. Mongoose strict drops
+  // undeclared paths silently — declare in BOTH trees. Cleared on a
+  // successful sync. lastCampaignSyncAlertedAt is the de-dupe stamp so
+  // a 6-hourly version-rejected failure does not Slack 4×/day.
+  lastCampaignSyncError:      String,
+  lastCampaignSyncErrorAt:    Date,
+  lastCampaignSyncErrorClass: String,
+  lastCampaignSyncAlertedAt:  Date
 });
 
 // V2 #5 — multi-page support. Compound unique index on
