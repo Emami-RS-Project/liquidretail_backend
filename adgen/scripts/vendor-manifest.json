@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "24405a03f890cd602d6bd0420fc5935ed12faea1",
-  "generatedAt": "2026-09-10T20:09:52.660Z",
+  "backendHead": "decf1612da32e4bea257c7abb9b58007832c0272",
+  "generatedAt": "2026-09-11T01:21:45.650Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "985917248f3a750387aede4184b0bad540c13215b6f4decf4d15d7476b63016f",
@@ -917,10 +917,10 @@
     },
     "services/directImageRenderService.js": {
       "backendHash": "7b43a590bbad5d12951813c8694da4f058981b31e5105c9086528484b6395146",
-      "adgenHash": "8176e23b347bfb07de309fec39f408dd08c6730337819dafbaefac6634bb6639",
+      "adgenHash": "ae5c03eb7dd2a45161b745786b516880a30e5207c7a4c15e69d65483701e6909",
       "backendSha": "0966924ad0ab7875dc5ca0ff3c9785826435e9bf",
       "status": "fork",
-      "reason": "Held fork (adgen owns the static render path; not a wholesale copy). This PR adds the claim-ceiling gate at buildIntentData's return and unions the CatalogProduct .select() with the T2 evidence fields. MERGE NOTE 2026-09-10: main independently added description to the same select for describeProductForPrompt; resolved as the UNION of both, since an omitted .select() path is permanently undefined with no error."
+      "reason": "subject-aware static logo placement: pick the lowest-overlap inset-box corner against a local luminance-variance heuristic on the delivered frame (fail-open to today's bottom-right); identical fix applied to backend's copy in the same change; finishPlate now decodes the delivered frame once and shares it between estimateBusiestCorner and the pre-existing behindLuminance sample instead of decoding twice; see scripts/verifyLogoSubjectAwarePlacement.js"
     },
     "services/faceSafeCrop.js": {
       "backendHash": "986126268359d4f9d28f8b8075e930689a541cf369025ffbe83c9a2f61cf90a5",
