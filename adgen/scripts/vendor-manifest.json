@@ -1,8 +1,8 @@
 {
   "version": 2,
   "backendRef": "origin/main",
-  "backendHead": "decf1612da32e4bea257c7abb9b58007832c0272",
-  "generatedAt": "2026-09-11T01:21:45.650Z",
+  "backendHead": "6d522d0de19966f40be3901c014c7da302ac94d8",
+  "generatedAt": "2026-09-11T01:47:02.186Z",
   "files": {
     "models/Ad.js": {
       "backendHash": "985917248f3a750387aede4184b0bad540c13215b6f4decf4d15d7476b63016f",
@@ -916,11 +916,11 @@
       "owedSince": null
     },
     "services/directImageRenderService.js": {
-      "backendHash": "7b43a590bbad5d12951813c8694da4f058981b31e5105c9086528484b6395146",
+      "backendHash": "2e0486c8bc55a5a16fad81cbfe864f6464698a008b45320df861b585be1f4fb6",
       "adgenHash": "ae5c03eb7dd2a45161b745786b516880a30e5207c7a4c15e69d65483701e6909",
-      "backendSha": "0966924ad0ab7875dc5ca0ff3c9785826435e9bf",
+      "backendSha": "6d522d0de19966f40be3901c014c7da302ac94d8",
       "status": "fork",
-      "reason": "subject-aware static logo placement: pick the lowest-overlap inset-box corner against a local luminance-variance heuristic on the delivered frame (fail-open to today's bottom-right); identical fix applied to backend's copy in the same change; finishPlate now decodes the delivered frame once and shares it between estimateBusiestCorner and the pre-existing behindLuminance sample instead of decoding twice; see scripts/verifyLogoSubjectAwarePlacement.js"
+      "reason": "subject-aware static logo placement (backend #443, 6d522d0d): logoPlacementFor takes an optional subjectBox and scores the four inset-box corners by overlap, falling open to bottom-right when absent; helpers candidateLogoBoxAndCorners/rectOverlapArea/normalizeSubjectBox/estimateBusiestCorner are present and identical in BOTH trees, pinned by verifyLogoSubjectAwarePlacement.js in each. Re-look only: the prior checkpoint was recorded at 0966924a before #443 squash-merged, so it went stale on its own merge; verified the sole commit touching this path in 0966924a..6d522d0d is #443 itself. Still status=fork because adgen's copy is not a wholesale copy of backend's (pre-existing divergence retained)."
     },
     "services/faceSafeCrop.js": {
       "backendHash": "986126268359d4f9d28f8b8075e930689a541cf369025ffbe83c9a2f61cf90a5",
