@@ -1082,7 +1082,17 @@ const LOGO_SAFE_MARGIN_PCT = {
   pmax_16_9:             { top: 0.10, bottom: 0.10, left: 0.075, right: 0.075 }  // safeZones.landscape
 };
 
-function logoPlacementFor({ surface, dims, logoW, logoH }) {
+/**
+ * Pure geometry: the inset placement box plus the four candidate logo
+ * rectangles that sit in its corners. Arithmetic is the 2026-08-24
+ * floor ∩ QC-box ∩ LOGO_INSET_FRAC path, copied verbatim — this function
+ * does not change where those corners ARE, only exposes them so a later
+ * chooser can pick among them.
+ *
+ * Returns null on the same early-outs logoPlacementFor has always had
+ * (non-positive logo size, or the inset box cannot hold the mark).
+ */
+function candidateLogoBoxAndCorners({ surface, dims, logoW, logoH }) {
   const box = safeBoxInDeliveredPx(surface, dims);
   // Clamp the BOX into the delivered frame before placing anything in it, rather
   // than clamping the result afterwards. Clamping afterwards can shove the mark
@@ -1116,9 +1126,153 @@ function logoPlacementFor({ surface, dims, logoW, logoH }) {
   bottom -= inset;
   if (!(logoW > 0 && logoH > 0)) return null;
   if (right - left < logoW || bottom - top < logoH) return null;
-  // Bottom-right of the inset box. Strictly inside the QC box and the
-  // platform floor by construction (inset ≥ 1px on every live canvas).
-  return { top: bottom - logoH, left: right - logoW, width: logoW, height: logoH };
+  return {
+    corners: {
+      bottomRight: { top: bottom - logoH, left: right - logoW, width: logoW, height: logoH },
+      bottomLeft:  { top: bottom - logoH, left,                 width: logoW, height: logoH },
+      topRight:    { top,                 left: right - logoW,  width: logoW, height: logoH },
+      topLeft:     { top,                 left,                 width: logoW, height: logoH },
+    }
+  };
+}
+
+/**
+ * Axis-aligned overlap area of a {top,left,width,height} rect against a
+ * {left,top,right,bottom} box. Each axis is clamped to >= 0 before the
+ * multiply so disjoint rectangles yield 0, never a negative.
+ */
+function rectOverlapArea(rect, box) {
+  const overlapW = Math.max(0, Math.min(rect.left + rect.width, box.right) - Math.max(rect.left, box.left));
+  const overlapH = Math.max(0, Math.min(rect.top + rect.height, box.bottom) - Math.max(rect.top, box.top));
+  return overlapW * overlapH;
+}
+
+/**
+ * Defensive parse of an optional subject box. Returns a clean
+ * {left,top,right,bottom} or null. Anything that is not a plain object
+ * with four finite numbers, or that is degenerate/inverted
+ * (`right <= left || bottom <= top`), is null — never a throw. Callers
+ * that cannot prove a usable box degrade to today's bottom-right
+ * placement rather than guessing.
+ */
+function normalizeSubjectBox(subjectBox) {
+  if (subjectBox == null || typeof subjectBox !== 'object' || Array.isArray(subjectBox)) return null;
+  const { left, top, right, bottom } = subjectBox;
+  if (![left, top, right, bottom].every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
+  if (right <= left || bottom <= top) return null;
+  return { left, top, right, bottom };
+}
+
+/**
+ * Place the composited logomark inside the inset safe box.
+ *
+ * Default (no usable `subjectBox`) is byte-identical to the pre-change
+ * behaviour: bottom-right of the inset box. `subjectBox` is additive
+ * only — omit it, pass null, pass undefined, or pass anything
+ * `normalizeSubjectBox` rejects, and the return is the same
+ * `{ top: bottom - logoH, left: right - logoW, width, height }` the
+ * function has always produced. That is the fail-open contract: a
+ * missing or malformed subject must never move the mark.
+ *
+ * When a usable box is supplied, the four corner candidates are scored
+ * by overlap area with it and the LOWEST-overlap corner wins. The
+ * walk order is bottomRight → bottomLeft → topRight → topLeft, so a
+ * box that overlaps every corner equally (including zero overlap
+ * everywhere — a dead-center subject, or a box that misses the logo
+ * entirely) keeps today's default via the tie-break. The chosen
+ * corner is still a corner of the same inset box, so the 2026-08-24
+ * QC-margin / platform-floor guarantees still hold.
+ */
+function logoPlacementFor({ surface, dims, logoW, logoH, subjectBox }) {
+  const geo = candidateLogoBoxAndCorners({ surface, dims, logoW, logoH });
+  if (!geo) return null;
+  const { corners } = geo;
+  const box = normalizeSubjectBox(subjectBox);
+  if (!box) return corners.bottomRight; // <-- byte-identical to today, always, when no box
+  const order = ['bottomRight', 'bottomLeft', 'topRight', 'topLeft'];
+  let best = order[0];
+  let bestOverlap = rectOverlapArea(corners[best], box);
+  for (let i = 1; i < order.length; i++) {
+    const overlap = rectOverlapArea(corners[order[i]], box);
+    if (overlap < bestOverlap) { bestOverlap = overlap; best = order[i]; }
+  }
+  return corners[best];
+}
+
+/**
+ * Local, $0, in-process heuristic for "which of the four candidate logo
+ * corners is occupied by the subject?" — NOT a real detector.
+ *
+ * Why a heuristic, and why that's fine: the delivered pixels are a fresh
+ * gpt-image-2/edit frame (`rendered` inside finishPlate). Seed-time
+ * `Media.refinedProducts[]` bboxes describe the REFERENCE image, which
+ * the edit call can and does reframe, so they would be scoring the wrong
+ * picture. A live YOLO call (`yoloService` / the self-hosted
+ * microservice) would be a new synchronous network hop + a new failure
+ * mode on every static render, which this path is not licensed to add.
+ * What this function does instead is score each candidate corner by
+ * local luminance variance on the actual delivered frame, using sharp
+ * (already a dependency; the same raw-decode idiom `behindLuminance`
+ * uses a few lines below, because `.extract(region).stats()` chained
+ * without a re-encode silently returns whole-image stats on this sharp
+ * version). A plain background (sky, seamless studio floor/wall) is
+ * low-variance; skin, hair, fabric folds and product edges are
+ * high-variance — the same salience signal libvips' attention/entropy
+ * smart-crop gravity is built on, which this file already treats as
+ * prior art.
+ *
+ * Never throws. A failed decode, an empty geometry, or an ambiguous
+ * read (no corner at least CORNER_VARIANCE_MARGIN times busier than
+ * the runner-up) returns null so logoPlacementFor keeps today's
+ * bottom-right. Fail-open on purpose: a wrong-corner move is worse
+ * than leaving the historical default.
+ *
+ * Optional `decoded` ({data, info} from a prior `sharp(rendered)
+ * .greyscale().raw()` decode) lets the caller skip a second full-frame
+ * decode of the SAME buffer — `finishPlate` decodes `rendered` once and
+ * reuses it here and for `behindLuminance` below, rather than decoding
+ * the whole delivered frame twice per ad. Omit it (or pass a falsy
+ * value) and this decodes `rendered` itself, unchanged.
+ */
+const CORNER_VARIANCE_MARGIN = 1.15; // busiest must beat runner-up by >=15%
+
+async function estimateBusiestCorner({ rendered, surface, dims, logoW, logoH, decoded }) {
+  try {
+    const geo = candidateLogoBoxAndCorners({ surface, dims, logoW, logoH });
+    if (!geo) return null;
+    const { data, info } = decoded || await sharp(rendered).greyscale().raw()
+      .toBuffer({ resolveWithObject: true });
+    const varianceOf = (rect) => {
+      const x0 = Math.max(0, Math.min(rect.left, info.width - 1));
+      const y0 = Math.max(0, Math.min(rect.top, info.height - 1));
+      const w = Math.max(1, Math.min(rect.width, info.width - x0));
+      const h = Math.max(1, Math.min(rect.height, info.height - y0));
+      let sum = 0, count = 0;
+      for (let y = y0; y < y0 + h; y++) {
+        for (let x = x0; x < x0 + w; x++) { sum += data[(y * info.width + x) * info.channels]; count++; }
+      }
+      if (!count) return 0;
+      const mean = sum / count;
+      let sq = 0;
+      for (let y = y0; y < y0 + h; y++) {
+        for (let x = x0; x < x0 + w; x++) {
+          const v = data[(y * info.width + x) * info.channels];
+          sq += (v - mean) * (v - mean);
+        }
+      }
+      return sq / count;
+    };
+    const scored = Object.entries(geo.corners)
+      .map(([key, rect]) => [key, varianceOf(rect)])
+      .sort((a, b) => b[1] - a[1]);
+    const [busiestKey, busiestVar] = scored[0];
+    const secondVar = scored[1] ? scored[1][1] : 0;
+    if (!(busiestVar > 0) || busiestVar < secondVar * CORNER_VARIANCE_MARGIN) return null;
+    const rect = geo.corners[busiestKey];
+    return { left: rect.left, top: rect.top, right: rect.left + rect.width, bottom: rect.top + rect.height };
+  } catch {
+    return null; // fail-open — never block or alter a render on a failed/ambiguous read
+  }
 }
 
 /**
@@ -2265,11 +2419,28 @@ async function finishPlate({ rawFrame, built, dims, genSize, surface, adId, logo
       // mark occupies less than the box and placing by the box would leave it
       // floating off the corner it was promised.
       const lm = await sharp(logoPng).metadata();
+      // Decode `rendered` to greyscale raw ONCE and share it between the
+      // subject-corner heuristic and the behindLuminance sample below —
+      // both used to independently re-decode the same delivered-frame
+      // buffer. Best-effort: a failed shared decode (should not happen on
+      // our own just-produced PNG, but this is defensive) leaves this
+      // null, and both consumers below fall back to decoding it
+      // themselves, exactly as before this change.
+      let renderedGreyDecoded = null;
+      try {
+        renderedGreyDecoded = await sharp(rendered).greyscale().raw()
+          .toBuffer({ resolveWithObject: true });
+      } catch { renderedGreyDecoded = null; }
+      const subjectBox = await estimateBusiestCorner({
+        rendered, surface: built.surface, dims, logoW: lm.width, logoH: lm.height,
+        decoded: renderedGreyDecoded
+      });
       const place = logoPlacementFor({
         surface: built.surface,
         dims,
         logoW: lm.width,
-        logoH: lm.height
+        logoH: lm.height,
+        subjectBox
       });
       if (place) {
         // Monochrome the mark against whatever the model actually rendered in
@@ -2299,8 +2470,8 @@ async function finishPlate({ rawFrame, built, dims, genSize, surface, adId, logo
           const ry = Math.max(0, Math.min(place.top, dims.height - 1));
           const rw = Math.max(1, Math.min(lm.width, dims.width - place.left));
           const rh = Math.max(1, Math.min(lm.height, dims.height - place.top));
-          const { data: renderedGrey, info: renderedInfo } = await sharp(rendered)
-            .greyscale().raw().toBuffer({ resolveWithObject: true });
+          const { data: renderedGrey, info: renderedInfo } = renderedGreyDecoded
+            || await sharp(rendered).greyscale().raw().toBuffer({ resolveWithObject: true });
           let regionSum = 0, regionCount = 0;
           for (let y = ry; y < ry + rh; y++) {
             for (let x = rx; x < rx + rw; x++) {
@@ -3360,6 +3531,10 @@ module.exports = {
   safeBoxInDeliveredPx,
   extractFor,
   logoPlacementFor,
+  candidateLogoBoxAndCorners,
+  rectOverlapArea,
+  normalizeSubjectBox,
+  estimateBusiestCorner,
   logoResizeBox,
   logoInsetPx,
   LOGO_BOX_FRAC,
